@@ -1,0 +1,19 @@
+#!/bin/sh
+# Fake gc for the headless tests: never the real one.
+#   gc cities --json  prints $FAKE_GC_CITIES (a file) and exits $FAKE_GC_CITIES_EXIT;
+#                     with $FAKE_GC_CITIES_HANG set it sleeps that many seconds first,
+#                     as this process, so a kill reaches the sleep itself.
+#   anything else     records its argv, NUL-separated, to $FAKE_GC_LOG, prints
+#                     $FAKE_GC_STDERR on stderr and exits $FAKE_GC_EXIT.
+if [ "$1" = cities ]; then
+  if [ -n "${FAKE_GC_CITIES_HANG:-}" ]; then
+    exec sleep "$FAKE_GC_CITIES_HANG"
+  fi
+  cat "$FAKE_GC_CITIES"
+  exit "${FAKE_GC_CITIES_EXIT:-0}"
+fi
+printf '%s\0' "$@" > "$FAKE_GC_LOG"
+if [ -n "${FAKE_GC_STDERR:-}" ]; then
+  printf '%s\n' "$FAKE_GC_STDERR" >&2
+fi
+exit "${FAKE_GC_EXIT:-0}"
