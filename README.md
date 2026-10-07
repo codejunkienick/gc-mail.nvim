@@ -1,10 +1,12 @@
 # gc-mail.nvim
 
-Mail the current Neovim buffer to a Gas City mayor. `<Space>mm` (or
-`:GcMail`) opens a small picker with one line per city registered with the gc
-supervisor, at once; `<CR>` puts the buffer in an on-disk send queue, clears
-it, and gc sends it in the background. Requires Neovim 0.10 or newer and `gc`
-on `PATH`; no other plugins.
+Mail the current Neovim buffer to a Gas City mayor, and read the mail sent to
+you. `<Space>mm` (or `:GcMail`) opens a small picker with one line per city
+registered with the gc supervisor, at once; `<CR>` puts the buffer in an
+on-disk send queue, clears it, and gc sends it in the background. `<Space>mi`
+(or `:GcMailbox`) opens the mailbox: the mail addressed to you (`human`) in
+every city, to open, reply to, mark, archive or delete. Requires Neovim 0.10
+or newer and `gc` on `PATH`; no other plugins.
 
 ## Install
 
@@ -24,11 +26,11 @@ vim.opt.runtimepath:append('/path/to/checkout/tools/gc-mail.nvim')
 require('gc_mail').setup()
 ```
 
-`:GcMail` and `:GcMailQueue` exist as soon as the directory is on the
-runtimepath; `setup()` adds the mapping, and once Neovim has finished starting
-it resumes the send queue and preloads the city list with one background
-`gc cities --json`. Nothing runs while the plugin loads, so startup time is
-unchanged.
+`:GcMail`, `:GcMailQueue` and `:GcMailbox` exist as soon as the directory is
+on the runtimepath; `setup()` adds the mappings, and once Neovim has finished
+starting it resumes the send queue and preloads the city list with one
+background `gc cities --json`. Nothing runs while the plugin loads, so startup
+time is unchanged; the mailbox lists mail only when you open it.
 
 ## Options
 
@@ -37,18 +39,32 @@ unchanged.
 | `keymap` | `'<Space>mm'` | normal-mode mapping that opens the picker; `false` sets none |
 | `state_dir` | `stdpath('state') .. '/gc-mail'` | the queue lives in `<state_dir>/queue/` |
 | `retry_ms` | `{ 10000, 60000, 300000 }` | delays before each retry of a failed send |
+| `mailbox_keymap` | `'<Space>mi'` | normal-mode mapping that opens the mailbox; `false` sets none |
+| `subject_prefix` | `''` | text put before the subject of every message the plugin sends, e.g. `'[Nick] '` |
+| `subject_suffix` | `''` | text put after it, e.g. `' (nvim)'` |
+| `check_ms` | `false` | `false`: no timer. A number of ms, at least `60000`: the new-mail check below |
+
+`setup()` refuses (raises an error) a prefix or suffix with a control
+character, the two together over 40 characters, and a `check_ms` that is
+neither `false` nor at least a minute.
 
 ## Use
 
 1. Write the message in any buffer. The first non-empty line, trimmed to 72
-   characters, is the subject; the whole buffer is the body.
+   characters, is the subject; the whole buffer is the body. With
+   `subject_prefix` or `subject_suffix` set, the subject is labelled with
+   them exactly once (a copy of either already in the line, as in a reply to
+   a labelled message, is taken out first), and the label counts in the 72
+   characters. gc files order and script mail as `human` too, so the label
+   is what tells a mayor your own mail apart.
 2. `<Space>mm`. The picker opens at once and lists `<city>  mayor` for each
    city from the cached `gc cities --json`, also when there is only one, while
    the list is fetched again in the background (the newer list replaces it
    when it arrives). Before the first answer it shows `loading…` and fills in.
    `j`/`k` or the arrow keys move, `<CR>` sends, `<Esc>` or `q` cancels.
 3. `<CR>` writes the message to the queue and only then empties the buffer
-   (marked unmodified, `queued for <city> mayor`); the clear is one undo
+   (marked unmodified, `queued for <city> mayor: <subject>`, the subject as
+   sent, label included); the clear is one undo
    step, so `u` brings the text back. If the queue file cannot be written the
    buffer stays as it was and the error is shown. If the buffer cannot be
    cleared after all, the message stays queued and is sent once, the buffer
@@ -75,6 +91,91 @@ answer it keeps that list and says once that the refresh failed.
 The picker is sized to its cities and never taller than the editor minus the
 command line and its border, so it works in a window 10 lines tall; more
 cities than fit scroll.
+
+## The mailbox
+
+`<Space>mi` (or `:GcMailbox`) opens a float like the picker's, at once: one
+line per message, newest first, across every city of the cached
+`gc cities --json` list:
+
+```text
+ ● imd-city  mayor  Re: mailbox for gc-mail  5m
+   imd-city  mayor  Deploy plan accepted  2h
+```
+
+`●` marks unread mail; the columns are city, sender, subject and age. The
+float's title is the key hint. While it is open, the plugin runs one
+
+```sh
+gc --city <city path> mail inbox human --json
+```
+
+per city in the background (10 s timeout, argument lists, never a shell); a
+city the refreshed city list adds is listed once when it arrives, and `R`
+lists every city again. A failing gc, one that does not answer, or an answer
+the decoder refuses (I1) is shown once as an error and changes nothing on
+screen.
+
+Two invariants hold every gc answer to what it may change:
+
+- **I1, decode.** Every `gc mail <command> --json` answer the mailbox acts on
+  (`inbox`, `thread`, `read`, `count`, `mark-read`, `mark-unread`, `archive`,
+  `delete`) passes the one decoder of its shape before anything reads it. The
+  decoder requires every field the plugin reads, with its type, as
+  `gc --json-schema=result mail <command>` documents it: each message's `id`,
+  `from`, `to`, `subject`, `body`, `created_at` and `read`; message ids and
+  thread ids that match the whole id gc prints (`ab-wisp-1x2y3z`, `ab-1x2y3z`,
+  `thread-` and hex); counts that are non-negative integers; an action answer
+  that names its command (`mail.archive`), its action and the message; a
+  thread answer whose `thread_id` is a `thread-` id (the one asked for, when
+  a thread was asked for). The id a call puts in its argument list passes
+  the same check first, so nothing that could read as an option ever reaches
+  gc.
+- **I2, apply.** An answer that changes what the mailbox shows or keeps is
+  applied only while it is still current for its message. An action answer
+  (read, mark read or unread, archive, delete) is dropped when a later action
+  on the same message started after its call; an inbox answer leaves out
+  every message acted on since its call started. A late answer therefore
+  never brings back a message you archived or deleted, never recreates its
+  kept copy, and never undoes a later mark.
+
+| key | action | gc |
+| --- | --- | --- |
+| `<CR>` | open the message in a new window: headers, then the body | `mail read <id>` (marks it read; nothing for mail already read) |
+| `r` | reply: a new buffer with `Re: <subject>`; `<Space>mm` (or `:GcMail`) in it queues the reply | `mail reply <id> -s <subject> -m <body> --notify`, from the send queue |
+| `t` | the thread, oldest first, in a new window | `mail thread <thread id>` |
+| `m` | mark read | `mail mark-read <id>` |
+| `u` | mark unread | `mail mark-unread <id>` |
+| `a` | archive | `mail archive <id>` |
+| `d` | delete, after a Yes/No question | `mail delete <id>` |
+| `R` | list every city again (ignored while a listing is still running) | `mail inbox human`, once per city |
+| `q`, `<Esc>` | close | |
+
+Each action names only the message under the cursor and is shown as an error
+when gc refuses it. The opened message has the same keys (`r`, `t`, `u`, `a`,
+`d`, and `q` to close the window).
+
+**How long read mail stays.** `gc mail inbox` lists unread mail only, and gc
+1.4.1 has no command that lists read mail. gc also closes read mail by itself:
+its nudge-mail-sweep (a controller watchdog every 5 minutes, and the core
+`nudge-mail-sweep` order) closes every read message sent more than an hour
+ago, and `gc mail thread` then leaves it out. So the mailbox keeps a copy of
+every message you open or mark read here: one JSON file per message in
+`<state_dir>/mailbox/` (written whole: temp file, fsync, rename), listed until
+you archive or delete it in the mailbox, across restarts. A mayor's answer
+therefore stays in the mailbox after you read it. Mail read elsewhere (with
+`gc mail read` in a terminal) is not copied and leaves the mailbox when gc
+closes it. Marking a kept message unread marks it unread in gc and in the
+copy.
+
+**Replies** go through the send queue like any message: the reply is on disk
+before its buffer is cleared, failed sends are retried, `:GcMailQueue` lists
+it as `<city> <sender>`, and the reply buffer stops being one once queued.
+
+**New-mail check.** Off by default: no timer runs. With `check_ms` set (at
+least 60000), every `check_ms` while Neovim has focus (`FocusGained` and
+`FocusLost`) it runs one `gc --city <path> mail count human --json` per city
+and says `<n> unread mail in <city>` when a city's unread count grows.
 
 ## The send queue
 
@@ -152,8 +253,11 @@ the real gc never runs:
 nvim --headless --clean -n -l tools/gc-mail.nvim/tests/run.lua
 ```
 
-The fake answers `gc cities` after a delay or not at all, and fails a send a
-given number of times; the tests point the queue and `XDG_STATE_HOME` at a
+The fake answers `gc cities` after a delay or not at all, fails a send a
+given number of times, and answers each mailbox command (`inbox`, `count`,
+`read`, `mark-read`, `mark-unread`, `thread`, `archive`, `delete`) from a
+fixture per command and city, failing, hanging, answering late or printing
+malformed JSON on request (I1 and I2 each have their own tests); the tests point the queue and `XDG_STATE_HOME` at a
 scratch directory and use millisecond retry delays. Failing disk calls are
 simulated by wrapping `vim.uv` functions; the lock rule is checked by probing
 the lock at every change to a queue file, and `tests/add_many.lua` is a second

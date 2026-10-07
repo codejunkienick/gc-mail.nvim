@@ -126,8 +126,20 @@ end
 
 local FIELDS = {
   version = true, city = true, subject = true, body = true, created = true, attempts = true, next_at = true,
-  failed = true, last_error = true, delivered = true,
+  failed = true, last_error = true, delivered = true, reply_to = true, to = true,
 }
+
+-- The ids gc 1.4.1 prints, matched whole: a mail id is a bead id (ab-1x2y3z)
+-- or a wisp id (ab-wisp-1x2y3z), a thread id is thread-<hex> (gc's
+-- generateThreadID). Neither can ever parse as an option or a path.
+function M.mail_id(text)
+  return type(text) == 'string' and #text <= 100
+    and (text:match('^%l[%l%d]*%-[%l%d]+$') ~= nil or text:match('^%l[%l%d]*%-wisp%-[%l%d]+$') ~= nil)
+end
+
+function M.thread_id(text)
+  return type(text) == 'string' and #text <= 100 and text:match('^thread%-%x+$') ~= nil
+end
 
 local function whole(n)
   return type(n) == 'number' and n >= 0 and n == math.floor(n)
@@ -169,7 +181,23 @@ local function invalid(record)
   if record.delivered ~= nil and type(record.delivered) ~= 'boolean' then
     return 'bad delivered'
   end
+  -- A reply names the message it answers and, for display, its sender.
+  if record.reply_to ~= nil or record.to ~= nil then
+    if not M.mail_id(record.reply_to) then
+      return 'bad reply_to'
+    end
+    if type(record.to) ~= 'string' or record.to == '' or record.to:find('[%z\1-\31\127]') then
+      return 'bad to'
+    end
+  end
 end
+
+--- Who a record goes to, for messages: `<city> mayor`, or `<city> <sender>`
+--- for a reply.
+function M.who(record)
+  return ('%s %s'):format(record.city.name, record.to or 'mayor')
+end
+local who = M.who
 
 local function read(name)
   local fd, err = uv.fs_open(path(name), 'r', 0)
@@ -372,9 +400,9 @@ function M.list()
   return entries(names)
 end
 
---- Queues `message` ({ subject, body }) for `city` ({ name, path }). Returns
---- the id, or nil and the reason (the queue is full, busy or unreadable, or
---- the write failed).
+--- Queues `message` ({ subject, body, and for a reply reply_to and to }) for
+--- `city` ({ name, path }). Returns the id, or nil and the reason (the queue is
+--- full, busy or unreadable, or the write failed).
 function M.add(city, message)
   if not config.dir then
     return nil, 'no queue directory'
@@ -383,10 +411,15 @@ function M.add(city, message)
   worker.seq = (worker.seq + 1) % 100000
   local id = ('%010d%06d-%05d-%s'):format(sec, usec, worker.seq, vim.text.hexencode(uv.random(4)))
   local name = id .. '.json'
-  local temp, err = stage(name, {
+  local record = {
     version = 1, city = { name = city.name, path = city.path }, subject = message.subject, body = message.body,
-    created = sec, attempts = 0, next_at = 0, failed = false,
-  })
+    created = sec, attempts = 0, next_at = 0, failed = false, reply_to = message.reply_to, to = message.to,
+  }
+  local bad = invalid(record)
+  if bad then
+    return nil, 'cannot queue the message: ' .. bad
+  end
+  local temp, err = stage(name, record)
   if not temp then
     return nil, 'cannot write the queue file: ' .. tostring(err)
   end
@@ -499,11 +532,11 @@ local function settle(wait_ms)
   if busy then
     return false, true
   end
-  local name = held.record.city.name
+  local name = who(held.record)
   if ok then
     worker.held = nil
     if held.notified then
-      config.notify(('the queue file of the message to %s mayor is in order again'):format(name))
+      config.notify(('the queue file of the message to %s is in order again'):format(name))
     end
     return true
   end
@@ -512,17 +545,17 @@ local function settle(wait_ms)
     -- Rule 3 cannot hold: the claim ages, and once it is older than twice
     -- the send timeout another Neovim may take it back.
     held.stale_notified = true
-    config.notify(('cannot keep the claim on the message to %s mayor young (%s); another Neovim may send it again after %d s')
+    config.notify(('cannot keep the claim on the message to %s young (%s); another Neovim may send it again after %d s')
       :format(name, held.stale, math.floor(2 * config.send_timeout_ms / 1000)), vim.log.levels.ERROR)
   end
   if not held.notified then
     held.notified = true
     local message
     if held.kind == 'delete' then
-      message = ('sent to %s mayor, but cannot remove its queue file (%s); %s'):format(name, tostring(err),
+      message = ('sent to %s, but cannot remove its queue file (%s); %s'):format(name, tostring(err),
         held.marked and 'it is marked sent, removal retried' or 'removal retried, a restart before that sends it again')
     else
-      message = ('cannot record the failed send to %s mayor (%s); the queue waits until it is written'):format(name,
+      message = ('cannot record the failed send to %s (%s); the queue waits until it is written'):format(name,
         tostring(err))
     end
     config.notify(message, vim.log.levels.ERROR)
@@ -537,7 +570,7 @@ local function send(pick)
   local function finish(code, detail)
     worker.busy = false
     if code == 0 then
-      config.notify(('sent to %s mayor'):format(record.city.name))
+      config.notify(('sent to %s'):format(who(record)))
       worker.held = { kind = 'delete', id = pick.id, claimed = pick.claimed, record = record, tries = 0 }
     else
       record.attempts = record.attempts + 1
@@ -546,10 +579,10 @@ local function send(pick)
       record.failed = delay == nil
       record.next_at = delay and (now_ms() + delay) or 0
       if record.attempts == 1 then
-        config.notify(('send to %s mayor failed (%s)%s; retrying in the background'):format(record.city.name,
+        config.notify(('send to %s failed (%s)%s; retrying in the background'):format(who(record),
           'exit ' .. code, detail ~= '' and (':\n' .. detail) or ''), vim.log.levels.ERROR)
       elseif record.failed then
-        config.notify(('gave up sending to %s mayor after %d tries; :GcMailQueue to retry'):format(record.city.name,
+        config.notify(('gave up sending to %s after %d tries; :GcMailQueue to retry'):format(who(record),
           record.attempts), vim.log.levels.ERROR)
       end
       worker.held = { kind = 'record', id = pick.id, claimed = pick.claimed, record = record, tries = 0 }

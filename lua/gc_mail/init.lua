@@ -1,4 +1,5 @@
--- gc-mail.nvim: mail the current buffer to a Gas City mayor.
+-- gc-mail.nvim: mail the current buffer to a Gas City mayor, and read the mail
+-- addressed to you.
 --
 -- <Space>mm (or :GcMail) opens a small floating picker of the cities
 -- registered with the gc supervisor, at once: the list comes from a cache
@@ -6,7 +7,9 @@
 -- every open. Choosing a city writes the message to the on-disk queue
 -- (gc_mail.queue) and only then clears the buffer; the queue's worker runs
 --   gc --city <path> mail send mayor -s <subject> -m <body> --notify
--- in the background, in order, with retries. Nothing runs at load time.
+-- in the background, in order, with retries. In a reply buffer the same keys
+-- queue the reply instead (gc mail reply). <Space>mi (or :GcMailbox) opens
+-- the mailbox (gc_mail.mailbox). Nothing runs at load time.
 local queue = require('gc_mail.queue')
 
 local M = {}
@@ -18,12 +21,23 @@ local defaults = {
   state_dir = vim.fn.stdpath('state') .. '/gc-mail',
   -- Delays (ms) before each retry of a failed send; then it is marked failed.
   retry_ms = { 10000, 60000, 300000 },
+  -- Normal-mode mapping that opens the mailbox; false sets none (:GcMailbox works).
+  mailbox_keymap = '<Space>mi',
+  -- Added to the subject of every message the plugin sends, new mail and
+  -- replies, exactly once and within the 72-character limit; '' adds nothing.
+  subject_prefix = '',
+  subject_suffix = '',
+  -- false: no timer. A number of ms (at least 60000): while Neovim has focus,
+  -- one `gc mail count` per city that often, and a notice when unread mail grows.
+  check_ms = false,
 }
 
 M.config = vim.deepcopy(defaults)
 M.queue = queue
 
 local SUBJECT_MAX = 72
+-- The label may take at most this many of the 72 characters.
+local LABEL_MAX = 40
 -- Linux refuses one argv string over 128 KiB (MAX_ARG_STRLEN); stay below it
 -- so a huge buffer gets a clear message instead of a spawn error.
 local BODY_MAX_BYTES = 120 * 1024
@@ -36,9 +50,26 @@ end
 
 local first_lines = queue.first_lines
 
+--- `subject` with the configured prefix and suffix, exactly once: any copy of
+--- either already in it (a reply to a labelled message) is taken out first,
+--- and the rest is cut so the whole stays within 72 characters.
+function M.label(subject, opts)
+  opts = opts or M.config
+  local prefix, suffix = opts.subject_prefix or '', opts.subject_suffix or ''
+  local core = subject
+  for _, part in ipairs({ prefix, suffix }) do
+    if part ~= '' then
+      core = core:gsub(vim.pesc(part), '')
+    end
+  end
+  core = vim.trim(core)
+  local room = SUBJECT_MAX - vim.fn.strchars(prefix) - vim.fn.strchars(suffix)
+  return prefix .. vim.fn.strcharpart(core, 0, room) .. suffix
+end
+
 --- The message a buffer would send: { subject, body }, or nil and the reason.
---- A buffer that cannot be cleared after queueing is refused too: sending it
---- again unchanged would mail it twice.
+--- The subject is labelled (M.label). A buffer that cannot be cleared after
+--- queueing is refused too: sending it again unchanged would mail it twice.
 function M.message(buf)
   local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
   local body = table.concat(lines, '\n')
@@ -54,7 +85,7 @@ function M.message(buf)
   local subject
   for _, line in ipairs(lines) do
     if vim.trim(line) ~= '' then
-      subject = vim.fn.strcharpart(vim.trim(line), 0, SUBJECT_MAX)
+      subject = M.label(vim.trim(line))
       break
     end
   end
@@ -158,21 +189,30 @@ function M.cached_cities()
   return cache.cities
 end
 
---- gc's argv for one send; never a shell string.
+--- gc's argv for one send, or for a reply when `message.reply_to` is set;
+--- never a shell string.
 function M.argv(city, message)
+  if message.reply_to then
+    return { 'gc', '--city', city.path, 'mail', 'reply', message.reply_to, '-s', message.subject, '-m', message.body, '--notify' }
+  end
   return { 'gc', '--city', city.path, 'mail', 'send', 'mayor', '-s', message.subject, '-m', message.body, '--notify' }
 end
 
---- Queue `buf` for `city`'s mayor, then clear it. The message is on disk
---- before the buffer changes, and the clear is its own undo step, so `u`
---- brings the text back. A refused or failed queue write leaves the buffer as
---- it was. Returns the queue id, or nil.
-function M.send(buf, city)
+--- Queue `buf` for `city`'s mayor, or as a reply when `reply` ({ id, to })
+--- is given, then clear it. The message is on disk before the buffer
+--- changes, and the clear is its own undo step, so `u` brings the text back.
+--- A refused or failed queue write leaves the buffer as it was. Returns the
+--- queue id, or nil.
+function M.send(buf, city, reply)
   local message, reason = M.message(buf)
   if not message then
     notify(reason, vim.log.levels.WARN)
     return nil
   end
+  if reply then
+    message.reply_to, message.to = reply.id, reply.to
+  end
+  local who = queue.who({ city = city, to = message.to })
   local id, err = queue.add(city, message)
   if not id then
     notify(err, vim.log.levels.ERROR)
@@ -188,10 +228,14 @@ function M.send(buf, city)
       vim.bo[buf].modified = false
     end
   end)
+  if reply then
+    -- Queued: the buffer is no longer a reply waiting to go, cleared or not.
+    pcall(vim.api.nvim_buf_del_var, buf, 'gc_mail_reply')
+  end
   if cleared then
-    notify(('queued for %s mayor'):format(city.name))
+    notify(('queued for %s: %s'):format(who, message.subject))
   else
-    notify(('queued for %s mayor; the buffer was left as it is (cannot clear it: %s)'):format(city.name,
+    notify(('queued for %s: %s; the buffer was left as it is (cannot clear it: %s)'):format(who, message.subject,
       first_lines(tostring(clear_err), 1)), vim.log.levels.WARN)
   end
   queue.pump()
@@ -214,6 +258,7 @@ end
 
 -- A small bordered float listing `items` with `title`, focused, closed by
 -- <Esc>, q or leaving it. Returns { win, buf, set(items), close(), closed() }.
+-- The mailbox uses it too (M.float).
 local function float(title, items, keys)
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].bufhidden = 'wipe'
@@ -275,6 +320,8 @@ local function float(title, items, keys)
   return picker
 end
 
+M.float = float
+
 local function city_items(cities)
   local items = {}
   for i, city in ipairs(cities) do
@@ -283,13 +330,29 @@ local function city_items(cities)
   return items
 end
 
+--- The reply a buffer is for ({ city, id, to }, set by the mailbox), or nil.
+function M.reply_of(buf)
+  local ok, reply = pcall(vim.api.nvim_buf_get_var, buf, 'gc_mail_reply')
+  if ok and type(reply) == 'table' and type(reply.city) == 'table' and type(reply.city.name) == 'string'
+      and type(reply.city.path) == 'string' and type(reply.id) == 'string' and type(reply.to) == 'string' then
+    return reply
+  end
+end
+
 --- Open the mayor picker for the current buffer. It shows the cached cities
---- (or a loading line) at once and refreshes them in the background.
+--- (or a loading line) at once and refreshes them in the background. In a
+--- reply buffer it queues the reply at once instead: the city and the
+--- message it answers are known.
 function M.open()
   local target = vim.api.nvim_get_current_buf()
   local _, reason = M.message(target)
   if reason then
     return notify(reason, vim.log.levels.WARN)
+  end
+  local reply = M.reply_of(target)
+  if reply then
+    M.send(target, reply.city, reply)
+    return nil
   end
   local shown = cache.cities and #cache.cities > 0 and cache.cities or nil
   local picker = float(' mail buffer to ', shown and city_items(shown) or { LOADING }, {
@@ -324,6 +387,7 @@ function M.open()
 end
 
 local function age(seconds)
+  seconds = math.floor(seconds)
   if seconds < 60 then
     return ('%ds'):format(seconds)
   elseif seconds < 3600 then
@@ -340,6 +404,7 @@ end
 local function one_line(text)
   return (tostring(text):gsub('\r?\n', ' / '):gsub('%c', ' '))
 end
+M.age, M.one_line = age, one_line
 
 --- The :GcMailQueue lines for `entries` (queue.list()), or for `err` when
 --- the queue cannot be read. Each line is one sanitized line.
@@ -357,8 +422,8 @@ function M.queue_lines(entries, now, err)
     else
       local state = record.delivered and 'sent, file not removed' or entry.claimed and 'sending'
         or record.failed and 'failed' or 'pending'
-      local line = (' %s  %s  %s  %s'):format(one_line(record.city.name), one_line(record.subject),
-        age(math.max(0, now - record.created)), state)
+      local line = (' %s  %s  %s  %s'):format(one_line(record.to and queue.who(record) or record.city.name),
+        one_line(record.subject), age(math.max(0, now - record.created)), state)
       if record.last_error then
         line = line .. '  ' .. one_line(record.last_error)
       end
@@ -408,11 +473,39 @@ function M.open_queue()
   }).win
 end
 
+-- Why `opts` cannot be used, or nil. A label with a control character could
+-- not be one subject line; one longer than LABEL_MAX would leave no subject.
+local function invalid_options(opts)
+  for _, key in ipairs({ 'subject_prefix', 'subject_suffix' }) do
+    if type(opts[key]) ~= 'string' or opts[key]:find(CONTROL) then
+      return key .. ' must be a string without control characters'
+    end
+  end
+  if vim.fn.strchars(opts.subject_prefix) + vim.fn.strchars(opts.subject_suffix) > LABEL_MAX then
+    return ('subject_prefix and subject_suffix together are over %d characters'):format(LABEL_MAX)
+  end
+  if opts.check_ms ~= false and (type(opts.check_ms) ~= 'number' or opts.check_ms < 60000) then
+    return 'check_ms must be false or a number of milliseconds of at least 60000'
+  end
+end
+
 function M.setup(opts)
-  M.config = vim.tbl_extend('force', vim.deepcopy(defaults), opts or {})
+  local config = vim.tbl_extend('force', vim.deepcopy(defaults), opts or {})
+  local bad = invalid_options(config)
+  if bad then
+    error('gc-mail: ' .. bad, 2)
+  end
+  M.config = config
   queue.configure({ dir = M.config.state_dir .. '/queue', retry_ms = M.config.retry_ms })
+  -- The mailbox loads when it is first opened; its copies live in
+  -- <state_dir>/mailbox/.
   if M.config.keymap then
     vim.keymap.set('n', M.config.keymap, M.open, { desc = 'Mail the buffer to a gc city mayor' })
+  end
+  if M.config.mailbox_keymap then
+    vim.keymap.set('n', M.config.mailbox_keymap, function()
+      require('gc_mail.mailbox').open()
+    end, { desc = 'Open the gc mailbox' })
   end
   vim.api.nvim_create_user_command('GcMail', function()
     require('gc_mail').open()
@@ -420,10 +513,22 @@ function M.setup(opts)
   vim.api.nvim_create_user_command('GcMailQueue', function()
     require('gc_mail').open_queue()
   end, { desc = 'List the gc-mail send queue', force = true })
-  -- After startup, never during it: resume the queue and preload the cities.
+  vim.api.nvim_create_user_command('GcMailbox', function()
+    require('gc_mail.mailbox').open()
+  end, { desc = 'Open the gc mailbox', force = true })
+  -- check_ms = false stops a check an earlier setup() started (only then is
+  -- the mailbox loaded already).
+  if not M.config.check_ms and package.loaded['gc_mail.mailbox'] then
+    package.loaded['gc_mail.mailbox'].stop_check()
+  end
+  -- After startup, never during it: resume the queue, preload the cities and,
+  -- only when check_ms is set, start the new-mail check.
   local function start()
     queue.resume()
     M.refresh(function() end)
+    if M.config.check_ms then
+      require('gc_mail.mailbox').start_check(M.config.check_ms)
+    end
   end
   if vim.v.vim_did_enter == 1 then
     vim.schedule(start)

@@ -4,6 +4,14 @@
 #                     with $FAKE_GC_CITIES_HANG set it sleeps that many seconds first,
 #                     as this process, so a kill reaches the sleep itself;
 #                     $FAKE_GC_CITIES_DELAY sleeps that long, then answers.
+#   gc --city <path> mail <inbox|count|peek|read|mark-read|mark-unread|thread|archive|delete> ...
+#                     appends its argv (fields split by 0x1f, one call per line) to
+#                     $FAKE_GC_MAIL_LOG and answers from $FAKE_GC_MAIL/<cmd>.<city>.* or
+#                     else <cmd>.*, <city> the path's last part: .json on stdout,
+#                     .stderr on stderr, exit .exit (default 0); .hang sleeps that
+#                     long first, as this process; .delay reads the answer, then
+#                     sleeps that long before it prints it (a slow call that
+#                     answers what was there when it was made).
 #   anything else     records its argv, NUL-separated, to $FAKE_GC_LOG (whole), appends
 #                     "<city path>|<subject>" to $FAKE_GC_SENT, sleeps
 #                     $FAKE_GC_DELAY, prints $FAKE_GC_STDERR on stderr and exits
@@ -18,6 +26,30 @@ if [ "$1" = cities ]; then
   fi
   cat "$FAKE_GC_CITIES"
   exit "${FAKE_GC_CITIES_EXIT:-0}"
+fi
+if [ "$3" = mail ]; then
+  case "$4" in
+    inbox|count|peek|read|mark-read|mark-unread|thread|archive|delete)
+      # One append per call: two calls running at once never mix their lines.
+      line=$(printf '%s\037' "$@")
+      printf '%s\n' "$line" >> "$FAKE_GC_MAIL_LOG"
+      base="$FAKE_GC_MAIL/$4"
+      city=$(basename "$2")
+      for ext in json exit stderr hang delay; do
+        if [ -f "$FAKE_GC_MAIL/$4.$city.$ext" ]; then base="$FAKE_GC_MAIL/$4.$city"; fi
+      done
+      if [ -f "$base.hang" ]; then
+        exec sleep "$(cat "$base.hang")"
+      fi
+      if [ -f "$base.delay" ]; then
+        out=$(cat "$base.json" 2>/dev/null)
+        sleep "$(cat "$base.delay")"
+        printf '%s\n' "$out"
+      elif [ -f "$base.json" ]; then cat "$base.json"; fi
+      if [ -f "$base.stderr" ]; then cat "$base.stderr" >&2; fi
+      exit "$(cat "$base.exit" 2>/dev/null || echo 0)"
+      ;;
+  esac
 fi
 # Written whole (temp, then rename): a test polling the log never reads it empty.
 printf '%s\0' "$@" > "$FAKE_GC_LOG.$$"
