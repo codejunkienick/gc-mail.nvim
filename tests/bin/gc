@@ -2,17 +2,40 @@
 # Fake gc for the headless tests: never the real one.
 #   gc cities --json  prints $FAKE_GC_CITIES (a file) and exits $FAKE_GC_CITIES_EXIT;
 #                     with $FAKE_GC_CITIES_HANG set it sleeps that many seconds first,
-#                     as this process, so a kill reaches the sleep itself.
-#   anything else     records its argv, NUL-separated, to $FAKE_GC_LOG, prints
-#                     $FAKE_GC_STDERR on stderr and exits $FAKE_GC_EXIT.
+#                     as this process, so a kill reaches the sleep itself;
+#                     $FAKE_GC_CITIES_DELAY sleeps that long, then answers.
+#   anything else     records its argv, NUL-separated, to $FAKE_GC_LOG (whole), appends
+#                     "<city path>|<subject>" to $FAKE_GC_SENT, sleeps
+#                     $FAKE_GC_DELAY, prints $FAKE_GC_STDERR on stderr and exits
+#                     $FAKE_GC_EXIT; with $FAKE_GC_FAIL_TIMES=N its first N calls
+#                     (counted in $FAKE_GC_COUNT) exit 1 instead.
 if [ "$1" = cities ]; then
   if [ -n "${FAKE_GC_CITIES_HANG:-}" ]; then
     exec sleep "$FAKE_GC_CITIES_HANG"
   fi
+  if [ -n "${FAKE_GC_CITIES_DELAY:-}" ]; then
+    sleep "$FAKE_GC_CITIES_DELAY"
+  fi
   cat "$FAKE_GC_CITIES"
   exit "${FAKE_GC_CITIES_EXIT:-0}"
 fi
-printf '%s\0' "$@" > "$FAKE_GC_LOG"
+# Written whole (temp, then rename): a test polling the log never reads it empty.
+printf '%s\0' "$@" > "$FAKE_GC_LOG.$$"
+mv -f "$FAKE_GC_LOG.$$" "$FAKE_GC_LOG"
+if [ -n "${FAKE_GC_SENT:-}" ]; then
+  printf '%s|%s\n' "$2" "$7" >> "$FAKE_GC_SENT"
+fi
+if [ -n "${FAKE_GC_DELAY:-}" ]; then
+  sleep "$FAKE_GC_DELAY"
+fi
+if [ -n "${FAKE_GC_FAIL_TIMES:-}" ]; then
+  count=$(( $(cat "$FAKE_GC_COUNT" 2>/dev/null || echo 0) + 1 ))
+  echo "$count" > "$FAKE_GC_COUNT"
+  if [ "$count" -le "$FAKE_GC_FAIL_TIMES" ]; then
+    echo "gc mail send: store unavailable (try $count)" >&2
+    exit 1
+  fi
+fi
 if [ -n "${FAKE_GC_STDERR:-}" ]; then
   printf '%s\n' "$FAKE_GC_STDERR" >&2
 fi

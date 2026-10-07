@@ -1,42 +1,44 @@
 -- gc-mail.nvim: mail the current buffer to a Gas City mayor.
 --
--- <Space>mm (or :GcMail) lists the cities registered with the gc supervisor
--- in a small floating picker; choosing one runs
+-- <Space>mm (or :GcMail) opens a small floating picker of the cities
+-- registered with the gc supervisor, at once: the list comes from a cache
+-- that one background `gc cities --json` fills after startup and refreshes on
+-- every open. Choosing a city writes the message to the on-disk queue
+-- (gc_mail.queue) and only then clears the buffer; the queue's worker runs
 --   gc --city <path> mail send mayor -s <subject> -m <body> --notify
--- and clears the buffer once gc exits 0. Nothing runs at load time.
+-- in the background, in order, with retries. Nothing runs at load time.
+local queue = require('gc_mail.queue')
+
 local M = {}
 
 local defaults = {
   -- Normal-mode mapping; false sets none (:GcMail still works).
   keymap = '<Space>mm',
+  -- Where the queue lives: <state_dir>/queue/.
+  state_dir = vim.fn.stdpath('state') .. '/gc-mail',
+  -- Delays (ms) before each retry of a failed send; then it is marked failed.
+  retry_ms = { 10000, 60000, 300000 },
 }
 
 M.config = vim.deepcopy(defaults)
+M.queue = queue
 
 local SUBJECT_MAX = 72
 -- Linux refuses one argv string over 128 KiB (MAX_ARG_STRLEN); stay below it
 -- so a huge buffer gets a clear message instead of a spawn error.
 local BODY_MAX_BYTES = 120 * 1024
 local CITIES_TIMEOUT_MS = 10000
+local LOADING = ' loading… '
 
 local function notify(message, level)
   vim.notify('gc-mail: ' .. message, level or vim.log.levels.INFO)
 end
 
-local function first_lines(text, count)
-  local lines = {}
-  for line in (text or ''):gmatch('[^\n]+') do
-    if vim.trim(line) ~= '' then
-      lines[#lines + 1] = line
-      if #lines == count then
-        break
-      end
-    end
-  end
-  return table.concat(lines, '\n')
-end
+local first_lines = queue.first_lines
 
 --- The message a buffer would send: { subject, body }, or nil and the reason.
+--- A buffer that cannot be cleared after queueing is refused too: sending it
+--- again unchanged would mail it twice.
 function M.message(buf)
   local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
   local body = table.concat(lines, '\n')
@@ -45,6 +47,9 @@ function M.message(buf)
   end
   if #body > BODY_MAX_BYTES then
     return nil, ('buffer is %d bytes, over the %d byte limit for one message'):format(#body, BODY_MAX_BYTES)
+  end
+  if not vim.bo[buf].modifiable then
+    return nil, 'buffer is not modifiable, so it cannot be cleared after sending'
   end
   local subject
   for _, line in ipairs(lines) do
@@ -56,22 +61,18 @@ function M.message(buf)
   return { subject = subject, body = body }
 end
 
---- The registered cities from `gc cities --json`: a list of { name, path },
---- or nil and the reason. Anything but the documented record is an error, and
---- so is a gc that does not answer within `timeout_ms` (default 10 s).
-function M.cities(timeout_ms)
-  timeout_ms = timeout_ms or CITIES_TIMEOUT_MS
-  local ok, proc = pcall(vim.system, { 'gc', 'cities', '--json' }, { text = true })
-  if not ok then
-    return nil, 'cannot run gc (is it on PATH?)'
-  end
-  local result = proc:wait(timeout_ms)
-  -- On timeout Neovim kills gc with SIGKILL and reports exit 124; it returns
-  -- nil when even the killed child is not reaped in time.
-  if result == nil or (result.code == 124 and result.signal == 9) then
-    if result == nil then
-      pcall(proc.kill, proc, 9)
-    end
+-- A control character (0x00-0x1f, 0x7f): a city name or path with one is
+-- malformed (a picker line cannot hold a line break).
+local CONTROL = '[%z\1-\31\127]'
+
+-- The cities in a finished `gc cities --json` (a vim.system result), or nil
+-- and the reason. Anything but the documented record is an error, and so is a
+-- gc killed at the timeout.
+local function parse_cities(result, timeout_ms)
+  -- On timeout Neovim kills gc (SIGKILL from wait(), SIGTERM from the
+  -- timeout option) and reports exit 124; a nil result is a child not reaped
+  -- even after the kill.
+  if result == nil or (result.code == 124 and (result.signal or 0) ~= 0) then
     return nil, ('gc cities did not answer within %g s'):format(timeout_ms / 1000)
   end
   if result.code ~= 0 then
@@ -91,9 +92,70 @@ function M.cities(timeout_ms)
         or type(city.path) ~= 'string' or city.path == '' then
       return nil, 'gc cities --json listed a city without a name or path'
     end
+    if city.name:find(CONTROL) or city.path:find(CONTROL) then
+      return nil, 'gc cities --json listed a city name or path with a control character'
+    end
     cities[#cities + 1] = { name = city.name, path = city.path }
   end
   return cities
+end
+
+--- The registered cities from `gc cities --json`, waiting for gc: a list of
+--- { name, path }, or nil and the reason. A gc that does not answer within
+--- `timeout_ms` (default 10 s) is killed. The picker never waits on this; it
+--- reads the cache M.refresh() fills.
+function M.cities(timeout_ms)
+  timeout_ms = timeout_ms or CITIES_TIMEOUT_MS
+  local ok, proc = pcall(vim.system, { 'gc', 'cities', '--json' }, { text = true })
+  if not ok then
+    return nil, 'cannot run gc (is it on PATH?)'
+  end
+  local result = proc:wait(timeout_ms)
+  if result == nil then
+    pcall(proc.kill, proc, 9)
+  end
+  return parse_cities(result, timeout_ms)
+end
+
+-- The city list cache: the last good list (nil before the first), and the
+-- callbacks waiting for the refresh in flight.
+local cache = { cities = nil, error = nil, warned = false, waiting = nil }
+
+--- Starts one background `gc cities --json` (joining one already running);
+--- `on_done(cities, err)` runs on the main loop when it ends. A good answer
+--- replaces the cache; a failed one keeps the last good list and records why.
+function M.refresh(on_done, timeout_ms)
+  timeout_ms = timeout_ms or CITIES_TIMEOUT_MS
+  if cache.waiting then
+    cache.waiting[#cache.waiting + 1] = on_done
+    return
+  end
+  cache.waiting = { on_done }
+  local function finish(cities, err)
+    if cities then
+      cache.cities, cache.error, cache.warned = cities, nil, false
+    else
+      cache.error = err
+    end
+    local waiting = cache.waiting
+    cache.waiting = nil
+    for _, fn in ipairs(waiting) do
+      fn(cities, err)
+    end
+  end
+  local ok, err = pcall(vim.system, { 'gc', 'cities', '--json' }, { text = true, timeout = timeout_ms }, function(result)
+    vim.schedule(function()
+      finish(parse_cities(result, timeout_ms))
+    end)
+  end)
+  if not ok then
+    finish(nil, 'cannot run gc (is it on PATH?): ' .. tostring(err))
+  end
+end
+
+--- The cached city list (nil before the first good answer).
+function M.cached_cities()
+  return cache.cities
 end
 
 --- gc's argv for one send; never a shell string.
@@ -101,50 +163,42 @@ function M.argv(city, message)
   return { 'gc', '--city', city.path, 'mail', 'send', 'mayor', '-s', message.subject, '-m', message.body, '--notify' }
 end
 
---- Send `buf` to `city`'s mayor. On exit 0 the buffer is cleared (unless it
---- changed while gc ran, so nothing typed meanwhile is lost); otherwise it is
---- left as it was. `on_done(sent)` runs afterwards on the main loop.
-function M.send(buf, city, on_done)
-  local function done(sent)
-    if on_done then
-      on_done(sent)
-    end
-  end
+--- Queue `buf` for `city`'s mayor, then clear it. The message is on disk
+--- before the buffer changes, and the clear is its own undo step, so `u`
+--- brings the text back. A refused or failed queue write leaves the buffer as
+--- it was. Returns the queue id, or nil.
+function M.send(buf, city)
   local message, reason = M.message(buf)
   if not message then
     notify(reason, vim.log.levels.WARN)
-    return done(false)
+    return nil
   end
-  local tick = vim.api.nvim_buf_get_changedtick(buf)
-  local ok, err = pcall(vim.system, M.argv(city, message), { text = true }, function(result)
-    vim.schedule(function()
-      if result.code ~= 0 then
-        local detail = first_lines(result.stderr, 3)
-        if detail == '' then
-          detail = first_lines(result.stdout, 3)
-        end
-        notify(('send to %s mayor failed (exit %d)%s'):format(city.name, result.code,
-          detail ~= '' and (':\n' .. detail) or ''), vim.log.levels.ERROR)
-        return done(false)
-      end
-      if not vim.api.nvim_buf_is_valid(buf) or vim.api.nvim_buf_get_changedtick(buf) ~= tick then
-        notify(('sent to %s mayor; the buffer changed meanwhile, so it was not cleared'):format(city.name),
-          vim.log.levels.WARN)
-        return done(true)
-      end
+  local id, err = queue.add(city, message)
+  if not id then
+    notify(err, vim.log.levels.ERROR)
+    return nil
+  end
+  -- The message is queued whatever happens to the buffer now: a clear that
+  -- fails leaves the buffer as it is and says so, the queue sends it once.
+  local cleared, clear_err = pcall(function()
+    if vim.api.nvim_buf_is_valid(buf) then
+      -- Close the undo block of earlier edits so the clear undoes on its own.
+      vim.bo[buf].undolevels = vim.bo[buf].undolevels
       vim.api.nvim_buf_set_lines(buf, 0, -1, false, {})
       vim.bo[buf].modified = false
-      notify(('sent to %s mayor'):format(city.name))
-      done(true)
-    end)
+    end
   end)
-  if not ok then
-    notify('cannot run gc (is it on PATH?): ' .. tostring(err), vim.log.levels.ERROR)
-    return done(false)
+  if cleared then
+    notify(('queued for %s mayor'):format(city.name))
+  else
+    notify(('queued for %s mayor; the buffer was left as it is (cannot clear it: %s)'):format(city.name,
+      first_lines(tostring(clear_err), 1)), vim.log.levels.WARN)
   end
+  queue.pump()
+  return id
 end
 
---- Height and position that keep the picker, border included, above the
+--- Height and position that keep a picker, border included, above the
 --- command line in an editor of `lines` rows.
 function M.layout(count, width, lines, columns, cmdheight)
   local room = math.max(1, lines - cmdheight - 2)
@@ -158,43 +212,36 @@ function M.layout(count, width, lines, columns, cmdheight)
   }
 end
 
---- Open the mayor picker for the current buffer.
-function M.open()
-  local target = vim.api.nvim_get_current_buf()
-  local _, reason = M.message(target)
-  if reason then
-    return notify(reason, vim.log.levels.WARN)
-  end
-  local cities, err = M.cities()
-  if not cities then
-    return notify(err, vim.log.levels.ERROR)
-  end
-  if #cities == 0 then
-    return notify('no cities are registered with gc', vim.log.levels.WARN)
-  end
-
-  local width = 0
-  local items = {}
-  for i, city in ipairs(cities) do
-    items[i] = ' ' .. city.name .. '  mayor '
-    width = math.max(width, vim.fn.strdisplaywidth(items[i]))
-  end
-  local title = ' mail buffer to '
-  width = math.max(width, vim.fn.strdisplaywidth(title) + 2)
-  local layout = M.layout(#items, width, vim.o.lines, vim.o.columns, vim.o.cmdheight)
-
+-- A small bordered float listing `items` with `title`, focused, closed by
+-- <Esc>, q or leaving it. Returns { win, buf, set(items), close(), closed() }.
+local function float(title, items, keys)
   local buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, items)
-  vim.bo[buf].modifiable = false
   vim.bo[buf].bufhidden = 'wipe'
+  local function geometry(lines)
+    local width = vim.fn.strdisplaywidth(title) + 2
+    for _, item in ipairs(lines) do
+      width = math.max(width, vim.fn.strdisplaywidth(item))
+    end
+    return M.layout(#lines, width, vim.o.lines, vim.o.columns, vim.o.cmdheight)
+  end
+  local function fill(lines)
+    vim.bo[buf].modifiable = true
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    vim.bo[buf].modifiable = false
+  end
+  fill(items)
+  local layout = geometry(items)
   local win = vim.api.nvim_open_win(buf, true, {
     relative = 'editor', style = 'minimal', border = 'rounded', title = title, title_pos = 'center',
     row = layout.row, col = layout.col, width = layout.width, height = layout.height,
   })
   vim.wo[win].cursorline = true
-
+  local picker = { win = win, buf = buf }
   local closed = false
-  local function close()
+  function picker.closed()
+    return closed or not vim.api.nvim_win_is_valid(win)
+  end
+  function picker.close()
     if not closed then
       closed = true
       if vim.api.nvim_win_is_valid(win) then
@@ -202,29 +249,190 @@ function M.open()
       end
     end
   end
-  local function choose()
-    local city = cities[vim.api.nvim_win_get_cursor(win)[1]]
-    close()
-    M.send(target, city)
+  function picker.set(lines)
+    if picker.closed() then
+      return
+    end
+    local row = vim.api.nvim_win_get_cursor(win)[1]
+    fill(lines)
+    local l = geometry(lines)
+    vim.api.nvim_win_set_config(win, { relative = 'editor', row = l.row, col = l.col, width = l.width, height = l.height })
+    vim.api.nvim_win_set_cursor(win, { math.min(row, #lines), 0 })
   end
   local function map(lhs, rhs)
     vim.keymap.set('n', lhs, rhs, { buffer = buf, nowait = true, silent = true })
   end
-  map('<CR>', choose)
-  map('<Esc>', close)
-  map('q', close)
+  map('<Esc>', picker.close)
+  map('q', picker.close)
   map('<Down>', 'j')
   map('<Up>', 'k')
-  vim.api.nvim_create_autocmd('WinLeave', { buffer = buf, once = true, callback = close })
-  return win
+  for lhs, fn in pairs(keys) do
+    map(lhs, function()
+      fn(picker, vim.api.nvim_win_get_cursor(win)[1])
+    end)
+  end
+  vim.api.nvim_create_autocmd('WinLeave', { buffer = buf, once = true, callback = picker.close })
+  return picker
+end
+
+local function city_items(cities)
+  local items = {}
+  for i, city in ipairs(cities) do
+    items[i] = ' ' .. city.name .. '  mayor '
+  end
+  return items
+end
+
+--- Open the mayor picker for the current buffer. It shows the cached cities
+--- (or a loading line) at once and refreshes them in the background.
+function M.open()
+  local target = vim.api.nvim_get_current_buf()
+  local _, reason = M.message(target)
+  if reason then
+    return notify(reason, vim.log.levels.WARN)
+  end
+  local shown = cache.cities and #cache.cities > 0 and cache.cities or nil
+  local picker = float(' mail buffer to ', shown and city_items(shown) or { LOADING }, {
+    ['<CR>'] = function(p, row)
+      if shown then
+        local city = shown[row]
+        p.close()
+        M.send(target, city)
+      end
+    end,
+  })
+  M.refresh(function(cities, err)
+    if not cities then
+      if shown then
+        if not cache.warned then
+          cache.warned = true
+          notify('gc cities failed, showing the last list:\n' .. err, vim.log.levels.WARN)
+        end
+        return
+      end
+      picker.close()
+      return notify(err, vim.log.levels.ERROR)
+    end
+    if #cities == 0 then
+      picker.close()
+      return notify('no cities are registered with gc', vim.log.levels.WARN)
+    end
+    shown = cities
+    picker.set(city_items(cities))
+  end)
+  return picker.win
+end
+
+local function age(seconds)
+  if seconds < 60 then
+    return ('%ds'):format(seconds)
+  elseif seconds < 3600 then
+    return ('%dm'):format(seconds / 60)
+  elseif seconds < 86400 then
+    return ('%dh'):format(seconds / 3600)
+  end
+  return ('%dd'):format(seconds / 86400)
+end
+
+-- `text` as one display line: line breaks as ' / ', any other control
+-- character as a space. Queue files are read from disk, and one line break
+-- in a buffer line would make nvim_buf_set_lines() refuse the whole list.
+local function one_line(text)
+  return (tostring(text):gsub('\r?\n', ' / '):gsub('%c', ' '))
+end
+
+--- The :GcMailQueue lines for `entries` (queue.list()), or for `err` when
+--- the queue cannot be read. Each line is one sanitized line.
+function M.queue_lines(entries, now, err)
+  if not entries then
+    return { ' ' .. one_line(err) .. ' ' }
+  elseif #entries == 0 then
+    return { ' the queue is empty ' }
+  end
+  local lines = {}
+  for i, entry in ipairs(entries) do
+    local record = entry.record
+    if not record then
+      lines[i] = (' ? %s  unreadable: %s '):format(one_line(entry.name), one_line(entry.error))
+    else
+      local state = record.delivered and 'sent, file not removed' or entry.claimed and 'sending'
+        or record.failed and 'failed' or 'pending'
+      local line = (' %s  %s  %s  %s'):format(one_line(record.city.name), one_line(record.subject),
+        age(math.max(0, now - record.created)), state)
+      if record.last_error then
+        line = line .. '  ' .. one_line(record.last_error)
+      end
+      lines[i] = line .. ' '
+    end
+  end
+  return lines
+end
+
+--- Open the queue list: r retries, o opens the text in a new buffer, d
+--- deletes (not one being sent), <Esc> or q closes.
+function M.open_queue()
+  local entries, err = queue.list()
+  local function reload(picker)
+    entries, err = queue.list()
+    picker.set(M.queue_lines(entries, os.time(), err))
+  end
+  local function act(fn)
+    return function(picker, row)
+      local entry = entries and entries[row]
+      if entry then
+        fn(picker, entry)
+      end
+    end
+  end
+  return float(' gc-mail queue: r retry  o open  d delete ', M.queue_lines(entries, os.time(), err), {
+    r = act(function(picker, entry)
+      local ok, err = queue.retry(entry.id)
+      if not ok then
+        notify('cannot retry: ' .. err, vim.log.levels.WARN)
+      end
+      reload(picker)
+    end),
+    o = act(function(picker, entry)
+      local text = entry.record and entry.record.body or queue.raw(entry.name) or ''
+      picker.close()
+      vim.cmd('new')
+      vim.api.nvim_buf_set_lines(0, 0, -1, false, vim.split(text, '\n', { plain = true }))
+    end),
+    d = act(function(picker, entry)
+      local ok, err = queue.delete(entry.id)
+      if not ok then
+        notify('cannot delete: ' .. err, vim.log.levels.WARN)
+      end
+      reload(picker)
+    end),
+  }).win
 end
 
 function M.setup(opts)
   M.config = vim.tbl_extend('force', vim.deepcopy(defaults), opts or {})
+  queue.configure({ dir = M.config.state_dir .. '/queue', retry_ms = M.config.retry_ms })
   if M.config.keymap then
     vim.keymap.set('n', M.config.keymap, M.open, { desc = 'Mail the buffer to a gc city mayor' })
   end
-  vim.api.nvim_create_user_command('GcMail', M.open, { desc = 'Mail the buffer to a gc city mayor', force = true })
+  vim.api.nvim_create_user_command('GcMail', function()
+    require('gc_mail').open()
+  end, { desc = 'Mail the buffer to a gc city mayor', force = true })
+  vim.api.nvim_create_user_command('GcMailQueue', function()
+    require('gc_mail').open_queue()
+  end, { desc = 'List the gc-mail send queue', force = true })
+  -- After startup, never during it: resume the queue and preload the cities.
+  local function start()
+    queue.resume()
+    M.refresh(function() end)
+  end
+  if vim.v.vim_did_enter == 1 then
+    vim.schedule(start)
+  else
+    vim.api.nvim_create_autocmd('VimEnter', { once = true, callback = vim.schedule_wrap(start) })
+  end
 end
+
+-- :GcMail without setup() still queues to the default directory.
+queue.configure({ dir = M.config.state_dir .. '/queue', retry_ms = M.config.retry_ms })
 
 return M
