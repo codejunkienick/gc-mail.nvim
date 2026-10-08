@@ -70,12 +70,16 @@ local function fresh()
     gc_mail.queue.stop()
     wait('the previous test left a send running', gc_mail.queue.idle)
   end
+  if package.loaded['gc_mail.panel'] then
+    package.loaded['gc_mail.panel'].close_all()
+  end
   if package.loaded['gc_mail.mailbox'] then
     package.loaded['gc_mail.mailbox'].stop_check()
   end
   package.loaded['gc_mail'] = nil
   package.loaded['gc_mail.queue'] = nil
   package.loaded['gc_mail.mailbox'] = nil
+  package.loaded['gc_mail.panel'] = nil
   gc_mail = require('gc_mail')
   run_id = run_id + 1
   queue_dir = ('%s/state-%d/queue'):format(scratch, run_id)
@@ -103,6 +107,7 @@ local function reset(env)
   for _, win in ipairs(floats()) do
     vim.api.nvim_win_close(win, true)
   end
+  vim.cmd('silent! tabonly!')
   vim.cmd('silent! only!')
   vim.cmd('enew!')
   fresh()
@@ -195,7 +200,7 @@ local function mail_calls()
   return calls
 end
 
-test('nothing runs at load time and setup maps <Space>mm, :GcMail and :GcMailQueue', function()
+test('nothing runs at load time and setup maps <Space>mm, <Space>mi, <Space>mp and the commands', function()
   eq(recorded_argv(), nil, 'gc ran at load')
   eq(mail_calls(), {}, 'a mail command ran at load')
   eq(gc_mail.cached_cities(), nil, 'cities loaded at load time')
@@ -206,6 +211,8 @@ test('nothing runs at load time and setup maps <Space>mm, :GcMail and :GcMailQue
   eq(vim.fn.exists(':GcMailQueue'), 2, ':GcMailQueue missing')
   eq(vim.fn.exists(':GcMailbox'), 2, ':GcMailbox missing')
   eq(vim.fn.maparg('<Space>mi', 'n') ~= '', true, 'default mailbox keymap missing')
+  eq(vim.fn.exists(':GcMailPanel'), 2, ':GcMailPanel missing')
+  eq(vim.fn.maparg('<Space>mp', 'n') ~= '', true, 'default panel keymap missing')
   -- After startup the list is preloaded in the background.
   wait('no preload after setup', function()
     return gc_mail.cached_cities() ~= nil
@@ -215,9 +222,12 @@ test('nothing runs at load time and setup maps <Space>mm, :GcMail and :GcMailQue
   eq(require('gc_mail.mailbox').checking(), false, 'a new-mail timer runs by default')
   vim.keymap.del('n', '<Space>mm')
   vim.keymap.del('n', '<Space>mi')
-  gc_mail.setup({ keymap = false, mailbox_keymap = false, state_dir = vim.fs.dirname(queue_dir) })
+  vim.keymap.del('n', '<Space>mp')
+  gc_mail.setup({ keymap = false, mailbox_keymap = false, panel_keymap = false, state_dir = vim.fs.dirname(queue_dir) })
   eq(vim.fn.maparg('<Space>mm', 'n'), '', 'keymap = false still mapped')
   eq(vim.fn.maparg('<Space>mi', 'n'), '', 'mailbox_keymap = false still mapped')
+  eq(vim.fn.maparg('<Space>mp', 'n'), '', 'panel_keymap = false still mapped')
+  eq(package.loaded['gc_mail.panel'], nil, 'setup loaded the panel')
   eq(vim.fn.exists(':GcMail'), 2, ':GcMail missing without a keymap')
   gc_mail.setup({ keymap = '<leader>gm', state_dir = vim.fs.dirname(queue_dir) })
   eq(vim.fn.maparg('<leader>gm', 'n') ~= '', true, 'custom keymap missing')
@@ -1605,7 +1615,8 @@ test('subject_prefix and subject_suffix label every sent subject once, within 72
   -- Empty options leave the subject as it is.
   eq(gc_mail.label('Re: x', { subject_prefix = '', subject_suffix = '' }), 'Re: x', 'no label')
   for _, bad in ipairs({ { subject_prefix = 'a\nb' }, { subject_suffix = 3 }, { subject_prefix = string.rep('p', 41) },
-    { check_ms = 1000 }, { check_ms = 'often' } }) do
+    { check_ms = 1000 }, { check_ms = 'often' }, { panel_poll_ms = 14999 }, { panel_poll_ms = false },
+    { panel_height = 0 }, { panel_height = 2.5 } }) do
     eq(pcall(gc_mail.setup, bad), false, 'refused: ' .. vim.inspect(bad))
   end
 end)
@@ -1942,6 +1953,373 @@ test('I2: action answers apply in the order their calls started, whatever order 
   end, 3000)
   eq(rows(win), { ' ● imd-city  mayor  late read' }, 'the archive applied after the read')
   eq(kept_files(), {}, 'its kept copy went with it')
+  vim.api.nvim_feedkeys('q', 'x', false)
+end)
+
+-- ---- the panel ---------------------------------------------------------------
+
+local function panel()
+  return require('gc_mail.panel')
+end
+
+-- The two cities in real directories (the fake answers by the last part of
+-- the path, as for TWO), cached as the startup preload does. An event log
+-- is written only where a test writes one.
+local function city_dirs()
+  local base = ('%s/cities-%d'):format(scratch, run_id)
+  local cities = {}
+  for _, dir in ipairs({ 'imd-city', 'side city' }) do
+    vim.fn.mkdir(base .. '/' .. dir .. '/.gc', 'p')
+    cities[#cities + 1] = { name = dir == 'side city' and 'side-city' or dir, path = base .. '/' .. dir }
+  end
+  write(vim.env.FAKE_GC_CITIES, cities_record(cities))
+  preload()
+  return cities, cities[1].path .. '/.gc/events.jsonl'
+end
+
+local function append(path, text)
+  local file = assert(io.open(path, 'a'))
+  file:write(text)
+  file:close()
+end
+
+-- One event log line as gc writes it.
+local function event(kind)
+  return vim.json.encode({ seq = 1, type = kind, ts = '2026-10-08T10:00:00Z', actor = 'human', subject = 'ic-wisp-a1' }) .. '\n'
+end
+
+local function inbox_calls(path)
+  return #vim.tbl_filter(function(c)
+    return c[4] == 'inbox' and c[2] == path
+  end, mail_calls())
+end
+
+-- Waits until the panel has listed each city once and nothing else runs.
+local function listed(cities)
+  wait('the panel listed every city', function()
+    return inbox_calls(cities[1].path) >= 1 and inbox_calls(cities[2].path) >= 1
+  end)
+  vim.wait(200)
+end
+
+local function panel_key(win, lhs)
+  for _, map in ipairs(vim.api.nvim_buf_get_keymap(vim.api.nvim_win_get_buf(win), 'n')) do
+    if map.lhs == lhs then
+      return map.callback
+    end
+  end
+  error('no panel mapping for ' .. lhs)
+end
+
+test('the panel opens below the current window without moving focus or the cursor, one per tab page', function()
+  local cities, log = city_dirs()
+  write(log, event('order.completed'))
+  inbox('imd-city', { msg('ic-wisp-a1', { subject = 'first' }) })
+  inbox('side city', {})
+  buffer({ 'line one', 'line two', 'line three' })
+  vim.api.nvim_win_set_cursor(0, { 2, 3 })
+  local origin = vim.api.nvim_get_current_win()
+  local origin_height = vim.api.nvim_win_get_height(origin)
+  local win = panel().toggle()
+  eq(vim.api.nvim_get_current_win(), origin, 'the current window is unchanged')
+  eq(vim.api.nvim_win_get_cursor(origin), { 2, 3 }, 'the cursor is unchanged')
+  eq(vim.api.nvim_get_mode().mode, 'n', 'still in normal mode')
+  eq(#floats(), 0, 'a split, not a float')
+  local below = vim.api.nvim_win_get_position(win)
+  eq(below[1] > vim.api.nvim_win_get_position(origin)[1], true, 'below the current window')
+  eq(below[2], vim.api.nvim_win_get_position(origin)[2], 'in its column')
+  eq(vim.api.nvim_win_get_height(win), 10, 'panel_height rows')
+  eq(vim.wo[win].winfixheight, true, 'fixed height')
+  local buf = vim.api.nvim_win_get_buf(win)
+  eq({ vim.bo[buf].buftype, vim.bo[buf].buflisted, vim.bo[buf].filetype }, { 'nofile', false, 'gcmail-panel' },
+    'its own unlisted nofile buffer')
+  eq(vim.api.nvim_win_get_height(origin) < origin_height, true, 'the split took rows from the current window')
+  settled(win, 1)
+  eq(rows(win), { ' ● imd-city  mayor  first' }, 'the mailbox lines')
+  -- A mail arriving changes the panel, not the focus.
+  inbox('imd-city', { msg('ic-wisp-a2', { subject = 'second', created_at = '2026-10-07T13:00:00Z' }),
+    msg('ic-wisp-a1', { subject = 'first' }) })
+  append(log, event('mail.sent'))
+  wait('the new mail is shown', function()
+    return #rows(win) == 2
+  end)
+  eq(rows(win), { ' ● imd-city  mayor  second', ' ● imd-city  mayor  first' }, 'newest first')
+  eq(vim.api.nvim_win_get_cursor(win)[1], 2, 'the panel cursor stays on the message it was on')
+  eq(vim.api.nvim_get_current_win(), origin, 'still the same window')
+  eq(vim.api.nvim_win_get_cursor(origin), { 2, 3 }, 'still the same cursor')
+  -- One per tab page: opening again keeps it; another tab page has its own.
+  eq(panel().open(), win, 'the same panel')
+  eq(#vim.api.nvim_tabpage_list_wins(0), 2, 'no second panel')
+  vim.cmd('tabnew')
+  local other = panel().toggle()
+  eq(other ~= win and vim.api.nvim_win_get_tabpage(other) == vim.api.nvim_get_current_tabpage(), true, 'its own panel')
+  settled(other, 2)
+  vim.cmd('tabclose')
+  eq(panel().running(), true, 'the first tab page still has its panel')
+  eq(vim.api.nvim_get_current_win(), origin, 'back in the first tab page')
+  panel().toggle()
+  eq(vim.api.nvim_win_is_valid(win), false, 'the toggle closes it')
+  eq(panel().running(), false, 'and stops the watch')
+  eq(vim.api.nvim_get_current_win(), origin, 'focus never moved')
+  -- :GcMailPanel toggles too.
+  vim.cmd('GcMailPanel')
+  eq(panel().win() ~= nil, true, ':GcMailPanel opens it')
+  vim.cmd('GcMailPanel')
+  eq(panel().win(), nil, ':GcMailPanel closes it')
+end)
+
+test('the panel lines equal the float\'s, and its keys act on the message under its cursor', function()
+  local cities, log = city_dirs()
+  write(log, '')
+  inbox('imd-city', {
+    msg('ic-wisp-a1', { subject = 'at noon', created_at = '2026-10-07T12:00:00Z' }),
+    msg('ic-wisp-a2', { subject = 'at eleven', from = 'builder-1', created_at = '2026-10-07T11:00:00Z' }),
+  })
+  inbox('side city', { msg('sc-wisp-b1', { subject = 'side', created_at = '2026-10-07T11:30:00Z' }) })
+  answer('read', { message = msg('ic-wisp-a1', { subject = 'at noon', read = true }) })
+  local origin = vim.api.nvim_get_current_win()
+  local pwin = panel().open()
+  settled(pwin, 3)
+  local fwin = mailbox().open()
+  settled(fwin, 3)
+  eq(rows(pwin), rows(fwin), 'the same lines')
+  eq(rows(pwin), { ' ● imd-city  mayor  at noon', ' ● side-city  mayor  side', ' ● imd-city  builder-1  at eleven' }, 'lines')
+  vim.api.nvim_feedkeys('q', 'x', false)
+  -- <CR> in the panel opens the message in a window above it, never inside it.
+  vim.api.nvim_win_set_cursor(pwin, { 1, 0 })
+  vim.api.nvim_set_current_win(pwin)
+  vim.api.nvim_feedkeys(vim.keycode('<CR>'), 'x', false)
+  local shown = vim.api.nvim_get_current_win()
+  eq(shown ~= pwin and shown ~= origin, true, 'a new window')
+  eq(vim.api.nvim_buf_get_lines(0, 4, 5, false), { 'Subject: at noon' }, 'the message under the panel cursor')
+  eq(vim.api.nvim_win_get_position(shown)[1] < vim.api.nvim_win_get_position(pwin)[1], true, 'above the panel')
+  eq(vim.bo[vim.api.nvim_win_get_buf(pwin)].filetype, 'gcmail-panel', 'the panel still shows the panel')
+  eq(vim.api.nvim_win_get_height(pwin), 10, 'at its height')
+  wait('marked read in both views', function()
+    return rows(pwin)[1] == '   imd-city  mayor  at noon'
+  end)
+  eq(has_call(call('read', cities[1].path, 'ic-wisp-a1', '--json')), true, 'gc mail read')
+  -- m and u from the panel without entering it.
+  vim.api.nvim_win_set_cursor(pwin, { 2, 0 })
+  acted('mark-read', 'sc-wisp-b1')
+  panel_key(pwin, 'm')()
+  wait('marked read', function()
+    return rows(pwin)[2] == '   side-city  mayor  side'
+  end)
+  eq(has_call(call('mark-read', cities[2].path, 'sc-wisp-b1', '--json')), true, 'gc mail mark-read in its city')
+  -- q in the panel closes it.
+  vim.api.nvim_set_current_win(pwin)
+  vim.api.nvim_feedkeys('q', 'x', false)
+  eq(vim.api.nvim_win_is_valid(pwin), false, 'q closes the panel')
+  eq(panel().running(), false, 'and stops the watch')
+end)
+
+test('a mail line in a city event log lists that city once after the debounce; other lines list nothing', function()
+  local cities, log = city_dirs()
+  write(log, event('order.completed'))
+  inbox('imd-city', {})
+  inbox('side city', {})
+  local win = panel().open()
+  listed(cities)
+  eq({ inbox_calls(cities[1].path), inbox_calls(cities[2].path) }, { 1, 1 }, 'one listing each on open')
+  append(log, event('order.completed') .. 'not json "mail.sent"\n' .. '{"seq":2,"note":"mail.sent"}\n'
+    .. '["mail.sent"]\n' .. '{"type":7,"subject":"mail.sent"}\n' .. '{"type":"mailbox.x","subject":"mail."}\n'
+    .. vim.json.encode({ type = vim.NIL, x = 'mail.' }) .. '\n' .. '{"type":"mail.sent"\n')
+  vim.wait(1000)
+  eq(inbox_calls(cities[1].path), 1, 'a non-mail or malformed line lists nothing')
+  eq(vim.tbl_filter(function(note)
+    return note.level == vim.log.levels.ERROR
+  end, notes), {}, 'and says nothing')
+  append(log, event('mail.sent'))
+  vim.wait(250)
+  eq(inbox_calls(cities[1].path), 1, 'not before the debounce')
+  wait('listed after the debounce', function()
+    return inbox_calls(cities[1].path) == 2
+  end)
+  vim.wait(800)
+  eq({ inbox_calls(cities[1].path), inbox_calls(cities[2].path) }, { 2, 1 }, 'exactly one call, for that city only')
+  -- A burst of mail events is one call.
+  for _, kind in ipairs({ 'mail.read', 'mail.marked_read', 'mail.archived' }) do
+    append(log, event(kind))
+    vim.wait(30)
+  end
+  wait('the burst listed', function()
+    return inbox_calls(cities[1].path) == 3
+  end)
+  vim.wait(800)
+  eq(inbox_calls(cities[1].path), 3, 'one call for the burst')
+  -- A line written in two parts counts once it ends.
+  append(log, '{"seq":9,"type":"mail.del')
+  vim.wait(800)
+  eq(inbox_calls(cities[1].path), 3, 'half a line is not read yet')
+  append(log, 'eted"}\n')
+  wait('the finished line listed', function()
+    return inbox_calls(cities[1].path) == 4
+  end)
+  -- More than 1 MiB appended at once is simply a refresh.
+  append(log, string.rep('x', 1024 * 1024 + 10) .. '\n')
+  wait('a huge append listed', function()
+    return inbox_calls(cities[1].path) == 5
+  end)
+  vim.wait(800)
+  eq(inbox_calls(cities[1].path), 5, 'once')
+  eq(vim.api.nvim_win_is_valid(win), true, 'the panel stays open')
+end)
+
+test('at most one inbox call per city is in flight: mail during a call lists the city once more after it', function()
+  local cities, log = city_dirs()
+  write(log, '')
+  inbox('imd-city', {})
+  inbox('side city', {})
+  panel().open()
+  listed(cities)
+  raw_answer('inbox', 'delay', '3', 'imd-city')
+  append(log, event('mail.sent'))
+  wait('the first call started', function()
+    return inbox_calls(cities[1].path) == 2
+  end)
+  for _, kind in ipairs({ 'mail.read', 'mail.archived' }) do
+    vim.wait(600) -- past the debounce, while the call still runs
+    append(log, event(kind))
+  end
+  vim.wait(200)
+  eq(inbox_calls(cities[1].path), 2, 'no second call while one is in flight')
+  vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/inbox.imd-city.delay')
+  wait('one more call after it', function()
+    return inbox_calls(cities[1].path) == 3
+  end, 5000)
+  vim.wait(800)
+  eq(inbox_calls(cities[1].path), 3, 'exactly one more')
+end)
+
+test('a rotated or recreated event log is watched again; the old file no longer is', function()
+  panel().configure({ rearm_ms = 200 })
+  local cities, log = city_dirs()
+  write(log, event('order.completed'))
+  inbox('imd-city', {})
+  inbox('side city', {})
+  panel().open()
+  listed(cities)
+  local n = inbox_calls(cities[1].path)
+  -- gc renames the log and starts a new one with an events.rotated line.
+  assert(os.rename(log, log .. '.archive-1'))
+  write(log, event('events.rotated'))
+  wait('listed once after the rotation', function()
+    return inbox_calls(cities[1].path) == n + 1
+  end)
+  vim.wait(800)
+  n = inbox_calls(cities[1].path)
+  append(log, event('mail.archived'))
+  wait('the new file is watched', function()
+    return inbox_calls(cities[1].path) == n + 1
+  end)
+  vim.wait(800)
+  n = inbox_calls(cities[1].path)
+  append(log .. '.archive-1', event('mail.sent'))
+  vim.wait(1000)
+  eq(inbox_calls(cities[1].path), n, 'the renamed file is not watched')
+  -- Removed, and created again a moment later.
+  assert(os.remove(log))
+  vim.wait(50)
+  write(log, '')
+  wait('listed once the new file is watched', function()
+    return inbox_calls(cities[1].path) == n + 1
+  end)
+  vim.wait(800)
+  n = inbox_calls(cities[1].path)
+  append(log, event('mail.sent'))
+  wait('the recreated file is watched', function()
+    return inbox_calls(cities[1].path) == n + 1
+  end)
+end)
+
+test('with no event log the fallback timer lists every city, and watches the log once it appears', function()
+  panel().configure({ poll_ms = 300 }) -- under setup's 15 s floor, for the test only
+  local cities, log = city_dirs()
+  inbox('imd-city', {})
+  inbox('side city', {})
+  panel().open()
+  wait('the fallback timer lists both cities again', function()
+    return inbox_calls(cities[1].path) >= 3 and inbox_calls(cities[2].path) >= 3
+  end, 3000)
+  local function watched()
+    for _, h in ipairs(panel().handles()) do
+      if h:get_type() == 'fs_event' and h:is_active() and h:getpath() == log then
+        return true
+      end
+    end
+    return false
+  end
+  eq(watched(), false, 'nothing to watch yet')
+  write(log, '')
+  wait('a tick watches the new log', watched, 2000)
+end)
+
+test('after close no watcher or timer fires and no callback touches the closed panel', function()
+  panel().configure({ poll_ms = 300, rearm_ms = 100 })
+  local cities, log = city_dirs()
+  write(log, '')
+  inbox('imd-city', {})
+  inbox('side city', {})
+  local win = panel().open()
+  listed(cities)
+  local handles = panel().handles()
+  eq(#handles >= 6, true, 'a timer, two debounce and two rearm timers and a watcher: ' .. #handles)
+  -- A mail event whose debounce is still waiting, and an inbox call in flight.
+  raw_answer('inbox', 'delay', '0.5', 'side city')
+  panel_key(win, 'R')()
+  append(log, event('mail.sent'))
+  vim.wait(50)
+  local n = #mail_calls()
+  panel().close()
+  eq(vim.api.nvim_win_is_valid(win), false, 'closed')
+  eq(panel().running(), false, 'the watch stopped')
+  for i, h in ipairs(vim.list_extend(vim.list_slice(handles), panel().handles())) do
+    eq(h:is_closing(), true, 'handle ' .. i .. ' closed')
+  end
+  append(log, event('mail.sent'))
+  assert(os.rename(log, log .. '.old'))
+  write(log, event('mail.sent'))
+  vim.wait(1500)
+  eq(#mail_calls(), n, 'nothing ran after close')
+  eq(#floats(), 0, 'nothing opened')
+  eq(#vim.api.nvim_list_wins(), 1, 'no panel came back')
+end)
+
+test('an archive from the panel also leaves the open float and survives a late inbox answer (I2)', function()
+  local cities, log = city_dirs()
+  write(log, '')
+  inbox('imd-city', {
+    msg('ic-wisp-a1', { subject = 'to archive', created_at = '2026-10-07T13:00:00Z' }),
+    msg('ic-wisp-a2', { subject = 'stays', created_at = '2026-10-07T12:00:00Z' }),
+  })
+  inbox('side city', {})
+  local pwin = panel().open()
+  settled(pwin, 2)
+  listed(cities)
+  local fwin = mailbox().open()
+  settled(fwin, 2)
+  vim.wait(200)
+  -- A panel refresh that answers late, with the message still in it.
+  raw_answer('inbox', 'delay', '1', 'imd-city')
+  local n = inbox_calls(cities[1].path)
+  append(log, event('mail.sent'))
+  wait('the panel refresh started', function()
+    return inbox_calls(cities[1].path) == n + 1
+  end)
+  acted('archive', 'ic-wisp-a1')
+  vim.api.nvim_win_set_cursor(pwin, { 1, 0 })
+  panel_key(pwin, 'a')() -- the float keeps the focus
+  wait('archived in both views', function()
+    return #rows(pwin) == 1 and #rows(fwin) == 1
+  end)
+  eq(has_call(call('archive', cities[1].path, 'ic-wisp-a1', '--json')), true, 'gc mail archive')
+  eq(rows(pwin), { ' ● imd-city  mayor  stays' }, 'panel')
+  eq(rows(fwin), { ' ● imd-city  mayor  stays' }, 'float')
+  vim.wait(1500) -- the refresh answers 1 s after it was made
+  eq(rows(pwin), { ' ● imd-city  mayor  stays' }, 'the late answer does not bring it back to the panel')
+  eq(rows(fwin), { ' ● imd-city  mayor  stays' }, 'nor to the float')
+  eq(#floats(), 1, 'the float stayed open')
   vim.api.nvim_feedkeys('q', 'x', false)
 end)
 

@@ -5,8 +5,10 @@ you. `<Space>mm` (or `:GcMail`) opens a small picker with one line per city
 registered with the gc supervisor, at once; `<CR>` puts the buffer in an
 on-disk send queue, clears it, and gc sends it in the background. `<Space>mi`
 (or `:GcMailbox`) opens the mailbox: the mail addressed to you (`human`) in
-every city, to open, reply to, mark, archive or delete. Requires Neovim 0.10
-or newer and `gc` on `PATH`; no other plugins.
+every city, to open, reply to, mark, archive or delete; `<Space>mp` (or
+`:GcMailPanel`) docks the same mailbox in a split below the current window
+and keeps it current while you edit. Requires Neovim 0.10 or newer and `gc`
+on `PATH`; no other plugins.
 
 ## Install
 
@@ -26,7 +28,7 @@ vim.opt.runtimepath:append('/path/to/checkout/tools/gc-mail.nvim')
 require('gc_mail').setup()
 ```
 
-`:GcMail`, `:GcMailQueue` and `:GcMailbox` exist as soon as the directory is
+`:GcMail`, `:GcMailQueue`, `:GcMailbox` and `:GcMailPanel` exist as soon as the directory is
 on the runtimepath; `setup()` adds the mappings, and once Neovim has finished
 starting it resumes the send queue and preloads the city list with one
 background `gc cities --json`. Nothing runs while the plugin loads, so startup
@@ -43,10 +45,14 @@ time is unchanged; the mailbox lists mail only when you open it.
 | `subject_prefix` | `''` | text put before the subject of every message the plugin sends, e.g. `'[Nick] '` |
 | `subject_suffix` | `''` | text put after it, e.g. `' (nvim)'` |
 | `check_ms` | `false` | `false`: no timer. A number of ms, at least `60000`: the new-mail check below |
+| `panel_keymap` | `'<Space>mp'` | normal-mode mapping that opens or closes the mail panel; `false` sets none |
+| `panel_height` | `10` | rows of the mail panel |
+| `panel_poll_ms` | `60000` | while the panel is open, every city is listed again this often (ms, at least `15000`) |
 
 `setup()` refuses (raises an error) a prefix or suffix with a control
-character, the two together over 40 characters, and a `check_ms` that is
-neither `false` nor at least a minute.
+character, the two together over 40 characters, a `check_ms` that is
+neither `false` nor at least a minute, a `panel_poll_ms` under 15 seconds and
+a `panel_height` that is not a whole number of at least 1.
 
 ## Use
 
@@ -177,6 +183,56 @@ least 60000), every `check_ms` while Neovim has focus (`FocusGained` and
 `FocusLost`) it runs one `gc --city <path> mail count human --json` per city
 and says `<n> unread mail in <city>` when a city's unread count grows.
 
+## The mail panel
+
+`<Space>mp` (or `:GcMailPanel`) opens the mailbox as a docked list, like a
+diagnostics list: a horizontal split of `panel_height` rows (fixed height)
+right below the current window, with the same lines as the float. The same
+key closes it. Opening it, refreshing it or a mail arriving never moves the
+cursor or the current window, so you keep typing where you were; there is at
+most one panel per tab page, in its own unlisted scratch buffer with
+filetype `gcmail-panel` and the key hint in its status line.
+
+```text
+the buffer you are editing
+~
+notes.md
+ ● imd-city  mayor  Re: mail panel  2m
+   imd-city  mayor  Deploy plan accepted  1h
+
+ gc mail: <CR> open  r reply  t thread  m read  u unread  a archive  d delete  R refresh  q close
+```
+
+It is a second view of the mailbox, not a copy: the same `gc mail inbox`
+listing, I1 and I2, kept copies and actions, so an action taken in the panel
+or in the float shows in both. The keys are the mailbox's; `<CR>`, `r` and
+`t` open their window above the panel, never inside it, and `q` closes the
+panel. The panel's cursor stays on the message it was on when the list
+changes.
+
+**Live updates without polling.** gc appends one JSON line per event to
+`<city path>/.gc/events.jsonl`, among them `mail.sent`, `mail.read`,
+`mail.marked_read`, `mail.archived` and `mail.deleted`. While the panel is
+open, the plugin watches each listed city's file (`vim.uv` fs_event, inotify
+on Linux) and, on a change, reads only the bytes appended since its last read
+(more than 1 MiB at once is simply a refresh). A line whose `type` starts
+with `mail.` lists that city again, about 500 ms after the first such line
+(a burst is one call) and never with a second inbox call for the city while
+one runs (then once more after it). A line that is not JSON, or has no
+`type`, is ignored. When gc rotates the file (renames it and starts a new
+one with an `events.rotated` line) or it is recreated, the file now at the
+path is watched instead and the city is listed once, since what was appended
+just before the rotation was not read.
+
+**Fallback.** Every `panel_poll_ms` (default one minute) while the panel is
+open, every city is listed again and the kept copies are read again, also for
+a city whose events file is missing or cannot be watched; each tick tries to
+watch such a file again, and refreshes the city list.
+
+Nothing runs while the panel is closed: closing the last one (the key, `q`,
+`:close`, or closing its tab page) stops every watcher and timer, and an
+answer that arrives later only updates the mailbox state.
+
 ## The send queue
 
 Each message is one JSON file (city name and path, subject, body, created
@@ -257,7 +313,10 @@ The fake answers `gc cities` after a delay or not at all, fails a send a
 given number of times, and answers each mailbox command (`inbox`, `count`,
 `read`, `mark-read`, `mark-unread`, `thread`, `archive`, `delete`) from a
 fixture per command and city, failing, hanging, answering late or printing
-malformed JSON on request (I1 and I2 each have their own tests); the tests point the queue and `XDG_STATE_HOME` at a
+malformed JSON on request (I1 and I2 each have their own tests). The panel
+tests give each city a real temporary directory and append lines to its
+`.gc/events.jsonl` (mail, other and malformed events, half lines, rotation,
+a missing file), counting the inbox calls the fake answers. The tests point the queue and `XDG_STATE_HOME` at a
 scratch directory and use millisecond retry delays. Failing disk calls are
 simulated by wrapping `vim.uv` functions; the lock rule is checked by probing
 the lock at every change to a queue file, and `tests/add_many.lua` is a second

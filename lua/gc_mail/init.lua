@@ -9,7 +9,9 @@
 --   gc --city <path> mail send mayor -s <subject> -m <body> --notify
 -- in the background, in order, with retries. In a reply buffer the same keys
 -- queue the reply instead (gc mail reply). <Space>mi (or :GcMailbox) opens
--- the mailbox (gc_mail.mailbox). Nothing runs at load time.
+-- the mailbox (gc_mail.mailbox); <Space>mp (or :GcMailPanel) toggles the same
+-- mailbox docked below the current window (gc_mail.panel). Nothing runs at
+-- load time.
 local queue = require('gc_mail.queue')
 
 local M = {}
@@ -30,6 +32,13 @@ local defaults = {
   -- false: no timer. A number of ms (at least 60000): while Neovim has focus,
   -- one `gc mail count` per city that often, and a notice when unread mail grows.
   check_ms = false,
+  -- Normal-mode mapping that toggles the mail panel; false sets none (:GcMailPanel works).
+  panel_keymap = '<Space>mp',
+  -- Rows of the mail panel.
+  panel_height = 10,
+  -- While the panel is open: every city listed again this often (ms, at least
+  -- 15000), besides the updates gc's event log brings.
+  panel_poll_ms = 60000,
 }
 
 M.config = vim.deepcopy(defaults)
@@ -487,6 +496,12 @@ local function invalid_options(opts)
   if opts.check_ms ~= false and (type(opts.check_ms) ~= 'number' or opts.check_ms < 60000) then
     return 'check_ms must be false or a number of milliseconds of at least 60000'
   end
+  if type(opts.panel_poll_ms) ~= 'number' or opts.panel_poll_ms < 15000 then
+    return 'panel_poll_ms must be a number of milliseconds of at least 15000'
+  end
+  if type(opts.panel_height) ~= 'number' or opts.panel_height < 1 or opts.panel_height ~= math.floor(opts.panel_height) then
+    return 'panel_height must be a whole number of rows of at least 1'
+  end
 end
 
 function M.setup(opts)
@@ -507,6 +522,11 @@ function M.setup(opts)
       require('gc_mail.mailbox').open()
     end, { desc = 'Open the gc mailbox' })
   end
+  if M.config.panel_keymap then
+    vim.keymap.set('n', M.config.panel_keymap, function()
+      require('gc_mail.panel').toggle()
+    end, { desc = 'Toggle the gc mail panel' })
+  end
   vim.api.nvim_create_user_command('GcMail', function()
     require('gc_mail').open()
   end, { desc = 'Mail the buffer to a gc city mayor', force = true })
@@ -516,6 +536,9 @@ function M.setup(opts)
   vim.api.nvim_create_user_command('GcMailbox', function()
     require('gc_mail.mailbox').open()
   end, { desc = 'Open the gc mailbox', force = true })
+  vim.api.nvim_create_user_command('GcMailPanel', function()
+    require('gc_mail.panel').toggle()
+  end, { desc = 'Toggle the gc mail panel', force = true })
   -- check_ms = false stops a check an earlier setup() started (only then is
   -- the mailbox loaded already).
   if not M.config.check_ms and package.loaded['gc_mail.mailbox'] then

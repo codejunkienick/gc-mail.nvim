@@ -8,7 +8,8 @@
 -- hour ago. So every message read here (opened, or marked read) is kept on
 -- disk too, one JSON file per message in <state_dir>/mailbox/, and listed
 -- until it is archived or deleted here: a mayor's answer stays in the mailbox
--- after it was read, across restarts and compactions.
+-- after it was read, across restarts and compactions. The mail panel
+-- (gc_mail.panel) is a second view of this same state (M.subscribe).
 --
 -- Two invariants hold every gc answer to what it can change:
 --
@@ -556,13 +557,23 @@ end
 -- The open mailbox: { picker, entries (as shown, by row), pending (calls
 -- whose answer the list still waits for), listed (city paths listed) }.
 local view
+-- Other views of the same mailbox (the panel): name -> function that redraws it.
+local views = {}
+
+--- Registers `fn` as the view `name`, redrawn whenever the mailbox changes;
+--- nil removes it.
+function M.subscribe(name, fn)
+  views[name] = fn
+end
 
 local function render()
-  if not view or view.picker.closed() then
-    return
+  if view and not view.picker.closed() then
+    view.entries = M.entries()
+    view.picker.set(M.lines(view.entries, os.time(), view.pending > 0))
   end
-  view.entries = M.entries()
-  view.picker.set(M.lines(view.entries, os.time(), view.pending > 0))
+  for _, fn in pairs(views) do
+    fn()
+  end
 end
 render_hook = render
 
@@ -571,8 +582,9 @@ render_hook = render
 -- is said once. The answer to a call a later call to the same city replaced
 -- is dropped (a mailbox closed and reopened while its first call still ran),
 -- and an answer leaves out every message it is no longer current for (I2):
--- it would bring them back as they were.
-local function list(city, owner)
+-- it would bring them back as they were. on_done(), when given, runs once
+-- the answer is handled, applied or not.
+local function list(city, owner, on_done)
   owner.pending = owner.pending + 1
   local at = tick()
   box.latest[city.path] = at
@@ -580,6 +592,9 @@ local function list(city, owner)
     owner.pending = owner.pending - 1
     if box.latest[city.path] ~= at then
       render()
+      if on_done then
+        on_done()
+      end
       return
     end
     if not messages then
@@ -595,8 +610,12 @@ local function list(city, owner)
       box.inbox[city.path] = entries
     end
     render()
+    if on_done then
+      on_done()
+    end
   end)
 end
+M.list = list
 
 local function reload_kept()
   local kept, bad = M.kept()
@@ -610,10 +629,21 @@ local function reload_kept()
     say_once('kept ' .. why, 'a kept message cannot be read: ' .. why)
   end
 end
+M.reload_kept = reload_kept
 
--- A scratch buffer in a new window with `lines` and buffer-local `keys`.
-local function scratch(name, lines, keys)
-  vim.cmd('new')
+-- Opens and enters a new window: `split` when given (the panel opens its
+-- windows above itself), else :new beside the current one.
+local function new_window(split)
+  if split then
+    split()
+  else
+    vim.cmd('new')
+  end
+end
+
+-- A scratch buffer in a new window (new_window) with `lines` and buffer-local `keys`.
+local function scratch(name, lines, keys, split)
+  new_window(split)
   local buf = vim.api.nvim_get_current_buf()
   vim.bo[buf].buftype = 'nofile'
   vim.bo[buf].bufhidden = 'wipe'
@@ -649,8 +679,9 @@ local actions = {}
 
 -- Opens `entry` in a scratch buffer at once, from what the mailbox already
 -- holds, and marks it read in gc in the background (one `gc mail read`; a
--- message already read here runs nothing).
-function actions.open(entry)
+-- message already read here runs nothing). `split`, here and in thread and
+-- reply, opens the window (new_window).
+function actions.open(entry, split)
   local lines = header(entry.message, entry.city)
   lines[#lines + 1] = 'Keys:    r reply  t thread  u unread  a archive  d delete  q close'
   lines[#lines + 1] = READ_NOTE
@@ -662,7 +693,7 @@ function actions.open(entry)
     u = function() actions.unread(entry) end,
     a = function() actions.archive(entry) end,
     d = function() actions.delete(entry) end,
-  })
+  }, split)
   if not entry.read then
     local at = started(entry)
     run(entry.city, 'read', entry.message.id, function(message, err)
@@ -735,7 +766,7 @@ function actions.delete(entry)
   end
 end
 
-function actions.thread(entry)
+function actions.thread(entry, split)
   local id = entry.message.thread_id or entry.message.id
   run(entry.city, 'thread', id, function(messages, err)
     if not messages then
@@ -751,18 +782,18 @@ function actions.thread(entry)
       lines[#lines + 1] = ''
       vim.list_extend(lines, body_lines(m.body))
     end
-    scratch(('gc-mail://%s/thread/%s'):format(entry.city.name, id), lines)
+    scratch(('gc-mail://%s/thread/%s'):format(entry.city.name, id), lines, nil, split)
   end)
 end
 
 -- A compose buffer for a reply to `entry`; the send keys (<Space>mm,
 -- :GcMail) queue it as `gc mail reply` (gc_mail.open()).
-function actions.reply(entry)
+function actions.reply(entry, split)
   local subject = entry.message.subject
   if not subject:match('^[Rr][Ee]:') then
     subject = 'Re: ' .. subject
   end
-  vim.cmd('new')
+  new_window(split)
   local buf = vim.api.nvim_get_current_buf()
   vim.bo[buf].buftype = 'nofile'
   vim.bo[buf].swapfile = false
