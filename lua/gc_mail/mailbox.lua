@@ -58,6 +58,7 @@ local RECIPIENT = 'human'
 local TITLE = ' gc mail: <CR> open  r reply  t thread  m read  u unread  a archive  d delete  R refresh '
 local LOADING = ' loading… '
 local EMPTY = ' no mail '
+local KEYS_HINT = 'r reply  t thread  u unread  a archive  d delete  q close'
 local READ_NOTE = 'Read mail stays in this mailbox until you archive or delete it; gc closes read mail an hour after it was sent.'
 
 local function notify(message, level)
@@ -641,13 +642,17 @@ local function new_window(split)
   end
 end
 
--- A scratch buffer in a new window (new_window) with `lines` and buffer-local `keys`.
-local function scratch(name, lines, keys, split)
+-- A scratch buffer in a new window (new_window) with `lines` and buffer-local
+-- `keys`; with `filetype`, it is set before the lines are written.
+local function scratch(name, lines, keys, split, filetype)
   new_window(split)
   local buf = vim.api.nvim_get_current_buf()
   vim.bo[buf].buftype = 'nofile'
   vim.bo[buf].bufhidden = 'wipe'
   vim.bo[buf].swapfile = false
+  if filetype then
+    vim.bo[buf].filetype = filetype
+  end
   pcall(vim.api.nvim_buf_set_name, buf, name)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].modifiable = false
@@ -675,6 +680,50 @@ local function header(m, city)
   }
 end
 
+-- Backslash-escapes what markdown reads as markup in a header value (the
+-- backslash itself too), so a subject or sender never turns into emphasis, a
+-- link, a heading or a table. Bodies are never escaped.
+local function md_escape(text)
+  return (require('gc_mail').one_line(text):gsub('[\\`*_%[%]<>#|]', '\\%0'))
+end
+
+local function markdown()
+  return require('gc_mail').config.markdown
+end
+
+-- A message as markdown: a title, the sender line, the id line, a rule, then
+-- the body. Blank lines keep each line its own block (a line followed by `---`
+-- would otherwise read as a heading).
+local function message_markdown(m, city)
+  local lines = {
+    '# ' .. md_escape(m.subject),
+    '',
+    ('**From** %s · **To** %s · **City** %s · %s'):format(md_escape(m.from), md_escape(m.to), md_escape(city.name),
+      md_escape(m.created_at)),
+    '',
+    ('`%s`%s · %s · %s'):format(m.id, m.thread_id and (' · thread `' .. m.thread_id .. '`') or '', KEYS_HINT, READ_NOTE),
+    '',
+    '---',
+    '',
+  }
+  vim.list_extend(lines, body_lines(m.body))
+  return lines
+end
+
+-- A thread as markdown: the first subject as the title, then each message
+-- (oldest first) under a sender and date heading, a rule between messages.
+local function thread_markdown(messages)
+  local lines = { '# ' .. md_escape(messages[1].subject) }
+  for i, m in ipairs(messages) do
+    if i > 1 then
+      vim.list_extend(lines, { '', '---' })
+    end
+    vim.list_extend(lines, { '', ('## %s · %s'):format(md_escape(m.from), md_escape(m.created_at)), '' })
+    vim.list_extend(lines, body_lines(m.body))
+  end
+  return lines
+end
+
 local actions = {}
 
 -- Opens `entry` in a scratch buffer at once, from what the mailbox already
@@ -682,18 +731,23 @@ local actions = {}
 -- message already read here runs nothing). `split`, here and in thread and
 -- reply, opens the window (new_window).
 function actions.open(entry, split)
-  local lines = header(entry.message, entry.city)
-  lines[#lines + 1] = 'Keys:    r reply  t thread  u unread  a archive  d delete  q close'
-  lines[#lines + 1] = READ_NOTE
-  lines[#lines + 1] = ''
-  vim.list_extend(lines, body_lines(entry.message.body))
+  local lines
+  if markdown() then
+    lines = message_markdown(entry.message, entry.city)
+  else
+    lines = header(entry.message, entry.city)
+    lines[#lines + 1] = 'Keys:    ' .. KEYS_HINT
+    lines[#lines + 1] = READ_NOTE
+    lines[#lines + 1] = ''
+    vim.list_extend(lines, body_lines(entry.message.body))
+  end
   local buf = scratch(('gc-mail://%s/%s'):format(entry.city.name, entry.message.id), lines, {
     r = function() actions.reply(entry) end,
     t = function() actions.thread(entry) end,
     u = function() actions.unread(entry) end,
     a = function() actions.archive(entry) end,
     d = function() actions.delete(entry) end,
-  }, split)
+  }, split, markdown() and 'markdown' or nil)
   if not entry.read then
     local at = started(entry)
     run(entry.city, 'read', entry.message.id, function(message, err)
@@ -775,14 +829,19 @@ function actions.thread(entry, split)
     table.sort(messages, function(a, b)
       return a.created < b.created
     end)
-    local lines = { ('Thread %s in %s, %d open message(s); gc lists no closed mail here'):format(id, entry.city.name, #messages) }
-    for _, m in ipairs(messages) do
-      lines[#lines + 1] = ''
-      vim.list_extend(lines, header(m, entry.city))
-      lines[#lines + 1] = ''
-      vim.list_extend(lines, body_lines(m.body))
+    local lines
+    if markdown() and #messages > 0 then
+      lines = thread_markdown(messages)
+    else
+      lines = { ('Thread %s in %s, %d open message(s); gc lists no closed mail here'):format(id, entry.city.name, #messages) }
+      for _, m in ipairs(messages) do
+        lines[#lines + 1] = ''
+        vim.list_extend(lines, header(m, entry.city))
+        lines[#lines + 1] = ''
+        vim.list_extend(lines, body_lines(m.body))
+      end
     end
-    scratch(('gc-mail://%s/thread/%s'):format(entry.city.name, id), lines, nil, split)
+    scratch(('gc-mail://%s/thread/%s'):format(entry.city.name, id), lines, nil, split, markdown() and 'markdown' or nil)
   end)
 end
 

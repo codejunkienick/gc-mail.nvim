@@ -48,11 +48,13 @@ time is unchanged; the mailbox lists mail only when you open it.
 | `panel_keymap` | `'<Space>mp'` | normal-mode mapping that opens or closes the mail panel; `false` sets none |
 | `panel_height` | `10` | rows of the mail panel |
 | `panel_poll_ms` | `60000` | while the panel is open, every city is listed again this often (ms, at least `15000`) |
+| `markdown` | `true` | the opened message and the thread are markdown buffers; `false` keeps the plain text layout |
 
 `setup()` refuses (raises an error) a prefix or suffix with a control
 character, the two together over 40 characters, a `check_ms` that is
 neither `false` nor at least a minute, a `panel_poll_ms` under 15 seconds and
-a `panel_height` that is not a whole number of at least 1.
+a `panel_height` that is not a whole number of at least 1, and a `markdown` that
+is not `true` or `false`.
 
 ## Use
 
@@ -160,6 +162,33 @@ Two invariants hold every gc answer to what it may change:
 Each action names only the message under the cursor and is shown as an error
 when gc refuses it. The opened message has the same keys (`r`, `t`, `u`, `a`,
 `d`, and `q` to close the window).
+
+**Markdown views.** With `markdown = true` (the default) the opened message
+and the thread are scratch buffers with `filetype=markdown`, so a markdown
+renderer you run (render-markdown.nvim and the like) draws them; with none,
+Neovim's own markdown highlighting still applies. The plugin requires no
+renderer. A message reads
+
+```markdown
+# Re: mailbox for gc-mail
+
+**From** mayor · **To** human · **City** imd-city · 2026-10-07T12:00:00Z
+
+`ic-wisp-a1` · thread `thread-0a1b2c3d4e5f` · r reply  t thread  u unread  a archive  d delete  q close · Read mail stays in this mailbox …
+
+---
+
+the body, exactly as gc stores it
+```
+
+and a thread is `# <subject of the first message>`, then for each message,
+oldest first, `## <sender> · <date>`, its body, and a `---` rule between
+messages. In header values (subject, sender, recipient, city, date) each of
+the characters `` \ ` * _ [ ] < > # | `` gets a backslash, so they never read
+as markup; a body is shown verbatim, so its own markdown renders as written.
+The buffers stay `nofile`, not modifiable and wiped when hidden, with the
+same keys and the same `gc-mail://` names. `markdown = false` gives the
+earlier plain layout (`From:`, `To:`, … lines) and no filetype.
 
 **How long read mail stays.** `gc mail inbox` lists unread mail only, and gc
 1.4.1 has no command that lists read mail. gc also closes read mail by itself:

@@ -1391,8 +1391,8 @@ test('opening a message shows it at once, marks it read once, and keeps it liste
   vim.api.nvim_feedkeys(vim.keycode('<CR>'), 'x', false)
   eq(#floats(), 0, 'the mailbox closes on open')
   local shown = vim.api.nvim_buf_get_lines(0, 0, -1, false)
-  eq(vim.list_slice(shown, 1, 5), { 'From:    mayor', 'To:      human', 'City:    imd-city', 'Date:    2026-10-07T12:00:00Z',
-    'Subject: Mailbox plan' }, 'headers')
+  eq(vim.list_slice(shown, 1, 3), { '# Mailbox plan', '',
+    '**From** mayor · **To** human · **City** imd-city · 2026-10-07T12:00:00Z' }, 'headers')
   eq(vim.list_slice(shown, #shown - 1), { 'body of ic-wisp-a1', 'second line' }, 'body')
   wait('marked read and kept', function()
     return has_call(call('read', '/srv/imd-city', 'ic-wisp-a1', '--json')) and #kept_files() == 1
@@ -1492,11 +1492,129 @@ test('mark read, mark unread, archive, delete and thread call gc with the exact 
   vim.wait(100)
   vim.api.nvim_feedkeys('t', 'x', false)
   wait('thread shown', function()
-    return vim.api.nvim_buf_get_lines(0, 0, 1, false)[1]:find('^Thread thread%-0a1b2c3d4e5f in imd%-city, 2 open') ~= nil
+    return vim.api.nvim_buf_get_lines(0, 0, 1, false)[1] == '# plan'
   end)
   eq(has_call(call('thread', '/srv/imd-city', 'thread-0a1b2c3d4e5f', '--json')), true, 'thread argv')
   local text = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), '\n')
-  assert(text:find('Subject: plan', 1, true) < text:find('Subject: Re: plan', 1, true), 'oldest first')
+  assert(text:find('# plan', 1, true) == 1, 'titled with the first subject')
+  assert(text:find('## human', 1, true) < text:find('## mayor', 1, true), 'oldest first')
+end)
+
+-- Opens the message `m` from the mailbox with gc's answers for it in place.
+local function open_message(m, thread_messages)
+  preload()
+  inbox('imd-city', { m })
+  inbox('side city', {})
+  answer('read', { message = vim.tbl_extend('force', m, { read = true }) })
+  if thread_messages then
+    answer('thread', { thread_id = m.thread_id, messages = thread_messages })
+  end
+  local win = mailbox().open()
+  settled(win, 1)
+  vim.api.nvim_feedkeys(vim.keycode('<CR>'), 'x', false)
+  return vim.api.nvim_get_current_buf()
+end
+
+-- The plugin's own keys: the markdown ftplugin adds [[, ]] and gO, none nowait.
+local function view_keys(buf)
+  local keys = {}
+  for _, map in ipairs(vim.api.nvim_buf_get_keymap(buf, 'n')) do
+    if map.nowait == 1 then
+      keys[#keys + 1] = map.lhs
+    end
+  end
+  table.sort(keys)
+  return keys
+end
+
+test('markdown message view: title, escaped header lines, a rule, then the body verbatim', function()
+  local body = 'a *bold* line with _under_ and [link](x) <tag> # not a heading | pipe\n```lua\nlocal x = "*y*"\n```\n---\nlast'
+  local buf = open_message(msg('ic-wisp-a1', {
+    subject = 'Re: *plan* [v2] <now> #1 | `x` \\ end', from = 'may_or', body = body,
+    thread_id = 'thread-0a1b2c3d4e5f' }))
+  eq(vim.bo[buf].filetype, 'markdown', 'filetype')
+  eq(vim.bo[buf].buftype, 'nofile', 'buftype')
+  eq(vim.bo[buf].modifiable, false, 'nomodifiable')
+  eq(vim.bo[buf].bufhidden, 'wipe', 'bufhidden')
+  eq(vim.api.nvim_buf_get_name(buf):match('gc%-mail://.*$'), 'gc-mail://imd-city/ic-wisp-a1', 'name')
+  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  eq(lines[1], '# Re: \\*plan\\* \\[v2\\] \\<now\\> \\#1 \\| \\`x\\` \\\\ end', 'escaped title')
+  eq(lines[3], '**From** may\\_or · **To** human · **City** imd-city · 2026-10-07T12:00:00Z', 'sender line')
+  assert(lines[5]:find('^`ic%-wisp%-a1` · thread `thread%-0a1b2c3d4e5f` · r reply  t thread  u unread  a archive  d delete  q close · Read mail stays'),
+    'id line: ' .. lines[5])
+  eq(lines[7], '---', 'rule')
+  eq(vim.list_slice(lines, 9), vim.split(body, '\n', { plain = true }), 'body verbatim, not escaped')
+  -- Blank lines keep the id line from reading as a heading over the rule.
+  eq({ lines[2], lines[4], lines[6], lines[8] }, { '', '', '', '' }, 'blank separators')
+  eq(view_keys(buf), { 'a', 'd', 'q', 'r', 't', 'u' }, 'the same keys as before')
+end)
+
+test('markdown thread view: first subject as the title, a heading per message, a rule between messages', function()
+  local first = msg('ic-wisp-a0', { from = 'human', to = 'mayor', subject = 'plan *v1*', thread_id = 'thread-0a1b2c3d4e5f',
+    body = '*asked*\n```\ncode\n```', created_at = '2026-10-07T11:00:00Z' })
+  local second = msg('ic-wisp-a3', { subject = 'Re: plan', thread_id = 'thread-0a1b2c3d4e5f',
+    body = 'answer', created_at = '2026-10-07T13:00:00Z' })
+  open_message(second, { second, first })
+  vim.api.nvim_feedkeys('t', 'x', false)
+  wait('thread shown', function()
+    return vim.api.nvim_buf_get_lines(0, 0, 1, false)[1] == '# plan \\*v1\\*'
+  end)
+  local buf = vim.api.nvim_get_current_buf()
+  eq(vim.bo[buf].filetype, 'markdown', 'filetype')
+  eq(vim.bo[buf].modifiable, false, 'nomodifiable')
+  eq(vim.bo[buf].buftype, 'nofile', 'buftype')
+  eq(vim.bo[buf].bufhidden, 'wipe', 'bufhidden')
+  eq(vim.api.nvim_buf_get_name(buf):match('gc%-mail://.*$'), 'gc-mail://imd-city/thread/thread-0a1b2c3d4e5f', 'name')
+  eq(vim.api.nvim_buf_get_lines(buf, 0, -1, false), {
+    '# plan \\*v1\\*', '',
+    '## human · 2026-10-07T11:00:00Z', '',
+    '*asked*', '```', 'code', '```', '',
+    '---', '',
+    '## mayor · 2026-10-07T13:00:00Z', '',
+    'answer',
+  }, 'thread layout')
+  eq(view_keys(buf), { 'q' }, 'the thread view only has q')
+end)
+
+test('markdown = false keeps the plain message and thread layouts, with no filetype', function()
+  preload()
+  gc_mail.setup({ keymap = false, mailbox_keymap = false, panel_keymap = false, state_dir = vim.fs.dirname(queue_dir),
+    markdown = false })
+  local first = msg('ic-wisp-a0', { from = 'human', to = 'mayor', subject = 'plan', thread_id = 'thread-0a1b2c3d4e5f' })
+  local second = msg('ic-wisp-a3', { subject = 'Re: plan', thread_id = 'thread-0a1b2c3d4e5f',
+    created_at = '2026-10-07T13:00:00Z' })
+  inbox('imd-city', { second })
+  inbox('side city', {})
+  answer('read', { message = second })
+  answer('thread', { thread_id = 'thread-0a1b2c3d4e5f', messages = { second, first } })
+  local win = mailbox().open()
+  settled(win, 1)
+  vim.api.nvim_feedkeys(vim.keycode('<CR>'), 'x', false)
+  local buf = vim.api.nvim_get_current_buf()
+  eq(vim.bo[buf].filetype, '', 'no filetype')
+  eq(vim.bo[buf].modifiable, false, 'nomodifiable')
+  eq(vim.api.nvim_buf_get_lines(buf, 0, -1, false), {
+    'From:    mayor', 'To:      human', 'City:    imd-city', 'Date:    2026-10-07T13:00:00Z', 'Subject: Re: plan',
+    'Id:      ic-wisp-a3   thread thread-0a1b2c3d4e5f',
+    'Keys:    r reply  t thread  u unread  a archive  d delete  q close',
+    'Read mail stays in this mailbox until you archive or delete it; gc closes read mail an hour after it was sent.',
+    '', 'body of ic-wisp-a3', 'second line',
+  }, 'plain message')
+  vim.api.nvim_feedkeys('t', 'x', false)
+  wait('thread shown', function()
+    return vim.api.nvim_buf_get_lines(0, 0, 1, false)[1]:find('^Thread thread%-0a1b2c3d4e5f in imd%-city, 2 open') ~= nil
+  end)
+  buf = vim.api.nvim_get_current_buf()
+  eq(vim.bo[buf].filetype, '', 'no filetype on the thread')
+  eq(vim.api.nvim_buf_get_lines(buf, 0, -1, false), {
+    'Thread thread-0a1b2c3d4e5f in imd-city, 2 open message(s); gc lists no closed mail here',
+    '', 'From:    human', 'To:      mayor', 'City:    imd-city', 'Date:    2026-10-07T12:00:00Z', 'Subject: plan',
+    'Id:      ic-wisp-a0   thread thread-0a1b2c3d4e5f',
+    '', 'body of ic-wisp-a0', 'second line',
+    '', 'From:    mayor', 'To:      human', 'City:    imd-city', 'Date:    2026-10-07T13:00:00Z', 'Subject: Re: plan',
+    'Id:      ic-wisp-a3   thread thread-0a1b2c3d4e5f',
+    '', 'body of ic-wisp-a3', 'second line',
+  }, 'plain thread')
 end)
 
 test('a malformed, failed or hung gc answer is said once and leaves the mailbox as it was', function()
@@ -2091,7 +2209,7 @@ test('the panel lines equal the float\'s, and its keys act on the message under 
   vim.api.nvim_feedkeys(vim.keycode('<CR>'), 'x', false)
   local shown = vim.api.nvim_get_current_win()
   eq(shown ~= pwin and shown ~= origin, true, 'a new window')
-  eq(vim.api.nvim_buf_get_lines(0, 4, 5, false), { 'Subject: at noon' }, 'the message under the panel cursor')
+  eq(vim.api.nvim_buf_get_lines(0, 0, 1, false), { '# at noon' }, 'the message under the panel cursor')
   eq(vim.api.nvim_win_get_position(shown)[1] < vim.api.nvim_win_get_position(pwin)[1], true, 'above the panel')
   eq(vim.bo[vim.api.nvim_win_get_buf(pwin)].filetype, 'gcmail-panel', 'the panel still shows the panel')
   eq(vim.api.nvim_win_get_height(pwin), 10, 'at its height')

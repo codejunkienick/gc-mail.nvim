@@ -39,6 +39,9 @@ local defaults = {
   -- While the panel is open: every city listed again this often (ms, at least
   -- 15000), besides the updates gc's event log brings.
   panel_poll_ms = 60000,
+  -- true: the opened message and the thread are markdown buffers (filetype
+  -- markdown, for whatever markdown renderer you run). false: plain text.
+  markdown = true,
 }
 
 M.config = vim.deepcopy(defaults)
@@ -495,6 +498,9 @@ local function invalid_options(opts)
   end
   if opts.check_ms ~= false and (type(opts.check_ms) ~= 'number' or opts.check_ms < 60000) then
     return 'check_ms must be false or a number of milliseconds of at least 60000'
+  end
+  if type(opts.markdown) ~= 'boolean' then
+    return 'markdown must be true or false'
   end
   if type(opts.panel_poll_ms) ~= 'number' or opts.panel_poll_ms < 15000 then
     return 'panel_poll_ms must be a number of milliseconds of at least 15000'
