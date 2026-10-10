@@ -232,8 +232,7 @@ local function invalid(record)
   end
 end
 
---- Who a record goes to, for messages: `<city> mayor`, or `<city> <sender>`
---- for a reply.
+--- Who a record goes to, for messages: `<city> <to>`.
 function M.who(record)
   return ('%s %s'):format(record.city.name, record.to or 'mayor')
 end
@@ -524,6 +523,7 @@ local function settle(wait_ms)
     return true
   end
   held.stale = nil
+  local took_away = false
   local ok, err, busy = locked(wait_ms, function()
     -- Keep the claim young while it waits, so no other Neovim takes it back
     -- (rule 3). If one already has (this Neovim was stopped for longer than
@@ -531,6 +531,7 @@ local function settle(wait_ms)
     local touched, terr = touch(held.claimed)
     if not touched then
       if tostring(terr):find('ENOENT') then
+        took_away = true
         return true
       end
       -- The time cannot be set: rewriting the claim whole makes it young as
@@ -579,7 +580,9 @@ local function settle(wait_ms)
     if held.notified then
       config.notify(('the queue file of the message to %s is in order again'):format(name))
     end
-    notify_subscribers()
+    if not took_away then
+      notify_subscribers()
+    end
     return true
   end
   held.tries = held.tries + 1

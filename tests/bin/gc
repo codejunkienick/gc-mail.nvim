@@ -51,6 +51,26 @@ if [ "$3" = mail ]; then
       ;;
   esac
 fi
+if [ "$3" = bd ] && [ "$4" = list ]; then
+  # One append per call: two calls running at once never mix their lines.
+  line=$(printf '%s\037' "$@")
+  printf '%s\n' "$line" >> "$FAKE_GC_MAIL_LOG"
+  base="$FAKE_GC_MAIL/bd-list"
+  city=$(basename "$2")
+  for ext in json exit stderr hang delay; do
+    if [ -f "$FAKE_GC_MAIL/bd-list.$city.$ext" ]; then base="$FAKE_GC_MAIL/bd-list.$city"; fi
+  done
+  if [ -f "$base.hang" ]; then
+    exec sleep "$(cat "$base.hang")"
+  fi
+  if [ -f "$base.delay" ]; then
+    out=$(cat "$base.json" 2>/dev/null)
+    sleep "$(cat "$base.delay")"
+    printf '%s\n' "$out"
+  elif [ -f "$base.json" ]; then cat "$base.json"; fi
+  if [ -f "$base.stderr" ]; then cat "$base.stderr" >&2; fi
+  exit "$(cat "$base.exit" 2>/dev/null || echo 0)"
+fi
 # Written whole (temp, then rename): a test polling the log never reads it empty.
 printf '%s\0' "$@" > "$FAKE_GC_LOG.$$"
 mv -f "$FAKE_GC_LOG.$$" "$FAKE_GC_LOG"

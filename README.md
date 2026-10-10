@@ -48,12 +48,14 @@ time is unchanged; the mailbox lists mail only when you open it.
 | `panel_keymap` | `'<Space>mp'` | normal-mode mapping that opens or closes the mail panel; `false` sets none |
 | `panel_height` | `10` | rows of the mail panel |
 | `panel_poll_ms` | `60000` | while the panel is open, every city is listed again this often (ms, at least `15000`) |
+| `history_days` | `14` | how many days of mail history to load from the bead store; a whole number of at least 1 |
 | `markdown` | `true` | the opened message and the thread are markdown buffers; `false` keeps the plain text layout |
 
 `setup()` refuses (raises an error) a prefix or suffix with a control
 character, the two together over 40 characters, a `check_ms` that is
-neither `false` nor at least a minute, a `panel_poll_ms` under 15 seconds and
-a `panel_height` that is not a whole number of at least 1, and a `markdown` that
+neither `false` nor at least a minute, a `panel_poll_ms` under 15 seconds,
+a `panel_height` that is not a whole number of at least 1, a `history_days`
+that is not a whole number of at least 1, and a `markdown` that
 is not `true` or `false`.
 
 ## Use
@@ -154,7 +156,7 @@ Two invariants hold every gc answer to what it may change:
 | --- | --- | --- |
 | `<CR>` | open the message in a new window: headers, then the body | `mail read <id>` (marks it read; nothing for mail already read) |
 | `r` | reply: a new buffer with `Re: <subject>`; `<Space>mm` (or `:GcMail`) in it queues the reply | `mail reply <id> -s <subject> -m <body> --notify`, from the send queue |
-| `t` | the thread, oldest first, in a new window | `mail thread <thread id>` |
+| `t` | the thread, oldest first, in a new window | load from the bead store (`gc bd list`); `mail thread <id>` if no thread id |
 | `m` | mark read | `mail mark-read <id>` |
 | `u` | mark unread | `mail mark-unread <id>` |
 | `a` | archive | `mail archive <id>` |
@@ -186,7 +188,7 @@ the body, exactly as gc stores it
 
 and a thread is `# <subject of the first message>`, then for each message,
 oldest first, `## <sender> · <date>`, its body, and a `---` rule between
-messages. In header values (subject, sender, recipient, city, date) each of
+messages. Closed messages carry ` (closed)` in the header. In header values (subject, sender, recipient, city, date) each of
 the characters `` \ ` * _ [ ] < > # | `` gets a backslash, so they never read
 as markup; a body is shown verbatim, so its own markdown renders as written.
 The buffers stay `nofile`, not modifiable and wiped when hidden, with the
@@ -335,6 +337,35 @@ same kind of float: `r`
 sends one again now (also a failed one), `o` opens its text in a new buffer,
 `d` deletes it (not while it is being sent), `<Esc>` or `q` closes.
 
+## History
+
+The plugin queries mail history and thread records directly from the bead store
+in the background:
+
+```sh
+gc --city <city path> bd list --type message --all --json --limit 0 --created-after <T>
+```
+
+where `T` is the current UTC time minus `history_days` (default 14 days,
+RFC 3339 UTC format). For a thread load (`opts.thread`), it queries with
+`-l thread:<id>` instead of `--created-after`. All queries run through
+`vim.system` (argument list, 10 s timeout, never a shell).
+
+- **H1 decoder.** Every record returned by `gc bd list` passes the strict H1
+  decoder (`id`, `title`, `sender`, `assignee`, `status`, `created_at`, optional
+  `description`, `labels`, and `metadata`), verifying identifiers and mapping to
+  message records with `thread_id`, `reply_to`, `closed` (when status is
+  `closed`), and `read` (`closed`, `'read'` label, or `metadata['mail.read'] == 'true'`),
+  before passing `mailbox.message()`. Records that fail decoding are skipped and
+  counted; the caller notifies "N messages could not be read" once per city.
+- **Cache.** Decoded messages are cached per city in `history.cache[city.path]`.
+  A full listing replaces the city's cache whole, while a thread listing merges
+  its messages in. In-flight requests with identical arguments collapse into a
+  single `gc` call and invoke all registered callbacks in order.
+  `history.messages(city)` returns cached messages oldest first, and
+  `history.conversation(city, with)` filters for bidirectional messages
+  between `human` and the specified party.
+
 ## Tests
 
 From the repository root, with a fake `gc` (`tests/bin/gc`) first on `PATH`;
@@ -357,3 +388,11 @@ simulated by wrapping `vim.uv` functions; the lock rule is checked by probing
 the lock at every change to a queue file, and `tests/add_many.lua` is a second
 Neovim that adds to the same queue at the same time. It prints one line per
 test and exits 0 when all pass.
+
+The fake's `bd list` branch answers `gc --city <path> bd list ...` calls,
+logging its argument list to `$FAKE_GC_MAIL_LOG` like a mail command (fields
+delimited by `0x1f`). It answers from `$FAKE_GC_MAIL/bd-list.<city>.<ext>` or
+`bd-list.<ext>` (`.json` for stdout, `.exit` for status code, `.stderr` for
+error output, `.hang` for hanging sleep duration, or `.delay` to sleep before
+printing), supporting test fixtures for multi-line JSON lists, errors, timeouts,
+and malformed answers.

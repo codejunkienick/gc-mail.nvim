@@ -42,6 +42,8 @@ local defaults = {
   -- true: the opened message and the thread are markdown buffers (filetype
   -- markdown, for whatever markdown renderer you run). false: plain text.
   markdown = true,
+  -- How many days back to load mail history from the bead store.
+  history_days = 14,
 }
 
 M.config = vim.deepcopy(defaults)
@@ -376,6 +378,9 @@ function M.open(opts)
   end
   local reply = M.reply_of(target)
   if reply then
+    if to then
+      notify(('this buffer replies to %s; %s ignored'):format(reply.to, to), vim.log.levels.WARN)
+    end
     M.send(target, reply.city, reply)
     return nil
   end
@@ -521,6 +526,9 @@ local function invalid_options(opts)
   end
   if type(opts.panel_height) ~= 'number' or opts.panel_height < 1 or opts.panel_height ~= math.floor(opts.panel_height) then
     return 'panel_height must be a whole number of rows of at least 1'
+  end
+  if type(opts.history_days) ~= 'number' or opts.history_days < 1 or opts.history_days ~= math.floor(opts.history_days) then
+    return 'history_days must be a whole number of at least 1'
   end
 end
 

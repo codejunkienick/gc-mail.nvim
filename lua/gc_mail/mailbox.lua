@@ -718,7 +718,8 @@ local function thread_markdown(messages)
     if i > 1 then
       vim.list_extend(lines, { '', '---' })
     end
-    vim.list_extend(lines, { '', ('## %s · %s'):format(md_escape(m.from), md_escape(m.created_at)), '' })
+    local closed_mark = m.closed and ' (closed)' or ''
+    vim.list_extend(lines, { '', ('## %s · %s%s'):format(md_escape(m.from), md_escape(m.created_at), closed_mark), '' })
     vim.list_extend(lines, body_lines(m.body))
   end
   return lines
@@ -821,11 +822,7 @@ function actions.delete(entry)
 end
 
 function actions.thread(entry, split)
-  local id = entry.message.thread_id or entry.message.id
-  run(entry.city, 'thread', id, function(messages, err)
-    if not messages then
-      return notify(('cannot show the thread of "%s": %s'):format(entry.message.subject, err), vim.log.levels.ERROR)
-    end
+  local function show_thread(id, messages)
     table.sort(messages, function(a, b)
       return a.created < b.created
     end)
@@ -833,7 +830,7 @@ function actions.thread(entry, split)
     if markdown() and #messages > 0 then
       lines = thread_markdown(messages)
     else
-      lines = { ('Thread %s in %s, %d open message(s); gc lists no closed mail here'):format(id, entry.city.name, #messages) }
+      lines = { ('Thread %s in %s, %d message(s)'):format(id, entry.city.name, #messages) }
       for _, m in ipairs(messages) do
         lines[#lines + 1] = ''
         vim.list_extend(lines, header(m, entry.city))
@@ -842,7 +839,24 @@ function actions.thread(entry, split)
       end
     end
     scratch(('gc-mail://%s/thread/%s'):format(entry.city.name, id), lines, nil, split, markdown() and 'markdown' or nil)
-  end)
+  end
+
+  if entry.message.thread_id then
+    require('gc_mail.history').load(entry.city, { thread = entry.message.thread_id }, function(messages, err)
+      if not messages then
+        return notify(('cannot show the thread of "%s": %s'):format(entry.message.subject, err), vim.log.levels.ERROR)
+      end
+      show_thread(entry.message.thread_id, messages)
+    end)
+  else
+    local id = entry.message.id
+    run(entry.city, 'thread', id, function(messages, err)
+      if not messages then
+        return notify(('cannot show the thread of "%s": %s'):format(entry.message.subject, err), vim.log.levels.ERROR)
+      end
+      show_thread(id, messages)
+    end)
+  end
 end
 
 -- A compose buffer for a reply to `entry`; the send keys (<Space>mm,

@@ -228,6 +228,11 @@ test('nothing runs at load time and setup maps <Space>mm, <Space>mi, <Space>mp a
   eq(vim.fn.maparg('<Space>mi', 'n'), '', 'mailbox_keymap = false still mapped')
   eq(vim.fn.maparg('<Space>mp', 'n'), '', 'panel_keymap = false still mapped')
   eq(package.loaded['gc_mail.panel'], nil, 'setup loaded the panel')
+  eq(package.loaded['gc_mail.history'], nil, 'history loaded at load time')
+  local bad_zero = pcall(gc_mail.setup, { history_days = 0 })
+  eq(bad_zero, false, 'setup refuses history_days = 0')
+  local bad_str = pcall(gc_mail.setup, { history_days = 'x' })
+  eq(bad_str, false, 'setup refuses history_days = x')
   eq(vim.fn.exists(':GcMail'), 2, ':GcMail missing without a keymap')
   gc_mail.setup({ keymap = '<leader>gm', state_dir = vim.fs.dirname(queue_dir) })
   eq(vim.fn.maparg('<leader>gm', 'n') ~= '', true, 'custom keymap missing')
@@ -1435,6 +1440,22 @@ end
 local function answer(cmd, record, city)
   local base = vim.env.FAKE_GC_MAIL .. '/' .. cmd .. (city and ('.' .. city) or '')
   write(base .. '.json', vim.json.encode(vim.tbl_extend('keep', record, { schema_version = '1', ok = true })) .. '\n')
+  if cmd == 'thread' and record.messages then
+    local bd_list = {}
+    for _, tm in ipairs(record.messages) do
+      bd_list[#bd_list + 1] = {
+        id = tm.id,
+        title = tm.subject,
+        sender = tm.from,
+        assignee = tm.to,
+        status = tm.closed and 'closed' or 'open',
+        created_at = tm.created_at,
+        description = tm.body,
+        labels = (record.thread_id or tm.thread_id) and { 'thread:' .. (record.thread_id or tm.thread_id) } or {},
+      }
+    end
+    write(vim.env.FAKE_GC_MAIL .. '/bd-list' .. (city and ('.' .. city) or '') .. '.json', vim.json.encode(bd_list) .. '\n')
+  end
 end
 
 local function raw_answer(cmd, ext, text, city)
@@ -1617,7 +1638,9 @@ test('mark read, mark unread, archive, delete and thread call gc with the exact 
   end
   vim.api.nvim_feedkeys('q', 'x', false)
   -- t shows the thread, oldest first.
-  inbox('imd-city', { msg('ic-wisp-a3', { subject = 'Re: plan', thread_id = 'thread-0a1b2c3d4e5f' }) })
+  local m3 = msg('ic-wisp-a3', { subject = 'Re: plan' })
+  m3.thread_id = nil
+  inbox('imd-city', { m3 })
   answer('thread', { thread_id = 'thread-0a1b2c3d4e5f', messages = {
     msg('ic-wisp-a3', { subject = 'Re: plan', thread_id = 'thread-0a1b2c3d4e5f', created_at = '2026-10-07T13:00:00Z' }),
     msg('ic-wisp-a0', { from = 'human', to = 'mayor', subject = 'plan', thread_id = 'thread-0a1b2c3d4e5f', read = true }),
@@ -1629,7 +1652,7 @@ test('mark read, mark unread, archive, delete and thread call gc with the exact 
   wait('thread shown', function()
     return vim.api.nvim_buf_get_lines(0, 0, 1, false)[1] == '# plan'
   end)
-  eq(has_call(call('thread', '/srv/imd-city', 'thread-0a1b2c3d4e5f', '--json')), true, 'thread argv')
+  eq(has_call(call('thread', '/srv/imd-city', 'ic-wisp-a3', '--json')), true, 'thread argv')
   local text = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), '\n')
   assert(text:find('# plan', 1, true) == 1, 'titled with the first subject')
   assert(text:find('## human', 1, true) < text:find('## mayor', 1, true), 'oldest first')
@@ -1737,12 +1760,12 @@ test('markdown = false keeps the plain message and thread layouts, with no filet
   }, 'plain message')
   vim.api.nvim_feedkeys('t', 'x', false)
   wait('thread shown', function()
-    return vim.api.nvim_buf_get_lines(0, 0, 1, false)[1]:find('^Thread thread%-0a1b2c3d4e5f in imd%-city, 2 open') ~= nil
+    return vim.api.nvim_buf_get_lines(0, 0, 1, false)[1]:find('^Thread thread%-0a1b2c3d4e5f in imd%-city, 2 message%(s%)') ~= nil
   end)
   buf = vim.api.nvim_get_current_buf()
   eq(vim.bo[buf].filetype, '', 'no filetype on the thread')
   eq(vim.api.nvim_buf_get_lines(buf, 0, -1, false), {
-    'Thread thread-0a1b2c3d4e5f in imd-city, 2 open message(s); gc lists no closed mail here',
+    'Thread thread-0a1b2c3d4e5f in imd-city, 2 message(s)',
     '', 'From:    human', 'To:      mayor', 'City:    imd-city', 'Date:    2026-10-07T12:00:00Z', 'Subject: plan',
     'Id:      ic-wisp-a0   thread thread-0a1b2c3d4e5f',
     '', 'body of ic-wisp-a0', 'second line',
@@ -2094,7 +2117,7 @@ test('r2a2: a thread id that is not one gc prints is refused, never passed to gc
   vim.wait(200)
   for _, c in ipairs(mail_calls()) do
     assert(c[4] ~= 'thread' or c[5] == 'thread-' .. vim.fn.sha256('ic-wisp-a1'):sub(1, 12), 'thread argv: ' .. table.concat(c, ' '))
-    assert(not vim.tbl_contains(c, '--all'), 'an option reached gc: ' .. table.concat(c, ' '))
+    assert(c[3] ~= 'mail' or not vim.tbl_contains(c, '--all'), 'an option reached gc: ' .. table.concat(c, ' '))
   end
 end)
 
@@ -2574,6 +2597,415 @@ test('an archive from the panel also leaves the open float and survives a late i
   eq(rows(fwin), { ' ● imd-city  mayor  stays' }, 'nor to the float')
   eq(#floats(), 1, 'the float stayed open')
   vim.api.nvim_feedkeys('q', 'x', false)
+end)
+
+test('history.load runs the exact argv and returns the five good messages oldest first; skipped = 2 and the notice said once', function()
+  local fixture = [=[
+[
+  {
+    "id": "ic-wisp-a0",
+    "title": "first thread message",
+    "sender": "human",
+    "assignee": "mayor",
+    "status": "closed",
+    "created_at": "2026-10-07T10:00:00Z",
+    "description": "body of first",
+    "labels": [
+      "thread:thread-0a1b2c3d4e5f"
+    ]
+  },
+  {
+    "id": "ic-wisp-a1",
+    "title": "reply message",
+    "sender": "mayor",
+    "assignee": "human",
+    "status": "open",
+    "created_at": "2026-10-07T11:00:00Z",
+    "description": "body of reply",
+    "labels": [
+      "thread:thread-0a1b2c3d4e5f",
+      "reply-to:ic-wisp-a0"
+    ]
+  },
+  {
+    "id": "ic-wisp-a2",
+    "title": "read message",
+    "sender": "mayor",
+    "assignee": "human",
+    "status": "open",
+    "created_at": "2026-10-07T12:00:00Z",
+    "description": "body of read",
+    "labels": [
+      "read"
+    ]
+  },
+  {
+    "id": "ic-wisp-a3",
+    "title": "no assignee",
+    "sender": "mayor",
+    "assignee": "",
+    "status": "open",
+    "created_at": "2026-10-07T13:00:00Z",
+    "description": "skipped"
+  },
+  {
+    "id": "ic-wisp-a4",
+    "title": "bad date",
+    "sender": "mayor",
+    "assignee": "human",
+    "status": "open",
+    "created_at": "not-a-date",
+    "description": "skipped"
+  },
+  {
+    "id": "ic-wisp-a5",
+    "title": "no labels",
+    "sender": "human",
+    "assignee": "mayor",
+    "status": "open",
+    "created_at": "2026-10-07T14:00:00Z",
+    "description": "body without labels"
+  },
+  {
+    "id": "ic-wisp-a6",
+    "title": "no description",
+    "sender": "planner",
+    "assignee": "human",
+    "status": "open",
+    "created_at": "2026-10-07T15:00:00Z",
+    "labels": []
+  }
+]
+]=]
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fixture)
+  local history = require('gc_mail.history')
+  history.reset()
+  notes = {}
+  local done, res_list, res_err, res_skipped
+  local before_time = os.time()
+  history.load(TWO[1], {}, function(list, err, skipped)
+    done, res_list, res_err, res_skipped = true, list, err, skipped
+  end)
+  wait('history load finished', function() return done end)
+  eq(res_err, nil, 'no error')
+  eq(res_skipped, 2, 'skipped count is 2')
+  eq(#res_list, 5, 'five good messages')
+  local calls = mail_calls()
+  eq(#calls, 1, 'one bd list call')
+  local argv = calls[1]
+  eq(argv[1], '--city', '--city flag')
+  eq(argv[2], '/srv/imd-city', 'city path')
+  eq(argv[3], 'bd', 'bd command')
+  eq(argv[4], 'list', 'list subcommand')
+  eq(argv[5], '--type', '--type flag')
+  eq(argv[6], 'message', 'type argument')
+  eq(argv[7], '--all', '--all flag')
+  eq(argv[8], '--json', '--json flag')
+  eq(argv[9], '--limit', '--limit flag')
+  eq(argv[10], '0', 'limit argument')
+  eq(argv[11], '--created-after', '--created-after flag')
+  local t_str = argv[12]
+  local t_epoch = require('gc_mail.mailbox').epoch(t_str)
+  assert(t_epoch, 'valid created-after timestamp')
+  local expected_epoch = before_time - 14 * 86400
+  assert(math.abs(t_epoch - expected_epoch) <= 60, 'T within a minute of now minus history_days')
+
+  eq(res_list[1].id, 'ic-wisp-a0', 'msg 1 id')
+  eq(res_list[1].from, 'human', 'msg 1 from')
+  eq(res_list[1].to, 'mayor', 'msg 1 to')
+  eq(res_list[1].subject, 'first thread message', 'msg 1 subject')
+  eq(res_list[1].body, 'body of first', 'msg 1 body')
+  eq(res_list[1].closed, true, 'msg 1 closed')
+  eq(res_list[1].read, true, 'msg 1 read')
+  eq(res_list[1].thread_id, 'thread-0a1b2c3d4e5f', 'msg 1 thread_id')
+  eq(res_list[1].reply_to, nil, 'msg 1 reply_to')
+
+  eq(res_list[2].id, 'ic-wisp-a1', 'msg 2 id')
+  eq(res_list[2].from, 'mayor', 'msg 2 from')
+  eq(res_list[2].to, 'human', 'msg 2 to')
+  eq(res_list[2].subject, 'reply message', 'msg 2 subject')
+  eq(res_list[2].body, 'body of reply', 'msg 2 body')
+  eq(res_list[2].closed, false, 'msg 2 closed')
+  eq(res_list[2].read, false, 'msg 2 read')
+  eq(res_list[2].thread_id, 'thread-0a1b2c3d4e5f', 'msg 2 thread_id')
+  eq(res_list[2].reply_to, 'ic-wisp-a0', 'msg 2 reply_to')
+
+  eq(res_list[3].id, 'ic-wisp-a2', 'msg 3 id')
+  eq(res_list[3].from, 'mayor', 'msg 3 from')
+  eq(res_list[3].to, 'human', 'msg 3 to')
+  eq(res_list[3].subject, 'read message', 'msg 3 subject')
+  eq(res_list[3].body, 'body of read', 'msg 3 body')
+  eq(res_list[3].closed, false, 'msg 3 closed')
+  eq(res_list[3].read, true, 'msg 3 read')
+  eq(res_list[3].thread_id, nil, 'msg 3 thread_id')
+  eq(res_list[3].reply_to, nil, 'msg 3 reply_to')
+
+  eq(res_list[4].id, 'ic-wisp-a5', 'msg 4 id')
+  eq(res_list[4].from, 'human', 'msg 4 from')
+  eq(res_list[4].to, 'mayor', 'msg 4 to')
+  eq(res_list[4].subject, 'no labels', 'msg 4 subject')
+  eq(res_list[4].body, 'body without labels', 'msg 4 body')
+  eq(res_list[4].closed, false, 'msg 4 closed')
+  eq(res_list[4].read, false, 'msg 4 read')
+  eq(res_list[4].thread_id, nil, 'msg 4 thread_id')
+  eq(res_list[4].reply_to, nil, 'msg 4 reply_to')
+
+  eq(res_list[5].id, 'ic-wisp-a6', 'msg 5 id')
+  eq(res_list[5].from, 'planner', 'msg 5 from')
+  eq(res_list[5].to, 'human', 'msg 5 to')
+  eq(res_list[5].subject, 'no description', 'msg 5 subject')
+  eq(res_list[5].body, '', 'msg 5 body absent is empty string')
+  eq(res_list[5].closed, false, 'msg 5 closed')
+  eq(res_list[5].read, false, 'msg 5 read')
+  eq(res_list[5].thread_id, nil, 'msg 5 thread_id')
+  eq(res_list[5].reply_to, nil, 'msg 5 reply_to')
+
+  local skipped_notes = vim.tbl_filter(function(n)
+    return n.message:find('2 messages could not be read', 1, true) ~= nil
+  end, notes)
+  eq(#skipped_notes, 1, 'skipped notice said once')
+
+  done = false
+  history.load(TWO[1], {}, function() done = true end)
+  wait('second load done', function() return done end)
+  skipped_notes = vim.tbl_filter(function(n)
+    return n.message:find('2 messages could not be read', 1, true) ~= nil
+  end, notes)
+  eq(#skipped_notes, 1, 'notice still said once')
+end)
+
+test('a thread load runs -l thread:<id> and no --created-after; an id that is not a thread id runs nothing', function()
+  local history = require('gc_mail.history')
+  history.reset()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  local done, res_list, res_err
+  history.load(TWO[1], { thread = 'thread-0a1b2c3d4e5f' }, function(list, err)
+    done, res_list, res_err = true, list, err
+  end)
+  wait('thread load finished', function() return done end)
+  eq(res_err, nil, 'no error')
+  local calls = mail_calls()
+  eq(#calls, 1, 'one call made')
+  local argv = calls[1]
+  eq(vim.tbl_contains(argv, '-l'), true, '-l flag present')
+  eq(vim.tbl_contains(argv, 'thread:thread-0a1b2c3d4e5f'), true, 'thread id argument present')
+  eq(vim.tbl_contains(argv, '--created-after'), false, 'no --created-after')
+
+  local bad_done, bad_res, bad_err
+  history.load(TWO[1], { thread = 'bad-thread-id' }, function(list, err)
+    bad_done, bad_res, bad_err = true, list, err
+  end)
+  eq(bad_done, true, 'bad id returned immediately')
+  eq(bad_res, nil, 'no list returned')
+  assert(bad_err ~= nil, 'error returned')
+  eq(#mail_calls(), 1, 'bad thread id ran no commands')
+end)
+
+test('a non-zero exit, a hung fake, a non-list answer and malformed JSON each give nil and the reason, and the cache is unchanged', function()
+  local history = require('gc_mail.history')
+  history.reset()
+  eq(history.messages(TWO[1]), {}, 'cache empty initially')
+
+  reset()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.exit', '1')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.stderr', 'bd list: store failed\nline 2')
+  local done, res_list, res_err
+  history.load(TWO[1], {}, function(l, e) done, res_list, res_err = true, l, e end)
+  wait('non-zero exit finished', function() return done end)
+  eq(res_list, nil, 'exit 1 gives nil list')
+  assert(res_err:find('failed: bd list: store failed'), 'exit 1 reason: ' .. tostring(res_err))
+  eq(history.messages(TWO[1]), {}, 'cache unchanged on exit 1')
+
+  reset()
+  history.configure({ timeout_ms = 200 })
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.hang', '5')
+  done, res_list, res_err = false, nil, nil
+  history.load(TWO[1], {}, function(l, e) done, res_list, res_err = true, l, e end)
+  wait('timeout finished', function() return done end, 5000)
+  eq(res_list, nil, 'hang gives nil list')
+  assert(res_err:find('did not answer within 0.2 s'), 'hang reason: ' .. tostring(res_err))
+  eq(history.messages(TWO[1]), {}, 'cache unchanged on timeout')
+  history.configure({ timeout_ms = 10000 })
+
+  reset()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '{"ok": true}')
+  done, res_list, res_err = false, nil, nil
+  history.load(TWO[1], {}, function(l, e) done, res_list, res_err = true, l, e end)
+  wait('non-list finished', function() return done end)
+  eq(res_list, nil, 'non-list gives nil list')
+  assert(res_err:find('printed something unexpected'), 'non-list reason: ' .. tostring(res_err))
+  eq(history.messages(TWO[1]), {}, 'cache unchanged on non-list')
+
+  reset()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '{ bad json')
+  done, res_list, res_err = false, nil, nil
+  history.load(TWO[1], {}, function(l, e) done, res_list, res_err = true, l, e end)
+  wait('malformed finished', function() return done end)
+  eq(res_list, nil, 'malformed gives nil list')
+  assert(res_err:find('printed something unexpected'), 'malformed reason: ' .. tostring(res_err))
+  eq(history.messages(TWO[1]), {}, 'cache unchanged on malformed json')
+end)
+
+test('two loads at once make one gc call and both callbacks run', function()
+  local history = require('gc_mail.history')
+  history.reset()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.delay', '0.2')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  local done1, done2 = false, false
+  local list1, list2
+  history.load(TWO[1], {}, function(l) done1, list1 = true, l end)
+  history.load(TWO[1], {}, function(l) done2, list2 = true, l end)
+  wait('both callbacks run', function() return done1 and done2 end)
+  eq(#list1, 0, 'list 1')
+  eq(#list2, 0, 'list 2')
+  eq(#mail_calls(), 1, 'only one gc call was made')
+end)
+
+test('history.conversation(city, mayor) returns only the human<->mayor messages, oldest first', function()
+  local history = require('gc_mail.history')
+  history.reset()
+  history.put(TWO[1], { id = 'ic-wisp-a0', from = 'human', to = 'mayor', created = 100 })
+  history.put(TWO[1], { id = 'ic-wisp-a1', from = 'mayor', to = 'human', created = 200 })
+  history.put(TWO[1], { id = 'ic-wisp-a2', from = 'planner', to = 'human', created = 300 })
+  history.put(TWO[1], { id = 'ic-wisp-a3', from = 'human', to = 'mayor', created = 400 })
+  local conv = history.conversation(TWO[1], 'mayor')
+  eq(#conv, 3, 'three human<->mayor messages')
+  eq(conv[1].id, 'ic-wisp-a0', 'first')
+  eq(conv[2].id, 'ic-wisp-a1', 'second')
+  eq(conv[3].id, 'ic-wisp-a3', 'third')
+end)
+
+test('the thread view t in the mailbox renders every message of the thread, closed ones marked, from one bd list call', function()
+  preload()
+  local history = require('gc_mail.history')
+  history.reset()
+  local fixture = [=[
+[
+  {
+    "id": "ic-wisp-a0",
+    "title": "first thread message",
+    "sender": "human",
+    "assignee": "mayor",
+    "status": "closed",
+    "created_at": "2026-10-07T10:00:00Z",
+    "description": "body of first",
+    "labels": [
+      "thread:thread-0a1b2c3d4e5f"
+    ]
+  },
+  {
+    "id": "ic-wisp-a1",
+    "title": "second thread message",
+    "sender": "mayor",
+    "assignee": "human",
+    "status": "open",
+    "created_at": "2026-10-07T11:00:00Z",
+    "description": "body of second",
+    "labels": [
+      "thread:thread-0a1b2c3d4e5f"
+    ]
+  }
+]
+]=]
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fixture)
+  write(vim.env.FAKE_GC_MAIL .. '/inbox.imd-city.json', vim.json.encode({
+    schema_version = '1', ok = true, recipients = { 'human' },
+    messages = {
+      { id = 'ic-wisp-a1', from = 'mayor', to = 'human', subject = 'second thread message', body = 'body of second',
+        created_at = '2026-10-07T11:00:00Z', read = false, thread_id = 'thread-0a1b2c3d4e5f' }
+    }
+  }))
+  write(vim.env.FAKE_GC_MAIL .. '/inbox.side-city.json', vim.json.encode({ schema_version = '1', ok = true, recipients = { 'human' }, messages = {} }))
+
+  local win = require('gc_mail.mailbox').open()
+  wait('mailbox filled', function()
+    return #lines_of(win) == 1 and not lines_of(win)[1]:find('loading')
+  end)
+
+  vim.api.nvim_feedkeys('t', 'x', false)
+  wait('thread scratch opened', function()
+    return #floats() == 0 and vim.api.nvim_buf_get_name(0):find('^gc%-mail://imd%-city/thread/thread%-0a1b2c3d4e5f') ~= nil
+  end)
+  local t_buf = vim.api.nvim_get_current_buf()
+  local t_lines = vim.api.nvim_buf_get_lines(t_buf, 0, -1, false)
+  eq(t_lines[1], '# first thread message', 'title is first subject')
+  assert(t_lines[3]:find('^## human · 2026%-10%-07T10:00:00Z %(closed%)'), 'closed message marked (closed): ' .. t_lines[3])
+  assert(t_lines[9]:find('^## mayor · 2026%-10%-07T11:00:00Z$'), 'open message has no (closed): ' .. t_lines[9])
+
+  local calls = mail_calls()
+  local thread_calls = vim.tbl_filter(function(c) return c[4] == 'thread' end, calls)
+  local bd_list_calls = vim.tbl_filter(function(c) return c[3] == 'bd' and c[4] == 'list' end, calls)
+  eq(#thread_calls, 0, 'no gc mail thread call made')
+  eq(#bd_list_calls, 1, 'one bd list call made')
+
+  vim.cmd('silent! close')
+  reset()
+  write(vim.env.FAKE_GC_MAIL .. '/inbox.imd-city.json', vim.json.encode({
+    schema_version = '1', ok = true, recipients = { 'human' },
+    messages = {
+      { id = 'ic-wisp-a2', from = 'mayor', to = 'human', subject = 'no thread id', body = 'body',
+        created_at = '2026-10-07T12:00:00Z', read = false }
+    }
+  }))
+  write(vim.env.FAKE_GC_MAIL .. '/inbox.side-city.json', vim.json.encode({ schema_version = '1', ok = true, recipients = { 'human' }, messages = {} }))
+  write(vim.env.FAKE_GC_MAIL .. '/thread.imd-city.json', vim.json.encode({
+    schema_version = '1', ok = true, thread_id = 'thread-112233445566',
+    messages = {
+      { id = 'ic-wisp-a2', from = 'mayor', to = 'human', subject = 'no thread id', body = 'body',
+        created_at = '2026-10-07T12:00:00Z', read = false, thread_id = 'thread-112233445566' }
+    }
+  }))
+  win = require('gc_mail.mailbox').open()
+  wait('mailbox filled', function()
+    return #lines_of(win) == 1 and not lines_of(win)[1]:find('loading')
+  end)
+  vim.api.nvim_feedkeys('t', 'x', false)
+  wait('thread scratch opened for fallback', function()
+    return #floats() == 0 and vim.api.nvim_buf_get_name(0):find('^gc%-mail://imd%-city/thread/ic%-wisp%-a2') ~= nil
+  end)
+  calls = mail_calls()
+  thread_calls = vim.tbl_filter(function(c) return c[4] == 'thread' and c[5] == 'ic-wisp-a2' end, calls)
+  eq(#thread_calls, 1, 'message without thread_id called gc mail thread')
+end)
+
+test('settle after another process took the claim leaves the subscriber count of calls unchanged', function()
+  local sub_calls = 0
+  gc_mail.queue.subscribe('count_sub', function()
+    sub_calls = sub_calls + 1
+  end)
+  vim.env.FAKE_GC_DELAY = '0.3'
+  local id = assert(gc_mail.queue.add(TWO[1], { subject = 'claim-test', body = 'body' }))
+  wait('subscriber saw add', function() return sub_calls == 1 end)
+  gc_mail.queue.pump()
+  wait('claimed file exists', function()
+    local sp = spool()
+    return #sp > 0 and sp[1]:find('%.sending%-') ~= nil
+  end)
+  wait('subscriber saw claim', function() return sub_calls == 2 end)
+  local claimed_file = spool()[1]
+  assert(os.remove(queue_dir .. '/' .. claimed_file))
+  local before_calls = sub_calls
+  wait('send finished', gc_mail.queue.idle)
+  vim.wait(100)
+  eq(sub_calls, before_calls, 'subscriber count of calls unchanged')
+  gc_mail.queue.subscribe('count_sub', nil)
+end)
+
+test(':GcMail <to> in a reply buffer sends to sender and warns', function()
+  notes = {}
+  local buf = buffer({ 'Re: test reply', '', 'reply body' })
+  vim.api.nvim_buf_set_var(buf, 'gc_mail_reply', {
+    city = TWO[1], id = 'ic-wisp-a0', to = 'mayor',
+  })
+  preload()
+  vim.cmd('GcMail other')
+  wait('sent', drained)
+  eq(recorded_argv()[4], 'reply', 'verb is reply')
+  eq(recorded_argv()[5], 'ic-wisp-a0', 'replies to message id')
+  local warns = vim.tbl_filter(function(n)
+    return n.level == vim.log.levels.WARN and n.message == 'gc-mail: this buffer replies to mayor; other ignored'
+  end, notes)
+  eq(#warns, 1, 'warning shown')
 end)
 
 local failed = 0
