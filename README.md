@@ -65,13 +65,15 @@ is not `true` or `false`.
    a labelled message, is taken out first), and the label counts in the 72
    characters. gc files order and script mail as `human` too, so the label
    is what tells a mayor your own mail apart.
-2. `<Space>mm`. The picker opens at once and lists `<city>  mayor` for each
-   city from the cached `gc cities --json`, also when there is only one, while
-   the list is fetched again in the background (the newer list replaces it
-   when it arrives). Before the first answer it shows `loading…` and fills in.
+2. `<Space>mm` (or `:GcMail [to]`). The picker opens at once: `<Space>mm` or
+   `:GcMail` lists `<city>  mayor` for each city from the cached `gc cities --json`;
+   `:GcMail <to>` (e.g. `:GcMail planner`) opens with the title
+   `mail buffer to <to> in` and lists `<city>  <to>` per city. The list is
+   fetched again in the background (the newer list replaces it when it
+   arrives). Before the first answer it shows `loading…` and fills in.
    `j`/`k` or the arrow keys move, `<CR>` sends, `<Esc>` or `q` cancels.
 3. `<CR>` writes the message to the queue and only then empties the buffer
-   (marked unmodified, `queued for <city> mayor: <subject>`, the subject as
+   (marked unmodified, `queued for <city> <to>: <subject>`, the subject as
    sent, label included); the clear is one undo
    step, so `u` brings the text back. If the queue file cannot be written the
    buffer stays as it was and the error is shown. If the buffer cannot be
@@ -80,11 +82,12 @@ is not `true` or `false`.
 4. The queue's worker runs, as an argument list (never through a shell):
 
    ```sh
-   gc --city <city path> mail send mayor -s <subject> -m <body> --notify
+   gc --city <city path> mail send <to> -s <subject> -m <body> --notify
    ```
 
-   The sender is gc's default outside an agent session (`human`). On exit 0
-   it deletes the queue file and shows `sent to <city> mayor`.
+   `<to>` is the chosen recipient, or `mayor` by default. The sender is gc's
+   default outside an agent session (`human`). On exit 0 it deletes the queue
+   file and shows `sent to <city> <to>`.
 
 An empty or whitespace-only buffer is refused before anything runs, as is a
 buffer over 120 KiB (one argument cannot be larger on Linux) and a buffer that
@@ -265,13 +268,16 @@ answer that arrives later only updates the mailbox state.
 ## The send queue
 
 Each message is one JSON file (city name and path, subject, body, created
-time, tries, last error) in `<state_dir>/queue/`, by default
-`~/.local/state/nvim/gc-mail/queue/`. Every field of a file is checked when
-it is read; a file that does not pass is listed as unreadable and never sent,
-and `o` shows its raw text.
+time, tries, last error, and optional recipient `to`) in `<state_dir>/queue/`,
+by default `~/.local/state/nvim/gc-mail/queue/`. Every field of a file is
+checked when it is read; a file that does not pass is listed as unreadable and
+never sent, and `o` shows its raw text.
 
 - One worker sends, one gc process at a time, oldest first: messages to one
-  city's mayor arrive in the order you wrote them.
+  city's mayor or recipient arrive in the order you wrote them.
+- Other views can subscribe to queue file changes (add, claim, a send's
+  outcome, put back, retry, delete, dropping a gone process's claim) via
+  `require('gc_mail.queue').subscribe(name, fn)`.
 - A failed send keeps its file and shows the first lines of gc's error once,
   then retries after 10 s, 1 min and 5 min (`retry_ms`). After the last try
   fails the message is marked failed and is sent again only from

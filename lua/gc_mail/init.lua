@@ -207,22 +207,28 @@ function M.argv(city, message)
   if message.reply_to then
     return { 'gc', '--city', city.path, 'mail', 'reply', message.reply_to, '-s', message.subject, '-m', message.body, '--notify' }
   end
-  return { 'gc', '--city', city.path, 'mail', 'send', 'mayor', '-s', message.subject, '-m', message.body, '--notify' }
+  return { 'gc', '--city', city.path, 'mail', 'send', message.to or 'mayor', '-s', message.subject, '-m', message.body, '--notify' }
 end
 
---- Queue `buf` for `city`'s mayor, or as a reply when `reply` ({ id, to })
---- is given, then clear it. The message is on disk before the buffer
---- changes, and the clear is its own undo step, so `u` brings the text back.
---- A refused or failed queue write leaves the buffer as it was. Returns the
---- queue id, or nil.
-function M.send(buf, city, reply)
+--- Queue `buf` for `city`'s mayor, or as a reply when `opts` ({ id, to })
+--- is given, or to `opts.to`, then clear it. The message is on disk before
+--- the buffer changes, and the clear is its own undo step, so `u` brings
+--- the text back. A refused or failed queue write leaves the buffer as it
+--- was. Returns the queue id, or nil.
+function M.send(buf, city, opts)
   local message, reason = M.message(buf)
   if not message then
     notify(reason, vim.log.levels.WARN)
     return nil
   end
-  if reply then
-    message.reply_to, message.to = reply.id, reply.to
+  local is_reply = false
+  if opts then
+    if opts.id or opts.reply_to then
+      is_reply = true
+      message.reply_to, message.to = opts.id or opts.reply_to, opts.to
+    elseif opts.to ~= nil then
+      message.to = opts.to
+    end
   end
   local who = queue.who({ city = city, to = message.to })
   local id, err = queue.add(city, message)
@@ -240,7 +246,7 @@ function M.send(buf, city, reply)
       vim.bo[buf].modified = false
     end
   end)
-  if reply then
+  if is_reply then
     -- Queued: the buffer is no longer a reply waiting to go, cleared or not.
     pcall(vim.api.nvim_buf_del_var, buf, 'gc_mail_reply')
   end
@@ -334,10 +340,11 @@ end
 
 M.float = float
 
-local function city_items(cities)
+local function city_items(cities, to)
   local items = {}
+  local recipient = to or 'mayor'
   for i, city in ipairs(cities) do
-    items[i] = ' ' .. city.name .. '  mayor '
+    items[i] = (' %s  %s '):format(city.name, recipient)
   end
   return items
 end
@@ -351,11 +358,17 @@ function M.reply_of(buf)
   end
 end
 
---- Open the mayor picker for the current buffer. It shows the cached cities
+--- Open the recipient picker for the current buffer. It shows the cached cities
 --- (or a loading line) at once and refreshes them in the background. In a
 --- reply buffer it queues the reply at once instead: the city and the
 --- message it answers are known.
-function M.open()
+function M.open(opts)
+  local to
+  if type(opts) == 'string' and opts ~= '' then
+    to = opts
+  elseif type(opts) == 'table' then
+    to = opts.to
+  end
   local target = vim.api.nvim_get_current_buf()
   local _, reason = M.message(target)
   if reason then
@@ -367,12 +380,13 @@ function M.open()
     return nil
   end
   local shown = cache.cities and #cache.cities > 0 and cache.cities or nil
-  local picker = float(' mail buffer to ', shown and city_items(shown) or { LOADING }, {
+  local title = to and (' mail buffer to %s in '):format(to) or ' mail buffer to '
+  local picker = float(title, shown and city_items(shown, to) or { LOADING }, {
     ['<CR>'] = function(p, row)
       if shown then
         local city = shown[row]
         p.close()
-        M.send(target, city)
+        M.send(target, city, to and { to = to } or nil)
       end
     end,
   })
@@ -393,7 +407,7 @@ function M.open()
       return notify('no cities are registered with gc', vim.log.levels.WARN)
     end
     shown = cities
-    picker.set(city_items(cities))
+    picker.set(city_items(cities, to))
   end)
   return picker.win
 end
@@ -533,9 +547,10 @@ function M.setup(opts)
       require('gc_mail.panel').toggle()
     end, { desc = 'Toggle the gc mail panel' })
   end
-  vim.api.nvim_create_user_command('GcMail', function()
-    require('gc_mail').open()
-  end, { desc = 'Mail the buffer to a gc city mayor', force = true })
+  vim.api.nvim_create_user_command('GcMail', function(cmd_opts)
+    local to = vim.trim(cmd_opts.args or '') ~= '' and vim.trim(cmd_opts.args) or nil
+    require('gc_mail').open(to)
+  end, { desc = 'Mail the buffer to a gc city mayor or recipient', force = true, nargs = '?' })
   vim.api.nvim_create_user_command('GcMailQueue', function()
     require('gc_mail').open_queue()
   end, { desc = 'List the gc-mail send queue', force = true })

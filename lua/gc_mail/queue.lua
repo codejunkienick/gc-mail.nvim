@@ -82,6 +82,40 @@ local EWOULDBLOCK = has_ffi and ((ffi.os == 'OSX' or ffi.os == 'BSD') and 35 or 
 -- of an earlier process that had the same pid.
 M.token = vim.text.hexencode(uv.random(8)):lower()
 
+local subscribers = {}
+local subscriber_errors = {}
+
+local function notify_subscribers()
+  if not next(subscribers) then
+    return
+  end
+  vim.schedule(function()
+    local current = {}
+    for name, fn in pairs(subscribers) do
+      current[name] = fn
+    end
+    for name, fn in pairs(current) do
+      if subscribers[name] then
+        local ok, err = pcall(fn)
+        if not ok and not subscriber_errors[name] then
+          subscriber_errors[name] = true
+          config.notify(('subscriber %s failed: %s'):format(name, tostring(err)), vim.log.levels.ERROR)
+        end
+      end
+    end
+  end)
+end
+
+function M.subscribe(name, fn)
+  if fn == nil then
+    subscribers[name] = nil
+    subscriber_errors[name] = nil
+  else
+    subscribers[name] = fn
+    subscriber_errors[name] = nil
+  end
+end
+
 function M.configure(opts)
   config = vim.tbl_extend('force', vim.deepcopy(defaults), opts or {})
   worker.stopped = false
@@ -182,11 +216,17 @@ local function invalid(record)
     return 'bad delivered'
   end
   -- A reply names the message it answers and, for display, its sender.
-  if record.reply_to ~= nil or record.to ~= nil then
+  if record.reply_to ~= nil then
     if not M.mail_id(record.reply_to) then
       return 'bad reply_to'
     end
-    if type(record.to) ~= 'string' or record.to == '' or record.to:find('[%z\1-\31\127]') then
+    if record.to == nil then
+      return 'bad to'
+    end
+  end
+  if record.to ~= nil then
+    if type(record.to) ~= 'string' or record.to == '' or #record.to > 100
+        or record.to:find('[%z\1-\31\127]') or record.to:sub(1, 1) == '-' then
       return 'bad to'
     end
   end
@@ -449,6 +489,7 @@ function M.add(city, message)
     uv.fs_unlink(temp)
     return nil, reason
   end
+  notify_subscribers()
   return id
 end
 
@@ -538,6 +579,7 @@ local function settle(wait_ms)
     if held.notified then
       config.notify(('the queue file of the message to %s is in order again'):format(name))
     end
+    notify_subscribers()
     return true
   end
   held.tries = held.tries + 1
@@ -622,12 +664,15 @@ local function choose()
   if not names then
     return nil, err
   end
+  local changed = false
   local present = {}
   for _, name in ipairs(names) do
     present[name] = true
     local pid = select(2, name:match(TEMP_RE))
     if pid and not alive(tonumber(pid)) then
-      uv.fs_unlink(path(name))
+      if uv.fs_unlink(path(name)) then
+        changed = true
+      end
     end
   end
   local now, blocked, earliest = now_ms(), {}, nil
@@ -639,9 +684,12 @@ local function choose()
     if entry.claimed and not live(entry) then
       local base = entry.id .. '.json'
       if (record and record.delivered) or present[base] then
-        uv.fs_unlink(path(entry.name))
+        if uv.fs_unlink(path(entry.name)) then
+          changed = true
+        end
         record = nil
       elseif uv.fs_rename(path(entry.name), path(base)) then
+        changed = true
         entry.name, entry.claimed = base, nil
       end
     end
@@ -650,7 +698,9 @@ local function choose()
     elseif record.delivered then
       -- Sent earlier, but its file could not be removed then.
       if not entry.claimed then
-        uv.fs_unlink(path(entry.name))
+        if uv.fs_unlink(path(entry.name)) then
+          changed = true
+        end
       end
     elseif not record.failed and not blocked[record.city.path] then
       blocked[record.city.path] = true
@@ -664,13 +714,13 @@ local function choose()
         -- with the time the message was written.
         local claimed = claim_of(entry.id)
         if touch(entry.name) and uv.fs_rename(path(entry.name), path(claimed)) then
-          return { id = entry.id, claimed = claimed, record = record }
+          return { id = entry.id, claimed = claimed, record = record, changed = true }
         end
         later(now + 1000)
       end
     end
   end
-  return { wait = earliest and (earliest - now) }
+  return { wait = earliest and (earliest - now), changed = changed }
 end
 
 -- The worker could not read the queue: say why once, look again later.
@@ -710,6 +760,9 @@ function pump()
       return arm(config.busy_ms)
     elseif not pick then
       return trouble(err)
+    end
+    if pick.changed then
+      notify_subscribers()
     end
   end
   if worker.trouble then
@@ -754,6 +807,7 @@ function M.retry(id)
   if not ok then
     return nil, err
   end
+  notify_subscribers()
   pump()
   return true
 end
@@ -767,6 +821,9 @@ function M.delete(id)
     end
     return true
   end)
+  if ok then
+    notify_subscribers()
+  end
   return ok, err
 end
 

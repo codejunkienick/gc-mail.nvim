@@ -324,6 +324,141 @@ test('choosing a city queues the message on disk before the buffer clears, then 
     'undo restores the text')
 end)
 
+test(':GcMail planner queues a record with to = planner and sends the exact argv', function()
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY })
+  local buf = buffer({ 'hello planner', 'here is the task' })
+  preload()
+  vim.cmd('GcMail planner')
+  local picker_win = floats()[1]
+  assert(picker_win, 'picker opened')
+  eq(vim.api.nvim_win_get_config(picker_win).title[1][1], ' mail buffer to planner in ', 'picker title with to')
+  eq(lines_of(picker_win), { ' imd-city  planner ', ' side-city  planner ' }, 'picker items with to')
+  vim.api.nvim_feedkeys(vim.keycode('j<CR>'), 'x', false)
+  eq(#floats(), 0, 'picker closes on <CR>')
+  eq(vim.api.nvim_buf_get_lines(buf, 0, -1, false), { '' }, 'buffer cleared')
+  eq(notes[#notes].message, 'gc-mail: queued for side-city planner: hello planner', 'queued notice')
+  local record = vim.json.decode(read_file(queue_dir .. '/' .. spool()[1]))
+  eq(record.to, 'planner', 'queue record has to = planner')
+  wait('sent and removed', drained)
+  eq(recorded_argv(), { '--city', '/srv/side city', 'mail', 'send', 'planner', '-s', 'hello planner',
+    '-m', 'hello planner\nhere is the task', '--notify' }, 'exact argv with planner')
+  eq(notes[#notes].message, 'gc-mail: sent to side-city planner', 'success notice')
+end)
+
+test('a record file with invalid to is listed as unreadable and never sent; M.send refuses bad to', function()
+  gc_mail.queue.stop()
+  local good = { version = 1, city = TWO[1], subject = 's', body = 'b', created = 1, attempts = 0, next_at = 0, failed = false }
+  local cases = {
+    { '--all', 'bad to' },
+    { 'ctrl\x01char', 'bad to' },
+    { '', 'bad to' },
+    { string.rep('x', 101), 'bad to' },
+  }
+  vim.fn.mkdir(queue_dir, 'p')
+  for i, case in ipairs(cases) do
+    local record = vim.deepcopy(good)
+    record.to = case[1]
+    write(('%s/%016d-00001-%08x.json'):format(queue_dir, i, i), vim.json.encode(record))
+  end
+  local valid = assert(gc_mail.queue.add(TWO[2], { subject = 'fine', body = 'ok' }))
+  local entries = gc_mail.queue.list()
+  for i, case in ipairs(cases) do
+    eq({ entries[i].record, entries[i].error }, { nil, 'not a gc-mail message: ' .. case[2] }, 'case ' .. case[1])
+  end
+  eq(entries[#cases + 1].id, valid, 'valid message listed')
+  gc_mail.queue.configure({ dir = queue_dir, retry_ms = RETRY })
+  gc_mail.queue.pump()
+  wait('the valid one sent', function()
+    return #sent() == 1 and gc_mail.queue.idle()
+  end)
+  eq(sent(), { '/srv/side city|fine' }, 'only the valid message was sent')
+
+  -- M.send(buf, city, { to = '-x' }) is refused and the buffer unchanged
+  notes = {}
+  local buf = buffer({ 'keep this line', 'and this' })
+  local ret = gc_mail.send(buf, TWO[1], { to = '-x' })
+  eq(ret, nil, 'send refused')
+  eq(vim.api.nvim_buf_get_lines(buf, 0, -1, false), { 'keep this line', 'and this' }, 'buffer unchanged')
+  eq(notes[#notes].message, 'gc-mail: cannot queue the message: bad to', 'refusal notice')
+end)
+
+test('a record without to still sends to mayor', function()
+  gc_mail.queue.stop()
+  local old_record = { version = 1, city = TWO[1], subject = 'legacy mail', body = 'legacy body', created = 1, attempts = 0, next_at = 0, failed = false }
+  vim.fn.mkdir(queue_dir, 'p')
+  write(queue_dir .. '/0000000000000001-00001-00000001.json', vim.json.encode(old_record))
+  gc_mail.queue.configure({ dir = queue_dir, retry_ms = RETRY })
+  gc_mail.queue.pump()
+  wait('legacy sent', drained)
+  eq(recorded_argv(), { '--city', '/srv/imd-city', 'mail', 'send', 'mayor', '-s', 'legacy mail',
+    '-m', 'legacy body', '--notify' }, 'sent to mayor')
+end)
+
+test('queue.subscribe: a subscriber runs after add, after successful send and after failed send, and errors do not stop send', function()
+  local events = {}
+  local count = 0
+  gc_mail.queue.subscribe('test_sub', function()
+    count = count + 1
+    events[#events + 1] = { count = count, spool = spool() }
+  end)
+  gc_mail.queue.subscribe('broken_sub', function()
+    error('subscriber failure')
+  end)
+
+  -- 1. Add
+  local id = assert(gc_mail.queue.add(TWO[1], { subject = 'sub-test', body = 'body' }))
+  wait('subscriber saw add', function()
+    return #events >= 1
+  end)
+  eq(#events[1].spool, 1, 'subscriber saw queued file on disk after add')
+
+  -- 2. Successful send (file gone)
+  gc_mail.queue.pump()
+  wait('sent and drained', drained)
+  wait('subscriber saw delete', function()
+    return #events >= 2
+  end)
+  eq(#events[#events].spool, 0, 'subscriber saw file gone after success')
+  eq(sent(), { '/srv/imd-city|sub-test' }, 'message was sent despite broken subscriber')
+
+  local sub_errors = vim.tbl_filter(function(n)
+    return n.message:find('subscriber broken_sub failed')
+  end, notes)
+  eq(#sub_errors, 1, 'broken subscriber error shown once')
+
+  -- 3. Failed send (file rewritten)
+  reset({ FAKE_GC_FAIL_TIMES = '1' })
+  events = {}
+  gc_mail.queue.subscribe('test_sub', function()
+    local sp = spool()
+    local rec
+    if #sp > 0 then
+      rec = vim.json.decode(read_file(queue_dir .. '/' .. sp[1]))
+    end
+    events[#events + 1] = { spool = sp, record = rec }
+  end)
+  assert(gc_mail.queue.add(TWO[1], { subject = 'fail-test', body = 'body' }))
+  wait('subscriber saw add', function()
+    return #events >= 1
+  end)
+  gc_mail.queue.pump()
+  wait('subscriber saw failure outcome', function()
+    return #events >= 2 and events[#events].record and events[#events].record.attempts > 0
+  end)
+  local last = events[#events]
+  eq(#last.spool, 1, 'file still in spool')
+  eq(last.record.attempts, 1, 'file was rewritten with attempts = 1')
+  eq(last.record.failed, false, 'not failed yet')
+  assert(last.record.last_error:find('exit 1'), 'last_error written')
+
+  -- Unsubscribe removes subscriber
+  gc_mail.queue.subscribe('test_sub', nil)
+  events = {}
+  assert(gc_mail.queue.add(TWO[1], { subject = 'after unsub', body = 'body' }))
+  vim.wait(100)
+  eq(#events, 0, 'subscriber did not run after unsubscribe')
+end)
+
 test('the subject is the first non-empty line trimmed to 72 characters', function()
   local long = string.rep('é', 80)
   local buf = buffer({ '   ', '\t' .. long .. '  ', 'body' })
