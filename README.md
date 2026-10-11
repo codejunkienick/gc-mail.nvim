@@ -48,15 +48,16 @@ time is unchanged; the mailbox lists mail only when you open it.
 | `panel_keymap` | `'<Space>mp'` | normal-mode mapping that opens or closes the mail panel; `false` sets none |
 | `panel_height` | `10` | rows of the mail panel |
 | `panel_poll_ms` | `60000` | while the panel is open, every city is listed again this often (ms, at least `15000`) |
+| `events_rearm_ms` | `60000` | how often to retry watching a missing or refused event log (ms, at least `15000`) |
 | `history_days` | `14` | how many days of mail history to load from the bead store; a whole number of at least 1 |
 | `markdown` | `true` | the opened message and the thread are markdown buffers; `false` keeps the plain text layout |
 
 `setup()` refuses (raises an error) a prefix or suffix with a control
 character, the two together over 40 characters, a `check_ms` that is
 neither `false` nor at least a minute, a `panel_poll_ms` under 15 seconds,
-a `panel_height` that is not a whole number of at least 1, a `history_days`
-that is not a whole number of at least 1, and a `markdown` that
-is not `true` or `false`.
+an `events_rearm_ms` under 15 seconds, a `panel_height` that is not a
+whole number of at least 1, a `history_days` that is not a whole number
+of at least 1, and a `markdown` that is not `true` or `false`.
 
 ## Use
 
@@ -244,19 +245,22 @@ or in the float shows in both. The keys are the mailbox's; `<CR>`, `r` and
 panel. The panel's cursor stays on the message it was on when the list
 changes.
 
-**Live updates without polling.** gc appends one JSON line per event to
-`<city path>/.gc/events.jsonl`, among them `mail.sent`, `mail.read`,
-`mail.marked_read`, `mail.archived` and `mail.deleted`. While the panel is
-open, the plugin watches each listed city's file (`vim.uv` fs_event, inotify
-on Linux) and, on a change, reads only the bytes appended since its last read
-(more than 1 MiB at once is simply a refresh). A line whose `type` starts
-with `mail.` lists that city again, about 500 ms after the first such line
-(a burst is one call) and never with a second inbox call for the city while
-one runs (then once more after it). A line that is not JSON, or has no
-`type`, is ignored. When gc rotates the file (renames it and starts a new
-one with an `events.rotated` line) or it is recreated, the file now at the
-path is watched instead and the city is listed once, since what was appended
-just before the rotation was not read.
+**Live updates without polling.** A shared event-log watcher
+(`lua/gc_mail/events.lua`, `require('gc_mail.events')`) watches each listed
+city's `<city path>/.gc/events.jsonl` (`vim.uv` fs_event, inotify on Linux)
+from its current end and decodes `mail.*` events (`mail.sent`, `mail.read`,
+`mail.marked_read`, `mail.archived` and `mail.deleted`), pushing them to live
+views (the panel today, the chat and background watch later) without each view
+watching the files itself. A missing file or refused watch is retried every
+`events_rearm_ms` (default 60000 ms, minimum 15000 ms). On a change, only the
+bytes appended since its last read are read (more than 1 MiB at once is
+reported as `overflow`, triggering a refresh). A line whose `type` starts with
+`mail.` lists that city again, about 500 ms after the first such line (a burst
+is one call) and never with a second inbox call for the city while one runs
+(then once more after it). A line that is not JSON, or has no `type`, is
+ignored. When gc rotates the file (renames it and starts a new one with an
+`events.rotated` line) or it is recreated, the file now at the path is watched
+instead and reported as `rotated`, listing the city once.
 
 **Fallback.** Every `panel_poll_ms` (default one minute) while the panel is
 open, every city is listed again and the kept copies are read again, also for
@@ -352,7 +356,8 @@ RFC 3339 UTC format). For a thread load (`opts.thread`), it queries with
 `vim.system` (argument list, 10 s timeout, never a shell).
 
 - **H1 decoder.** Every record returned by `gc bd list` passes the strict H1
-  decoder (`id`, `title`, `sender`, `assignee`, `status`, `created_at`, optional
+  decoder (`id`, `title`, `sender`, recipient as `assignee` when a non-empty string or
+  `metadata['gc.routed_to']` when a non-empty string, `status`, `created_at`, optional
   `description`, `labels`, and `metadata`), verifying identifiers and mapping to
   message records with `thread_id`, `reply_to`, `closed` (when status is
   `closed`), and `read` (`closed`, `'read'` label, or `metadata['mail.read'] == 'true'`),

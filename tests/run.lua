@@ -73,6 +73,9 @@ local function fresh()
   if package.loaded['gc_mail.panel'] then
     package.loaded['gc_mail.panel'].close_all()
   end
+  if package.loaded['gc_mail.events'] then
+    pcall(package.loaded['gc_mail.events'].reset)
+  end
   if package.loaded['gc_mail.mailbox'] then
     package.loaded['gc_mail.mailbox'].stop_check()
   end
@@ -80,6 +83,7 @@ local function fresh()
   package.loaded['gc_mail.queue'] = nil
   package.loaded['gc_mail.mailbox'] = nil
   package.loaded['gc_mail.panel'] = nil
+  package.loaded['gc_mail.events'] = nil
   gc_mail = require('gc_mail')
   run_id = run_id + 1
   queue_dir = ('%s/state-%d/queue'):format(scratch, run_id)
@@ -228,6 +232,7 @@ test('nothing runs at load time and setup maps <Space>mm, <Space>mi, <Space>mp a
   eq(vim.fn.maparg('<Space>mi', 'n'), '', 'mailbox_keymap = false still mapped')
   eq(vim.fn.maparg('<Space>mp', 'n'), '', 'panel_keymap = false still mapped')
   eq(package.loaded['gc_mail.panel'], nil, 'setup loaded the panel')
+  eq(package.loaded['gc_mail.events'], nil, 'setup loaded events')
   eq(package.loaded['gc_mail.history'], nil, 'history loaded at load time')
   local bad_zero = pcall(gc_mail.setup, { history_days = 0 })
   eq(bad_zero, false, 'setup refuses history_days = 0')
@@ -3006,6 +3011,357 @@ test(':GcMail <to> in a reply buffer sends to sender and warns', function()
     return n.level == vim.log.levels.WARN and n.message == 'gc-mail: this buffer replies to mayor; other ignored'
   end, notes)
   eq(#warns, 1, 'warning shown')
+end)
+
+test('events subscriber receives decoded mail.sent with payload.message, nil message for mail.read, and drops non-mail/non-JSON/half-lines', function()
+  local cities, log = city_dirs()
+  write(log, '')
+  local events = require('gc_mail.events')
+  local received = {}
+  events.subscribe('test_sub', function(city, ev)
+    received[#received + 1] = { city = city, event = ev }
+  end)
+  events.cities('test_sub', { cities[1] })
+
+  local payload_msg = {
+    id = 'ic-wisp-a1',
+    from = 'human',
+    to = 'mayor',
+    subject = 'test subject',
+    body = 'test body',
+    created_at = '2026-10-08T10:00:00Z',
+    read = false,
+    thread_id = 'thread-0a1b2c3d4e5f',
+  }
+  local line1 = vim.json.encode({
+    seq = 1,
+    type = 'mail.sent',
+    subject = 'ic-wisp-a1',
+    actor = 'human',
+    payload = { message = payload_msg },
+  }) .. '\n'
+  append(log, line1)
+  wait('received mail.sent', function()
+    return #received == 1
+  end)
+  local ev1 = received[1].event
+  eq(ev1.type, 'mail.sent')
+  eq(ev1.id, 'ic-wisp-a1')
+  eq(ev1.actor, 'human')
+  eq(ev1.message.id, 'ic-wisp-a1')
+  eq(ev1.message.from, 'human')
+  eq(ev1.message.to, 'mayor')
+  eq(ev1.message.subject, 'test subject')
+  eq(ev1.message.body, 'test body')
+  eq(ev1.message.created_at, '2026-10-08T10:00:00Z')
+  eq(ev1.message.read, false)
+  eq(ev1.message.thread_id, 'thread-0a1b2c3d4e5f')
+
+  local line2 = vim.json.encode({
+    seq = 2,
+    type = 'mail.read',
+    subject = 'ic-wisp-a1',
+  }) .. '\n'
+  append(log, line2)
+  wait('received mail.read', function()
+    return #received == 2
+  end)
+  local ev2 = received[2].event
+  eq(ev2.type, 'mail.read')
+  eq(ev2.id, 'ic-wisp-a1')
+  eq(ev2.message, nil)
+
+  local bead_line = vim.json.encode({ seq = 3, type = 'bead.updated', subject = 'ic-wisp-a1' }) .. '\n'
+  local not_json = 'not json line\n'
+  local half = '{"type":"mail.marked_read","subject":"ic-wisp-a1"'
+  append(log, bead_line .. not_json .. half)
+  vim.wait(300)
+  eq(#received, 2, 'nothing for bead.updated, not JSON, or half line')
+  append(log, '}\n')
+  wait('received finished line', function()
+    return #received == 3
+  end)
+  eq(received[3].event.type, 'mail.marked_read')
+  eq(received[3].event.id, 'ic-wisp-a1')
+  events.unsubscribe('test_sub')
+end)
+
+test('two subscribers on the same city both receive an event; after one unsubscribes the other still does; after both, events.running() is false and events.handles() is empty', function()
+  local cities, log = city_dirs()
+  write(log, '')
+  local events = require('gc_mail.events')
+  local rec1, rec2 = {}, {}
+  events.subscribe('sub1', function(city, ev)
+    rec1[#rec1 + 1] = ev
+  end)
+  events.cities('sub1', { cities[1] })
+  events.subscribe('sub2', function(city, ev)
+    rec2[#rec2 + 1] = ev
+  end)
+  events.cities('sub2', { cities[1] })
+
+  append(log, event('mail.sent'))
+  wait('both received event', function()
+    return #rec1 == 1 and #rec2 == 1
+  end)
+  eq(rec1[1].type, 'mail.sent')
+  eq(rec2[1].type, 'mail.sent')
+
+  events.unsubscribe('sub1')
+  append(log, event('mail.read'))
+  wait('sub2 received second event', function()
+    return #rec2 == 2
+  end)
+  vim.wait(100)
+  eq(#rec1, 1, 'sub1 did not receive after unsubscribe')
+
+  events.unsubscribe('sub2')
+  eq(events.running(), false, 'running is false after all unsubscribe')
+  eq(events.handles(), {}, 'handles is empty after all unsubscribe')
+end)
+
+test('an appended chunk over 1 MiB gives one overflow event and later lines are received; a recreated file gives rotated and later lines are received', function()
+  local cities, log = city_dirs()
+  write(log, '')
+  local events = require('gc_mail.events')
+  local rec = {}
+  events.subscribe('test_overflow', function(city, ev)
+    rec[#rec + 1] = ev
+  end)
+  events.cities('test_overflow', { cities[1] })
+
+  append(log, string.rep('x', 1024 * 1024 + 10) .. '\n')
+  wait('overflow event received', function()
+    return #rec == 1
+  end)
+  eq(rec[1].type, 'overflow')
+
+  append(log, event('mail.sent'))
+  wait('later line received after overflow', function()
+    return #rec == 2
+  end)
+  eq(rec[2].type, 'mail.sent')
+
+  assert(os.remove(log))
+  vim.wait(50)
+  write(log, '')
+  wait('rotated event received after recreate', function()
+    return #rec == 3
+  end)
+  eq(rec[3].type, 'rotated')
+
+  append(log, event('mail.read'))
+  wait('later line received after rotation', function()
+    return #rec == 4
+  end)
+  eq(rec[4].type, 'mail.read')
+  events.unsubscribe('test_overflow')
+end)
+
+test('events.cities with a second city watches both; dropping the city from every subscriber closes its handle', function()
+  local cities, log1 = city_dirs()
+  local log2 = cities[2].path .. '/.gc/events.jsonl'
+  write(log1, '')
+  write(log2, '')
+  local events = require('gc_mail.events')
+  local rec = {}
+  events.subscribe('multi_city', function(city, ev)
+    rec[#rec + 1] = { city = city, event = ev }
+  end)
+  events.cities('multi_city', { cities[1], cities[2] })
+
+  local function has_fs_event(path)
+    for _, h in ipairs(events.handles()) do
+      if h:get_type() == 'fs_event' and not h:is_closing() and h:getpath() == path then
+        return true
+      end
+    end
+    return false
+  end
+
+  wait('both files watched', function()
+    return has_fs_event(log1) and has_fs_event(log2)
+  end)
+
+  append(log1, event('mail.sent'))
+  append(log2, event('mail.sent'))
+  wait('both events received', function()
+    return #rec == 2
+  end)
+  eq(rec[1].city.name, 'imd-city')
+  eq(rec[2].city.name, 'side-city')
+
+  events.cities('multi_city', { cities[1] })
+  wait('city2 handle closed', function()
+    return not has_fs_event(log2)
+  end)
+  eq(has_fs_event(log1), true, 'city1 still watched')
+
+  append(log2, event('mail.read'))
+  vim.wait(300)
+  eq(#rec, 2, 'dropped city event not received')
+
+  append(log1, event('mail.read'))
+  wait('city1 event received', function()
+    return #rec == 3
+  end)
+  events.unsubscribe('multi_city')
+end)
+
+test('a subscriber that raises does not stop a second subscriber (its error said once)', function()
+  notes = {}
+  local cities, log = city_dirs()
+  write(log, '')
+  local events = require('gc_mail.events')
+  local rec = {}
+  events.subscribe('broken', function(city, ev)
+    error('subscriber exploded')
+  end)
+  events.subscribe('good', function(city, ev)
+    rec[#rec + 1] = ev
+  end)
+  events.cities('broken', { cities[1] })
+  events.cities('good', { cities[1] })
+
+  append(log, event('mail.sent'))
+  wait('good received first event', function()
+    return #rec == 1
+  end)
+  eq(rec[1].type, 'mail.sent')
+
+  local err_notes = vim.tbl_filter(function(n)
+    return n.level == vim.log.levels.ERROR and n.message:find('subscriber broken failed')
+  end, notes)
+  eq(#err_notes, 1, 'error said once')
+
+  append(log, event('mail.read'))
+  wait('good received second event', function()
+    return #rec == 2
+  end)
+  eq(rec[2].type, 'mail.read')
+
+  err_notes = vim.tbl_filter(function(n)
+    return n.level == vim.log.levels.ERROR and n.message:find('subscriber broken failed')
+  end, notes)
+  eq(#err_notes, 1, 'error still said only once')
+
+  events.unsubscribe('broken')
+  events.unsubscribe('good')
+end)
+
+test('setup({ events_rearm_ms = 1000 }) raises', function()
+  local ok, err = pcall(gc_mail.setup, { events_rearm_ms = 1000 })
+  eq(ok, false, 'raises on events_rearm_ms < 15000')
+  assert(tostring(err):find('events_rearm_ms must be a number of milliseconds of at least 15000'), tostring(err))
+end)
+
+test('history.load decodes recipient as metadata["gc.routed_to"] when assignee is null, and skips when both are missing or assignee is malformed', function()
+  local history = require('gc_mail.history')
+  history.reset()
+  local fixture = [=[
+[
+  {
+    "id": "sc-wisp-r1",
+    "title": "routed to pool",
+    "sender": "human",
+    "assignee": null,
+    "status": "open",
+    "created_at": "2026-10-07T10:00:00Z",
+    "description": "body",
+    "metadata": {
+      "gc.routed_to": "rig/builder"
+    }
+  },
+  {
+    "id": "sc-wisp-r2",
+    "title": "missing both",
+    "sender": "human",
+    "assignee": null,
+    "status": "open",
+    "created_at": "2026-10-07T11:00:00Z",
+    "description": "body",
+    "metadata": {}
+  },
+  {
+    "id": "sc-wisp-r3",
+    "title": "malformed assignee type",
+    "sender": "human",
+    "assignee": 7,
+    "status": "open",
+    "created_at": "2026-10-07T12:00:00Z",
+    "description": "body",
+    "metadata": {
+      "gc.routed_to": "rig/builder"
+    }
+  }
+]
+]=]
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fixture)
+  local done, res_list, res_err, res_skipped
+  history.load(TWO[1], function(list, err, skipped)
+    done, res_list, res_err, res_skipped = true, list, err, skipped
+  end)
+  wait('history.load finished', function()
+    return done
+  end)
+  eq(res_err, nil)
+  eq(#res_list, 1, 'one valid decoded message')
+  eq(res_list[1].id, 'sc-wisp-r1')
+  eq(res_list[1].to, 'rig/builder', 'to is rig/builder from gc.routed_to')
+  eq(res_skipped, 2, 'two skipped: one missing both, one with malformed assignee number')
+end)
+
+test('events subscriber receives event with escaped JSON type', function()
+  local events = require('gc_mail.events')
+  events.reset()
+  local cities, log = city_dirs()
+  write(log, '')
+  local rec = {}
+  events.subscribe('escaped_test', function(city, ev)
+    table.insert(rec, { city = city.name, event = ev })
+  end)
+  events.cities('escaped_test', { cities[1] })
+  wait('watcher is running', events.running)
+
+  local line = '{"type":"\\u006dail.sent","subject":"ic-wisp-esc","actor":"human","payload":{"message":{"id":"ic-wisp-esc","from":"human","to":"mayor","subject":"hello","body":"body","created_at":"2026-10-07T10:00:00Z"}}}\n'
+  append(log, line)
+
+  wait('escaped type event received', function()
+    return #rec == 1
+  end)
+  eq(rec[1].event.type, 'mail.sent')
+  eq(rec[1].event.id, 'ic-wisp-esc')
+  events.unsubscribe('escaped_test')
+end)
+
+test('rearm_missing reports rotated when a previously armed city log is recreated and rearmed', function()
+  local events = require('gc_mail.events')
+  events.reset()
+  local cities, log = city_dirs()
+  write(log, '')
+  local rec = {}
+  events.subscribe('rot_test', function(city, ev)
+    table.insert(rec, ev.type)
+  end)
+  events.cities('rot_test', { cities[1] })
+  wait('watcher is running', events.running)
+
+  assert(os.remove(log))
+  vim.wait(300)
+
+  write(log, '')
+  events.rearm()
+
+  wait('rotated received after rearm_missing', function()
+    return vim.tbl_contains(rec, 'rotated')
+  end)
+
+  append(log, event('mail.sent'))
+  wait('mail.sent received after rotated', function()
+    return vim.tbl_contains(rec, 'mail.sent')
+  end)
+
+  events.unsubscribe('rot_test')
 end)
 
 local failed = 0

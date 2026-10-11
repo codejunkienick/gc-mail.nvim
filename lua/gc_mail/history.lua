@@ -118,8 +118,6 @@ function M.load(city, opts, on_done)
           valid = false
         elseif type(elem.sender) ~= 'string' or elem.sender == '' then
           valid = false
-        elseif type(elem.assignee) ~= 'string' or elem.assignee == '' then
-          valid = false
         elseif type(elem.status) ~= 'string' then
           valid = false
         elseif type(elem.created_at) ~= 'string' or not mailbox.epoch(elem.created_at) then
@@ -130,6 +128,22 @@ function M.load(city, opts, on_done)
           valid = false
         elseif elem.labels ~= nil then
           if type(elem.labels) ~= 'table' or not vim.islist(elem.labels) or not all_strings(elem.labels) then
+            valid = false
+          end
+        end
+
+        local recipient = nil
+        if valid then
+          if type(elem.assignee) == 'string' and elem.assignee ~= '' then
+            recipient = elem.assignee
+          elseif elem.assignee == nil or elem.assignee == vim.NIL or elem.assignee == '' then
+            if elem.metadata and type(elem.metadata) == 'table'
+                and type(elem.metadata['gc.routed_to']) == 'string' and elem.metadata['gc.routed_to'] ~= '' then
+              recipient = elem.metadata['gc.routed_to']
+            else
+              valid = false
+            end
+          else
             valid = false
           end
         end
@@ -165,7 +179,7 @@ function M.load(city, opts, on_done)
           local mapped = {
             id = elem.id,
             from = elem.sender,
-            to = elem.assignee,
+            to = recipient,
             subject = elem.title,
             body = elem.description or '',
             created_at = elem.created_at,

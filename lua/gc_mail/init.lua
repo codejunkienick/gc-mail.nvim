@@ -39,6 +39,8 @@ local defaults = {
   -- While the panel is open: every city listed again this often (ms, at least
   -- 15000), besides the updates gc's event log brings.
   panel_poll_ms = 60000,
+  -- How often to retry watching a missing or refused event log (ms, at least 15000).
+  events_rearm_ms = 60000,
   -- true: the opened message and the thread are markdown buffers (filetype
   -- markdown, for whatever markdown renderer you run). false: plain text.
   markdown = true,
@@ -523,6 +525,9 @@ local function invalid_options(opts)
   end
   if type(opts.panel_poll_ms) ~= 'number' or opts.panel_poll_ms < 15000 then
     return 'panel_poll_ms must be a number of milliseconds of at least 15000'
+  end
+  if type(opts.events_rearm_ms) ~= 'number' or opts.events_rearm_ms < 15000 then
+    return 'events_rearm_ms must be a number of milliseconds of at least 15000'
   end
   if type(opts.panel_height) ~= 'number' or opts.panel_height < 1 or opts.panel_height ~= math.floor(opts.panel_height) then
     return 'panel_height must be a whole number of rows of at least 1'

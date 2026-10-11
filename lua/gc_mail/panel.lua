@@ -7,44 +7,39 @@
 -- Opening it, refreshing it or a mail arriving never moves the cursor or the
 -- current window; at most one panel is open per tab page.
 --
--- Live updates come from gc's event log, not from polling. gc appends one
--- JSON line per event to <city path>/.gc/events.jsonl (mail.sent, mail.read,
--- mail.marked_read, mail.archived, mail.deleted, ...). While a panel is open
--- each listed city's log is watched with vim.uv fs_event; on a change only
--- the bytes appended since the last read are read (more than MAX_READ is
--- simply a refresh), and a line whose type starts with `mail.` lists that
--- city again, debounced, with at most one inbox call in flight per city. A
--- line that is not JSON or has no type is ignored. When gc rotates the log
--- (renames it and starts a new file with an events.rotated line), the file
--- now at the path is watched again and the city listed once, since what was
--- appended just before the rotation was not read.
+-- Live updates come from the shared event log watcher (gc_mail.events), not
+-- from polling. While a panel is open it subscribes to gc_mail.events for
+-- each listed city; on any mail event, overflow, or rotated event, it lists
+-- that city again, debounced, with at most one inbox call in flight per city.
 --
--- Fallback: every poll_ms the open panel lists every city again and tries to
--- watch the logs that are not watched yet (missing, or the watch refused).
--- Closing the last panel stops every watcher and timer; every callback checks
--- that its watch is still the live one before it touches anything.
+-- Fallback: every poll_ms the open panel lists every city again and ensures
+-- its cities are subscribed in gc_mail.events.
+-- Closing the last panel stops its timers and unsubscribes from events; every
+-- callback checks that its watch is still the live one before touching state.
 local mailbox = require('gc_mail.mailbox')
 
 local M = {}
 
 local uv = vim.uv
 
--- More appended bytes than this in one change are not read: the city is
--- listed again instead.
-local MAX_READ = 1024 * 1024
 local TITLE = ' gc mail: <CR> open  r reply  t thread  m read  u unread  a archive  d delete  R refresh  q close '
 
 local config = {
   poll_ms = nil, -- default: gc_mail.config.panel_poll_ms
   height = nil, -- default: gc_mail.config.panel_height
   debounce_ms = 500,
-  -- After a rotation finds no new file yet, one more try this much later;
-  -- then the fallback timer tries.
-  rearm_ms = 1000,
 }
 
 function M.configure(opts)
   config = vim.tbl_extend('force', config, opts or {})
+  if package.loaded['gc_mail.events'] or (opts and (opts.rearm_ms or opts.events_rearm_ms)) then
+    pcall(function()
+      require('gc_mail.events').configure({
+        rearm_ms = opts.rearm_ms,
+        events_rearm_ms = opts.events_rearm_ms,
+      })
+    end)
+  end
 end
 
 local function gc_mail()
@@ -55,10 +50,9 @@ end
 
 -- The watch while any panel is open: { owner (for mailbox.list), cities (city
 -- path -> w), timer (the fallback), handles (every uv handle it made) }.
--- w = { city, path, event (fs_event, nil while not watched), ino, dev,
--- offset, carry (a line not yet ended), debounce, rearm (timers), busy (an
--- inbox call in flight), again (list once more when it ends), queued (a read
--- is scheduled), stopped }.
+-- File watching and event parsing are handled by gc_mail.events.
+-- In panel.lua, w = { city, debounce (timer), busy (an inbox call in flight),
+-- again (list once more when it ends), stopped }.
 local live
 -- The last watch started, kept after it stops (M.handles).
 local last
@@ -80,15 +74,9 @@ local function close_handle(h)
   end
 end
 
---- Whether one line of the event log is a mail event: a JSON object whose
---- type is a string starting with `mail.`. Anything else is false, never an
---- error.
+--- Whether one line of the event log is a mail event: delegates to gc_mail.events.
 function M.mail_event(line)
-  if not line:find('"mail.', 1, true) then
-    return false
-  end
-  local ok, event = pcall(vim.json.decode, line)
-  return ok and type(event) == 'table' and type(event.type) == 'string' and event.type:sub(1, 5) == 'mail.'
+  return require('gc_mail.events').mail_event(line)
 end
 
 -- Lists w's city, unless an inbox call of the panel is already in flight
@@ -122,119 +110,21 @@ local function soon(this, w)
   end)
 end
 
-local on_change
-
--- Watches the file now at w.path from its current end. false when there is
--- no such file or the watch is refused (the fallback timer tries again).
-local function arm(this, w)
-  close_handle(w.event)
-  w.event, w.carry = nil, ''
-  local stat = uv.fs_stat(w.path)
-  if not stat or stat.type ~= 'file' then
-    return false
-  end
-  local event = uv.new_fs_event()
-  if not event then
-    return false
-  end
-  handle(this, event)
-  local ok = event:start(w.path, {}, function()
-    if w.queued then
-      return
-    end
-    w.queued = true
-    vim.schedule(function()
-      w.queued = false
-      on_change(this, w)
-    end)
-  end)
-  if not ok then
-    event:close()
-    return false
-  end
-  w.event, w.ino, w.dev, w.offset = event, stat.ino, stat.dev, stat.size
-  return true
-end
-
--- The log at w.path is no longer the file watched (renamed, removed,
--- recreated or truncated): watch the one there now and list the city once.
-local function rotated(this, w)
-  if arm(this, w) then
-    return soon(this, w)
-  end
-  w.rearm:start(config.rearm_ms, 0, function()
-    vim.schedule(function()
-      if live == this and not w.stopped and not w.event and arm(this, w) then
-        soon(this, w)
-      end
-    end)
-  end)
-end
-
--- Whether `data`, appended to the log, ends a mail event line. A line not
--- yet ended waits in w.carry; one that grows past MAX_READ is dropped and
--- counts as a change.
-local function scan(w, data)
-  local text = w.carry .. data
-  local mail, start = false, 1
-  while true do
-    local nl = text:find('\n', start, true)
-    if not nl then
-      break
-    end
-    if not mail and M.mail_event(text:sub(start, nl - 1)) then
-      mail = true
-    end
-    start = nl + 1
-  end
-  w.carry = text:sub(start)
-  if #w.carry > MAX_READ then
-    w.carry = ''
-    return true
-  end
-  return mail
-end
-
--- The log of w changed: read what was appended since the last read.
-on_change = function(this, w)
-  if live ~= this or w.stopped or not w.event then
-    return
-  end
-  local fd = uv.fs_open(w.path, 'r', 0)
-  local stat = fd and uv.fs_fstat(fd)
-  if not stat or stat.ino ~= w.ino or stat.dev ~= w.dev or stat.size < w.offset then
-    if fd then
-      uv.fs_close(fd)
-    end
-    return rotated(this, w)
-  end
-  local size, mail = stat.size - w.offset, false
-  if size > MAX_READ then
-    w.offset, w.carry, mail = stat.size, '', true
-  elseif size > 0 then
-    local data = uv.fs_read(fd, size, w.offset)
-    if data then
-      w.offset = w.offset + #data
-      mail = scan(w, data)
-    end
-  end
-  uv.fs_close(fd)
-  if mail then
-    soon(this, w)
-  end
-end
-
 -- Starts watching `city` and lists it once; a city already watched is left.
 local function add_city(this, city)
   if this.cities[city.path] then
     return
   end
   local w = {
-    city = { name = city.name, path = city.path }, path = city.path .. '/.gc/events.jsonl', offset = 0, carry = '',
-    debounce = handle(this, uv.new_timer()), rearm = handle(this, uv.new_timer()),
+    city = { name = city.name, path = city.path },
+    debounce = handle(this, uv.new_timer()),
   }
   this.cities[city.path] = w
-  arm(this, w)
+  local clist = {}
+  for _, item in pairs(this.cities) do
+    clist[#clist + 1] = item.city
+  end
+  require('gc_mail.events').cities('panel', clist)
   refresh(this, w)
 end
 
@@ -248,10 +138,11 @@ end
 -- copies are read again; a log not watched yet is tried once more.
 local function refresh_all(this)
   mailbox.reload_kept()
+  local ok, events = pcall(require, 'gc_mail.events')
+  if ok and events.rearm then
+    events.rearm()
+  end
   for _, w in pairs(this.cities) do
-    if not w.event then
-      arm(this, w)
-    end
     refresh(this, w)
   end
 end
@@ -261,6 +152,16 @@ local render
 local function start()
   local this = { owner = { pending = 0 }, cities = {}, handles = {} }
   live, last = this, this
+  local events = require('gc_mail.events')
+  events.subscribe('panel', function(city, ev)
+    if live ~= this then
+      return
+    end
+    local w = this.cities[city.path]
+    if w and not w.stopped then
+      soon(this, w)
+    end
+  end)
   mailbox.subscribe('panel', function()
     render()
   end)
@@ -304,6 +205,9 @@ local function stop()
   end
   live = nil
   mailbox.subscribe('panel', nil)
+  pcall(function()
+    require('gc_mail.events').unsubscribe('panel')
+  end)
   for _, w in pairs(this.cities) do
     w.stopped = true
   end
@@ -515,7 +419,12 @@ end
 --- Every uv handle the last watch made (for the tests: once it stops, each
 --- is closing).
 function M.handles()
-  return last and last.handles or {}
+  local panel_handles = last and last.handles or {}
+  local ok, events = pcall(require, 'gc_mail.events')
+  if ok and events.handles then
+    return vim.list_extend(vim.list_slice(panel_handles), events.handles())
+  end
+  return panel_handles
 end
 
 return M
