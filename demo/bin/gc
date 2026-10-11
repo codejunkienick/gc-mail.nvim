@@ -1,0 +1,474 @@
+#!/usr/bin/env -S nvim --clean -n -l
+-- The demo gc: a tiny mail store for the recording, never the real gc and
+-- never a call to another gc. It keeps its whole state in $GC_DEMO_DIR
+-- (store.json, and the demo city's .gc/events.jsonl) and answers exactly the
+-- calls the plugin makes, in the JSON shapes its decoders expect
+-- (lua/gc_mail/mailbox.lua, history.lua, events.lua):
+--   cities --json
+--   --city <path> mail inbox|count|peek|read|mark-read|mark-unread|thread|archive|delete ...
+--   --city <path> bd list --type message ...
+--   --city <path> mail send|reply ... --notify
+-- and three demo-only verbs:
+--   seed                                         writes the store (5 to 8 messages over a few days)
+--   agent <name> reply latest|<id> <text...>     the agent answers a message
+--   agent <name> send human <subject> <text...>  the agent writes to human (or: <subject words> | <text words>)
+-- An agent verb appends the message to the store and one line to the event
+-- log, as gc writes it, so a panel watching the log shows the mail live.
+-- One difference from gc: `mail inbox` also lists read mail (gc lists only
+-- unread), so the mailbox shows a read message beside the unread ones.
+
+local uv = vim.uv
+
+local lock_held
+local function die(code, message)
+  if lock_held then
+    uv.fs_rmdir(lock_held)
+  end
+  io.stderr:write('gc (demo): ' .. message .. '\n')
+  os.exit(code)
+end
+
+local dir = os.getenv('GC_DEMO_DIR')
+if not dir or dir == '' then
+  die(2, 'GC_DEMO_DIR is not set: this is the recording demo gc, run it through demo/record.sh')
+end
+local CITY = { name = 'demo-city', path = dir .. '/demo-city' }
+local STORE = dir .. '/store.json'
+local LOCK = dir .. '/store.lock'
+local EVENTS = CITY.path .. '/.gc/events.jsonl'
+
+local args = {}
+for i = 1, #arg do
+  args[i] = arg[i]
+end
+
+-- ---- the store ---------------------------------------------------------------
+
+local function now()
+  return os.time()
+end
+
+local function iso(t)
+  return os.date('!%Y-%m-%dT%H:%M:%SZ', t)
+end
+
+local function read_file(path)
+  local file = io.open(path, 'rb')
+  if not file then
+    return nil
+  end
+  local data = file:read('*a')
+  file:close()
+  return data
+end
+
+local function write_file(path, data)
+  local tmp = path .. '.tmp-' .. tostring(uv.os_getpid())
+  local file = assert(io.open(tmp, 'wb'))
+  file:write(data)
+  file:close()
+  assert(os.rename(tmp, path))
+end
+
+local function load()
+  local data = read_file(STORE)
+  if not data then
+    die(1, 'no store yet: run `gc seed` first')
+  end
+  local ok, store = pcall(vim.json.decode, data)
+  if not ok or type(store) ~= 'table' or type(store.messages) ~= 'table' then
+    die(1, 'the store is not readable')
+  end
+  return store
+end
+
+local function save(store)
+  write_file(STORE, vim.json.encode(store))
+end
+
+-- One writer at a time (a recording's plugin calls and an agent step can meet).
+local function locked(fn)
+  local waited = 0
+  while not uv.fs_mkdir(LOCK, 448) do
+    if waited >= 3000 then
+      die(1, 'the store is busy')
+    end
+    vim.wait(20)
+    waited = waited + 20
+  end
+  lock_held = LOCK
+  local ok, err = pcall(fn)
+  lock_held = nil
+  uv.fs_rmdir(LOCK)
+  if not ok then
+    die(1, tostring(err))
+  end
+end
+
+local function thread_id_of(id)
+  return 'thread-' .. vim.fn.sha256(id):sub(1, 12)
+end
+
+local function next_id(store)
+  store.seq = (store.seq or 0) + 1
+  return ('dc-%06x'):format(store.seq)
+end
+
+local function add(store, fields)
+  local id = next_id(store)
+  local message = vim.tbl_extend('force', {
+    id = id, from = 'human', to = 'mayor', subject = '', body = '', created_at = iso(now()), read = false,
+    thread_id = thread_id_of(id),
+  }, fields)
+  store.messages[#store.messages + 1] = message
+  return message
+end
+
+local function find(store, id)
+  for _, m in ipairs(store.messages) do
+    if m.id == id and not m.deleted then
+      return m
+    end
+  end
+  return nil
+end
+
+-- A message as gc prints it (mail_message).
+local function wire(m)
+  return {
+    id = m.id, from = m.from, to = m.to, subject = m.subject, body = m.body, created_at = m.created_at, read = m.read,
+    thread_id = m.thread_id,
+  }
+end
+
+-- ---- output ------------------------------------------------------------------
+
+local function out(record)
+  record.schema_version = '1'
+  record.ok = true
+  io.stdout:write(vim.json.encode(record), '\n')
+  os.exit(0)
+end
+
+local function check_city(city)
+  if city ~= CITY.path then
+    die(1, ('no such city: %s'):format(tostring(city)))
+  end
+end
+
+-- ---- the event log -----------------------------------------------------------
+
+local function event(kind, actor, message)
+  local data = read_file(EVENTS) or ''
+  local seq = select(2, data:gsub('\n', '\n')) + 1
+  local line = vim.json.encode({
+    seq = seq, type = kind, ts = iso(now()), actor = actor, subject = message.id, payload = { message = wire(message) },
+  }) .. '\n'
+  -- One append, so a watcher never reads half a line.
+  local file = assert(io.open(EVENTS, 'ab'))
+  file:write(line)
+  file:close()
+end
+
+-- ---- options -----------------------------------------------------------------
+
+local VALUE_FLAGS = {
+  ['-s'] = 'subject', ['--subject'] = 'subject', ['-m'] = 'message', ['--message'] = 'message',
+  ['--type'] = 'type', ['--limit'] = 'limit', ['--created-after'] = 'created_after', ['-l'] = 'label',
+  ['--label'] = 'label', ['--from'] = 'from',
+}
+
+-- Splits `list` into positionals and flags.
+local function options(list)
+  local positional, flags = {}, {}
+  local i = 1
+  while i <= #list do
+    local a = list[i]
+    if VALUE_FLAGS[a] then
+      flags[VALUE_FLAGS[a]] = list[i + 1]
+      i = i + 2
+    else
+      if a:sub(1, 1) == '-' and #a > 1 then
+        flags[a:gsub('^%-+', '')] = true
+      else
+        positional[#positional + 1] = a
+      end
+      i = i + 1
+    end
+  end
+  return positional, flags
+end
+
+-- ---- seed --------------------------------------------------------------------
+
+local function seed()
+  vim.fn.mkdir(CITY.path .. '/.gc', 'p')
+  local file = assert(io.open(EVENTS, 'ab'))
+  file:close()
+  local store = { seq = 0, messages = {} }
+  local t = now()
+  local H, D = 3600, 86400
+  local function mail(fields)
+    local m = add(store, fields)
+    m.created_at = iso(t - fields.ago)
+    m.ago = nil
+    return m
+  end
+  -- Three days of a small team's work; one thread of three, one message read.
+  mail({ from = 'builder', to = 'human', ago = 2 * D + 5 * H, read = true, subject = 'Search index rebuild finished',
+    body = 'The nightly search index rebuild finished in 14 minutes.\nNo failed documents; the slow shard from last week is back to normal.' })
+  local first = mail({ from = 'reviewer', to = 'human', ago = 2 * D + 1 * H, subject = 'Review notes on the export change',
+    body = 'I went through the export change.\n\n- The retry limit should come from the config, not a constant.\n- The new test covers the empty file case, good.\n\nCan you confirm the limit before I approve?' })
+  local second = mail({ from = 'human', to = 'reviewer', ago = 1 * D + 20 * H, subject = 'Re: Review notes on the export change',
+    body = 'Use the config value, default 3. I will leave the constant out.' })
+  second.thread_id, second.reply_to = first.thread_id, first.id
+  local third = mail({ from = 'reviewer', to = 'human', ago = 1 * D + 18 * H, subject = 'Re: Review notes on the export change',
+    body = 'Thanks, that works. Approved once the config change is pushed.' })
+  third.thread_id, third.reply_to = first.thread_id, second.id
+  mail({ from = 'mayor', to = 'human', ago = 1 * D + 2 * H, subject = 'Deploy plan for Thursday',
+    body = 'Proposed plan for Thursday:\n\n1. Freeze merges at 10:00.\n2. Run the full suite on the release branch.\n3. Deploy to staging, then production after a short soak.\n\nTell me if the window does not suit you.' })
+  mail({ from = 'builder', to = 'human', ago = 9 * H, subject = 'Flaky upload test fixed',
+    body = 'The upload test failed one run in twenty because it waited a fixed 200 ms.\nIt now waits for the completion event; 50 runs in a row are green.' })
+  mail({ from = 'mayor', to = 'human', ago = 40 * 60, subject = 'Weekly summary is ready',
+    body = 'Merged: 12 changes. Open: 4. Blocked: 1 (waiting on the staging database refresh).\n\nThe full summary is in the team notes.' })
+  save(store)
+  io.stdout:write(('seeded %d messages in %s\n'):format(#store.messages, STORE))
+end
+
+-- ---- mail --------------------------------------------------------------------
+
+local function visible_to(store, who)
+  local list = {}
+  for _, m in ipairs(store.messages) do
+    if m.to == who and not m.deleted and not m.archived then
+      list[#list + 1] = m
+    end
+  end
+  return list
+end
+
+local function messages_of(list)
+  local result = {}
+  for _, m in ipairs(list) do
+    result[#result + 1] = wire(m)
+  end
+  return result
+end
+
+local function need_message(store, id, what)
+  local m = id and find(store, id)
+  if not m then
+    die(1, ('%s: no such message: %s'):format(what, tostring(id)))
+  end
+  return m
+end
+
+local ACTIONS = { ['mark-read'] = true, ['mark-unread'] = true, archive = true, delete = true }
+
+local function mail(city, list)
+  check_city(city)
+  local verb = table.remove(list, 1)
+  local positional, flags = options(list)
+  if verb == 'inbox' then
+    local who = positional[1] or 'human'
+    out({ recipient = who, recipients = { who }, messages = messages_of(visible_to(load(), who)) })
+  elseif verb == 'count' then
+    local who = positional[1] or 'human'
+    local mine, unread = visible_to(load(), who), 0
+    for _, m in ipairs(mine) do
+      unread = unread + (m.read and 0 or 1)
+    end
+    out({ recipient = who, recipients = { who }, total = #mine, unread = unread })
+  elseif verb == 'peek' or verb == 'read' then
+    local result
+    locked(function()
+      local store = load()
+      local m = need_message(store, positional[1], 'mail ' .. verb)
+      if verb == 'read' and not m.read then
+        m.read = true
+        save(store)
+      end
+      result = wire(m)
+    end)
+    out({ message = result })
+  elseif verb == 'thread' then
+    local store = load()
+    local arg1 = positional[1]
+    local tid = arg1
+    local m = arg1 and find(store, arg1)
+    if m then
+      tid = m.thread_id
+    end
+    local list = {}
+    for _, t in ipairs(store.messages) do
+      if t.thread_id == tid and not t.deleted then
+        list[#list + 1] = t
+      end
+    end
+    if #list == 0 then
+      die(1, 'mail thread: no such thread: ' .. tostring(arg1))
+    end
+    out({ thread_id = tid, messages = messages_of(list) })
+  elseif ACTIONS[verb] then
+    local id = positional[1]
+    locked(function()
+      local store = load()
+      local m = need_message(store, id, 'mail ' .. verb)
+      if verb == 'mark-read' then
+        m.read = true
+      elseif verb == 'mark-unread' then
+        m.read = false
+      elseif verb == 'archive' then
+        m.archived = true
+      else
+        m.deleted = true
+      end
+      save(store)
+    end)
+    local record = { command = 'mail.' .. verb, action = verb, ids = { id }, count = 1 }
+    if verb == 'mark-read' or verb == 'mark-unread' then
+      record.id = id
+    end
+    out(record)
+  elseif verb == 'send' or verb == 'reply' then
+    if not flags.subject or not flags.message then
+      die(2, ('mail %s needs -s <subject> and -m <body>'):format(verb))
+    end
+    local sent
+    locked(function()
+      local store = load()
+      if verb == 'send' then
+        sent = add(store, { from = 'human', to = positional[1] or 'mayor', subject = flags.subject, body = flags.message })
+      else
+        local original = need_message(store, positional[1], 'mail reply')
+        sent = add(store, { from = 'human', to = original.from, subject = flags.subject, body = flags.message })
+        sent.thread_id, sent.reply_to = original.thread_id, original.id
+      end
+      save(store)
+      event(verb == 'send' and 'mail.sent' or 'mail.replied', 'human', sent)
+    end)
+    out({ command = 'mail.' .. verb, id = sent.id, message = wire(sent) })
+  else
+    die(2, 'unsupported mail command: ' .. tostring(verb))
+  end
+end
+
+-- ---- bd list -----------------------------------------------------------------
+
+local function bd(city, list)
+  check_city(city)
+  local verb = table.remove(list, 1)
+  if verb ~= 'list' then
+    die(2, 'unsupported bd command: ' .. tostring(verb))
+  end
+  local _, flags = options(list)
+  local want_thread = type(flags.label) == 'string' and flags.label:match('^thread:(.+)$') or nil
+  local records = {}
+  for _, m in ipairs(load().messages) do
+    local skip = m.deleted or (flags.created_after and m.created_at < flags.created_after)
+      or (want_thread and m.thread_id ~= want_thread)
+    if not skip then
+      local labels = { 'thread:' .. m.thread_id }
+      if m.reply_to then
+        labels[#labels + 1] = 'reply-to:' .. m.reply_to
+      end
+      if m.read then
+        labels[#labels + 1] = 'read'
+      end
+      records[#records + 1] = {
+        id = m.id, title = m.subject, sender = m.from, assignee = m.to, status = m.archived and 'closed' or 'open',
+        created_at = m.created_at, description = m.body, labels = labels, issue_type = 'message',
+      }
+    end
+  end
+  io.stdout:write(vim.json.encode(records), '\n')
+  os.exit(0)
+end
+
+-- ---- agent -------------------------------------------------------------------
+
+local function agent(list)
+  local name, verb = list[1], list[2]
+  if not name or not name:match('^%l[%l%d%-]*$') or name == 'human' then
+    die(2, 'agent: usage: agent <name> reply latest|<id> <text> | agent <name> send human <subject> <text>')
+  end
+  local rest = vim.list_slice(list, 4)
+  local created
+  locked(function()
+    local store = load()
+    if verb == 'reply' then
+      local target = list[3]
+      local original
+      if target == 'latest' then
+        -- The newest message to this agent from human, else the newest to human.
+        for _, m in ipairs(store.messages) do
+          if not m.deleted and ((m.from == 'human' and m.to == name) or (m.to == 'human' and m.from == name)) then
+            if not original or m.created_at >= original.created_at then
+              original = m
+            end
+          end
+        end
+        original = original or need_message(store, nil, 'agent reply latest')
+      else
+        original = need_message(store, target, 'agent reply')
+      end
+      if #rest == 0 then
+        die(2, 'agent reply: no text')
+      end
+      local subject = original.subject:match('^Re: ') and original.subject or ('Re: ' .. original.subject)
+      created = add(store, { from = name, to = 'human', subject = subject, body = table.concat(rest, ' ') })
+      created.thread_id, created.reply_to = original.thread_id, original.id
+      save(store)
+      event('mail.replied', name, created)
+    elseif verb == 'send' and list[3] == 'human' then
+      local subject, text
+      local bar
+      for i, word in ipairs(rest) do
+        if word == '|' then
+          bar = i
+          break
+        end
+      end
+      if bar then
+        subject, text = table.concat(rest, ' ', 1, bar - 1), table.concat(rest, ' ', bar + 1)
+      elseif #rest == 2 then
+        subject, text = rest[1], rest[2]
+      else
+        subject, text = rest[1], table.concat(rest, ' ', 2)
+      end
+      if not subject or subject == '' or not text or text == '' then
+        die(2, 'agent send: needs a subject and a text')
+      end
+      created = add(store, { from = name, to = 'human', subject = subject, body = text })
+      save(store)
+      event('mail.sent', name, created)
+    else
+      die(2, 'agent: usage: agent <name> reply latest|<id> <text> | agent <name> send human <subject> <text>')
+    end
+  end)
+  io.stdout:write(created.id .. '\n')
+  os.exit(0)
+end
+
+-- ---- dispatch ----------------------------------------------------------------
+
+local first = table.remove(args, 1)
+if first == 'cities' then
+  out({ registry_path = dir .. '/cities.toml', cities = { { name = CITY.name, path = CITY.path } } })
+elseif first == 'seed' then
+  seed()
+elseif first == 'agent' then
+  agent(args)
+elseif first == '--city' then
+  local city = table.remove(args, 1)
+  local verb = table.remove(args, 1)
+  if verb == 'mail' then
+    mail(city, args)
+  elseif verb == 'bd' then
+    bd(city, args)
+  else
+    die(2, 'unsupported command: ' .. tostring(verb))
+  end
+else
+  die(2, 'unsupported command: ' .. tostring(first))
+end

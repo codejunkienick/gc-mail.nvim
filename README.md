@@ -401,3 +401,40 @@ delimited by `0x1f`). It answers from `$FAKE_GC_MAIL/bd-list.<city>.<ext>` or
 error output, `.hang` for hanging sleep duration, or `.delay` to sleep before
 printing), supporting test fixtures for multi-line JSON lists, errors, timeouts,
 and malformed answers.
+
+## Demo recording
+
+`demo/record.sh` records a presentation video of the plugin's windows, headless:
+nothing appears on your screen and no real gc or city is touched.
+
+```sh
+tools/gc-mail.nvim/demo/record.sh [--out FILE.mp4] [--tour FILE] [--size WxH]
+```
+
+It starts its own Xvfb display, runs alacritty (wezterm as the fallback) with
+`nvim --clean -u demo/init.lua` and the plugin against a fake demo city, types
+the tour at human speed, and grabs the display with ffmpeg (30 fps, H.264) into
+an MP4 (default `./gc-mail-demo.mp4`, 1920x1080). Requires `sh`, `nvim`, `Xvfb`,
+`xdotool`, `ffmpeg` and `alacritty` or `wezterm`; nothing is downloaded.
+
+- `demo/bin/gc` is the demo gc: a small mail store in a temporary directory,
+  seeded with a few days of mail from `mayor`, `builder` and `reviewer` to
+  `human` (city `demo-city`). `record.sh` puts it first on `PATH`, unsets every
+  `GC_*` variable and refuses to start unless `gc` resolves to it. It answers
+  the calls the plugin makes, and two demo-only verbs write a message from an
+  agent and the matching line of the city's event log, so the panel shows the
+  mail live: `gc agent <name> reply latest|<id> <text>` and
+  `gc agent <name> send human <subject> <text>`.
+- `demo/keys.lua` is the overlay: the last keys at the bottom right (each gone
+  after about 1.5 s) and a caption line above them. Captions come through the
+  Neovim socket, so they never show up as keys.
+- A tour is a text file, one step per line: `key <xdotool key names>`,
+  `type <text>`, `wait <ms>`, `say <caption>`, `agent <args...>` (the demo gc as
+  an agent), `# comment`. An unknown step stops the run and names its line.
+  `demo/tour-basic.txt` is the default (about 85 seconds).
+- Everything lives in one temporary directory, removed on exit; Ctrl-C or a
+  failure stops ffmpeg, the terminal, Neovim and Xvfb first. Exit status is 0
+  only when a non-empty MP4 was written.
+
+The tests for the overlay's key labels and for the demo gc are in
+`tests/run.lua`; the recording itself is not part of the suite.

@@ -6,6 +6,7 @@
 local here = vim.fs.dirname(vim.fs.normalize(debug.getinfo(1, 'S').source:sub(2)))
 local root = vim.fs.dirname(here)
 vim.opt.runtimepath:prepend(root)
+package.path = root .. '/?.lua;' .. package.path
 
 local scratch = vim.fn.tempname()
 vim.fn.mkdir(scratch, 'p')
@@ -3362,6 +3363,245 @@ test('rearm_missing reports rotated when a previously armed city log is recreate
   end)
 
   events.unsubscribe('rot_test')
+end)
+
+-- ---- the demo recording ---------------------------------------------------------
+
+local function keys()
+  package.loaded['demo.keys'] = nil
+  return require('demo.keys')
+end
+
+test('demo keys: special keys, chords and plain keys read as on a keyboard', function()
+  local k = keys()
+  eq(k.format({ ' ', 'm', 'p' }), '<Space> m p', 'a mapped sequence one key at a time')
+  eq(k.format({ ' mp' }), '<Space> m p', 'a mapped sequence typed as one string')
+  eq(k.format({ '\r', '\27', '\t', vim.api.nvim_replace_termcodes('<BS>', true, true, true) }), '<CR> <Esc> <Tab> <BS>',
+    'special keys')
+  eq(k.format({ '\23', 'j' }), '<C-w> j', 'a control chord is lower case')
+  eq(k.format({ '<', '|' }), '< |', 'a literal < is not read as a key name')
+  eq(k.format({}), '', 'nothing typed')
+  eq(k.format({ vim.api.nvim_replace_termcodes('<LeftMouse>', true, true, true), 'x' }), 'x', 'a mouse key is not shown')
+end)
+
+test('demo keys: plain characters typed as text are grouped, other keys stay labels', function()
+  local k = keys()
+  local function typed(text)
+    local list = {}
+    for char in text:gmatch('.') do
+      list[#list + 1] = { key = char, text = true }
+    end
+    return list
+  end
+  eq(k.format(typed('thanks, shipping')), 'thanks, shipping', 'letters and spaces are one text')
+  local mixed = { 'i' }
+  vim.list_extend(mixed, typed('ok '))
+  mixed[#mixed + 1] = { key = '\27' }
+  eq(k.format(mixed), 'i ok  <Esc>', 'a text between keys')
+  eq(k.format({ { key = ' ', text = false }, { key = 'm', text = false } }), '<Space> m', 'in normal mode a space is a key')
+end)
+
+test('demo keys: the shown line is capped and keeps the newest keys', function()
+  local k = keys()
+  local long = {}
+  for _ = 1, 30 do
+    long[#long + 1] = 'j'
+  end
+  long[#long + 1] = '\r'
+  local line = k.format(long, 12)
+  eq(vim.fn.strchars(line), 12, 'at most max characters')
+  eq(vim.startswith(line, '…'), true, 'cut at the old end')
+  eq(vim.endswith(line, '<CR>'), true, 'the newest key stays')
+  eq(vim.fn.strchars(k.format(long)) <= k.MAX, true, 'the default cap')
+end)
+
+-- demo/bin/gc runs as a child on a demo directory of its own.
+local demo_gc = root .. '/demo/bin/gc'
+
+local function demo_dir()
+  local dir = ('%s/demo-%d'):format(scratch, vim.uv.hrtime())
+  vim.fn.mkdir(dir, 'p')
+  return dir, dir .. '/demo-city'
+end
+
+local function gc_run(dir, args, extra)
+  local result = vim.system(vim.list_extend({ demo_gc }, args), {
+    text = true, env = vim.tbl_extend('force', { GC_DEMO_DIR = dir }, extra or {}),
+  }):wait(20000)
+  return result
+end
+
+-- A demo gc call as the plugin's own decoders read it.
+local function gc_json(dir, city, verb, ...)
+  local result = gc_run(dir, vim.list_extend({ '--city', city, 'mail', verb }, { ... }))
+  eq(result.code, 0, 'exit of ' .. verb .. ': ' .. (result.stderr or ''))
+  local record, why = mailbox().answer(result, 'demo ' .. verb)
+  assert(record, why)
+  return record
+end
+
+local function inbox_of(dir, city, who)
+  local record = gc_json(dir, city, 'inbox', who, '--json')
+  local messages, why = mailbox().DECODE.inbox(record)
+  assert(messages, why)
+  return messages
+end
+
+test('demo gc: refuses to run without its own directory', function()
+  local result = vim.system({ demo_gc, 'cities', '--json' }, { text = true, env = { GC_DEMO_DIR = '' } }):wait(20000)
+  eq(result.code, 2, 'refused')
+  eq(result.stderr:find('GC_DEMO_DIR', 1, true) ~= nil, true, 'says why')
+  eq(result.stdout, '', 'prints no answer')
+end)
+
+test('demo gc: the seeded store lists in inbox, as the mailbox decoder reads it', function()
+  local dir, city = demo_dir()
+  eq(gc_run(dir, { 'seed' }).code, 0, 'seed')
+  local cities = gc_run(dir, { 'cities', '--json' })
+  local record = vim.json.decode(vim.trim(cities.stdout))
+  eq({ record.ok, #record.cities, record.cities[1].name, record.cities[1].path }, { true, 1, 'demo-city', city }, 'one demo city')
+  eq(vim.fn.isdirectory(city .. '/.gc'), 1, 'its event log directory exists')
+  eq(vim.fn.filereadable(city .. '/.gc/events.jsonl'), 1, 'and its event log')
+  local messages = inbox_of(dir, city, 'human')
+  eq(#messages >= 5 and #messages <= 8, true, '5 to 8 messages for human, got ' .. #messages)
+  local unread, senders, threads, days = 0, {}, {}, {}
+  for _, m in ipairs(messages) do
+    unread = unread + (m.read and 0 or 1)
+    senders[m.from] = true
+    threads[m.thread_id] = (threads[m.thread_id] or 0) + 1
+    days[os.date('!%Y-%m-%d', m.created)] = true
+  end
+  eq(#messages - unread, 1, 'one message is read')
+  eq({ senders.mayor, senders.builder, senders.reviewer }, { true, true, true }, 'from mayor, builder and reviewer')
+  eq(vim.tbl_count(days) >= 3, true, 'spread over a few days')
+  local biggest = 0
+  for _, count in pairs(threads) do
+    biggest = math.max(biggest, count)
+  end
+  eq(biggest >= 2, true, 'a thread in the inbox')
+  -- The thread of three: mail thread, and bd list for the history decoder.
+  local thread_id
+  for id, count in pairs(threads) do
+    if count == biggest then
+      thread_id = id
+    end
+  end
+  local thread = gc_json(dir, city, 'thread', thread_id, '--json')
+  local listed = mailbox().DECODE.thread(thread, thread_id)
+  eq(#listed, 3, 'the thread has three messages')
+  local counted = gc_json(dir, city, 'count', 'human', '--json')
+  eq(mailbox().DECODE.count(counted), unread, 'count agrees with the inbox')
+end)
+
+test('demo gc: bd list decodes as history, and a thread loads by label', function()
+  local dir, city = demo_dir()
+  gc_run(dir, { 'seed' })
+  local old_path, old_dir = vim.env.PATH, vim.env.GC_DEMO_DIR
+  vim.env.PATH, vim.env.GC_DEMO_DIR = root .. '/demo/bin:' .. old_path, dir
+  local history = require('gc_mail.history')
+  history.reset()
+  local list, err, skipped
+  history.load({ name = 'demo-city', path = city }, function(l, e, s)
+    list, err, skipped = l, e, s
+    list = list or {}
+  end)
+  wait('history loaded', function()
+    return list ~= nil
+  end)
+  vim.env.PATH, vim.env.GC_DEMO_DIR = old_path, old_dir
+  eq(err, nil, 'no error')
+  eq(skipped, 0, 'no record skipped')
+  eq(#list, 7, 'every message of the store')
+  local by_thread = {}
+  for _, m in ipairs(list) do
+    by_thread[m.thread_id] = (by_thread[m.thread_id] or 0) + 1
+  end
+  local thread_id
+  for id, count in pairs(by_thread) do
+    if count == 3 then
+      thread_id = id
+    end
+  end
+  assert(thread_id, 'a thread of three')
+  eq(vim.tbl_count(vim.tbl_filter(function(m)
+    return m.read
+  end, list)), 1, 'the read label becomes read')
+end)
+
+test('demo gc: mail send and reply are stored as sent by human and can be listed', function()
+  local dir, city = demo_dir()
+  gc_run(dir, { 'seed' })
+  local sent = gc_run(dir, { '--city', city, 'mail', 'send', 'mayor', '-s', 'Staging refresh', '-m', 'Who owns it?', '--notify' })
+  eq(sent.code, 0, 'send: ' .. (sent.stderr or ''))
+  local to_mayor = inbox_of(dir, city, 'mayor')
+  eq(#to_mayor, 1, 'the sent message is in the mayor inbox')
+  eq({ to_mayor[1].from, to_mayor[1].to, to_mayor[1].subject, to_mayor[1].body, to_mayor[1].read },
+    { 'human', 'mayor', 'Staging refresh', 'Who owns it?', false }, 'as sent')
+  local target = inbox_of(dir, city, 'human')[1]
+  local replied = gc_run(dir, { '--city', city, 'mail', 'reply', target.id, '-s', 'Re: ' .. target.subject, '-m', 'Thanks', '--notify' })
+  eq(replied.code, 0, 'reply: ' .. (replied.stderr or ''))
+  local back = inbox_of(dir, city, target.from)
+  eq(back[#back].thread_id, target.thread_id, 'a reply stays in its thread')
+  -- mark-read / archive answer in the shapes the decoders require and change the inbox.
+  local first = inbox_of(dir, city, 'human')[1]
+  local marked = gc_json(dir, city, 'mark-read', first.id, '--json')
+  assert(mailbox().DECODE['mark-read'](marked, first.id))
+  local archived = gc_json(dir, city, 'archive', first.id, '--json')
+  assert(mailbox().DECODE.archive(archived, first.id))
+  for _, m in ipairs(inbox_of(dir, city, 'human')) do
+    assert(m.id ~= first.id, 'an archived message leaves the inbox')
+  end
+  local bad = gc_run(dir, { '--city', dir .. '/elsewhere', 'mail', 'inbox', 'human', '--json' })
+  eq(bad.code, 1, 'another city is refused')
+end)
+
+test('demo gc: an agent reply appends to the store and the event log, and the watcher decodes it', function()
+  local dir, city = demo_dir()
+  gc_run(dir, { 'seed' })
+  local log = city .. '/.gc/events.jsonl'
+  local before = #inbox_of(dir, city, 'human')
+  local seen = {}
+  local events = require('gc_mail.events')
+  events.subscribe('demo_test', function(_, ev)
+    seen[#seen + 1] = ev
+  end)
+  events.cities('demo_test', { { name = 'demo-city', path = city } })
+  wait('watcher is running', events.running)
+  local mayor_last = nil
+  for _, m in ipairs(inbox_of(dir, city, 'human')) do
+    if m.from == 'mayor' and (not mayor_last or m.created >= mayor_last.created) then
+      mayor_last = m
+    end
+  end
+  local result = gc_run(dir, { 'agent', 'mayor', 'reply', 'latest', 'Looks', 'good,', 'shipping', 'it' })
+  eq(result.code, 0, 'agent reply: ' .. (result.stderr or ''))
+  wait('the reply event arrives', function()
+    return #seen > 0
+  end)
+  local ev = seen[1]
+  eq(ev.type, 'mail.replied', 'event type')
+  eq({ ev.actor, ev.message.from, ev.message.to }, { 'mayor', 'mayor', 'human' }, 'actor, from and to')
+  eq(ev.message.subject, 'Re: ' .. mayor_last.subject:gsub('^Re: ', ''), 'subject of the answered message')
+  eq(ev.message.body, 'Looks good, shipping it', 'the text')
+  eq(ev.id, ev.message.id, 'the event subject is the message id')
+  eq(ev.message.thread_id, mayor_last.thread_id, 'in the same thread')
+  eq(#inbox_of(dir, city, 'human'), before + 1, 'the store has the new message')
+  local lines = vim.fn.readfile(log)
+  eq(#lines, 1, 'one line in the event log')
+  local raw = vim.json.decode(lines[1])
+  eq({ raw.type, raw.seq, type(raw.ts) }, { 'mail.replied', 1, 'string' }, 'the line gc writes')
+  -- A message of an agent's own: mail.sent.
+  local send = gc_run(dir, { 'agent', 'builder', 'send', 'human', 'Build is green', 'All 214 specs pass on main.' })
+  eq(send.code, 0, 'agent send: ' .. (send.stderr or ''))
+  wait('the sent event arrives', function()
+    return #seen > 1
+  end)
+  eq({ seen[2].type, seen[2].message.from, seen[2].message.subject }, { 'mail.sent', 'builder', 'Build is green' }, 'agent send')
+  events.unsubscribe('demo_test')
+  events.reset()
+  local bad = gc_run(dir, { 'agent', 'mayor', 'reply', 'dc-zzzzzz', 'x' })
+  eq(bad.code, 1, 'an unknown message is refused')
+  eq(#vim.fn.readfile(log), 2, 'and writes nothing')
 end)
 
 local failed = 0

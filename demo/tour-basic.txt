@@ -1,0 +1,97 @@
+# The default tour: the plugin's existing windows, about 85 seconds.
+# Steps: key, type, wait, say, agent (see record.sh).
+
+say gc-mail.nvim: the mail of your Gas City agents, inside Neovim
+wait 3000
+
+# The panel
+say Space m p docks the mailbox in a panel below the editor
+wait 1500
+key space m p
+wait 2500
+
+say Ctrl-w j moves into the panel, then j and k walk the list
+wait 1000
+key ctrl+w j
+wait 1000
+key j
+wait 800
+key j
+wait 800
+key j
+wait 2000
+
+# A message, then its thread
+say Enter opens a message as markdown
+wait 1200
+key Return
+wait 1500
+key ctrl+w underscore
+wait 3000
+
+say t shows the whole thread, oldest first
+wait 1200
+key t
+wait 1500
+key ctrl+w underscore
+wait 4000
+
+say q goes back
+wait 1000
+key q
+wait 1000
+key q
+wait 1000
+# Maximizing the windows squeezed the panel: give it its rows back
+key ctrl+w j
+wait 600
+key 1 0 ctrl+w underscore
+wait 1200
+
+# The mailbox float
+say Space m i opens the same mailbox as a float
+wait 1500
+key space m i
+wait 2500
+key j
+wait 800
+key k
+wait 2000
+
+# A reply
+say r starts a reply to the message under the cursor
+wait 1500
+key r
+wait 2000
+key i
+wait 600
+type Thanks, please send the full summary to the team.
+wait 800
+key Escape
+wait 1200
+
+say Space m m queues it: gc sends it in the background
+wait 1500
+key space m m
+wait 2500
+key ctrl+w c
+wait 1000
+
+# The agent answers while nothing is typed
+say Now the mayor answers. No key is pressed on this side.
+agent mayor reply latest Sent it to the team channel. I also moved the staging refresh to Friday morning.
+wait 3500
+
+say The reply arrived live, from the event log
+wait 3000
+key ctrl+w j
+wait 800
+key g g
+wait 1000
+key Return
+wait 1200
+key ctrl+w underscore
+wait 4000
+
+say gc-mail.nvim: send, read, reply and follow the thread without leaving the editor
+wait 4500
