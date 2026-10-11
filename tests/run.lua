@@ -83,6 +83,7 @@ local function fresh()
   if package.loaded['gc_mail.events'] then
     pcall(package.loaded['gc_mail.events'].reset)
   end
+  package.loaded['gc_mail.preview'] = nil
   if package.loaded['gc_mail.mailbox'] then
     package.loaded['gc_mail.mailbox'].stop_check()
   end
@@ -94,6 +95,8 @@ local function fresh()
   package.loaded['gc_mail.events'] = nil
   package.loaded['gc_mail.watch'] = nil
   gc_mail = require('gc_mail')
+  -- The preview pane has its own tests; the others count windows and floats.
+  gc_mail.config.preview = false
   run_id = run_id + 1
   queue_dir = ('%s/state-%d/queue'):format(scratch, run_id)
   mailbox_dir = ('%s/state-%d/mailbox'):format(scratch, run_id)
@@ -2260,6 +2263,288 @@ test('I2: action answers apply in the order their calls started, whatever order 
   vim.api.nvim_feedkeys('q', 'x', false)
 end)
 
+-- ---- the preview pane ----------------------------------------------------------
+
+-- The preview pane window of the current tab page, or nil.
+local function preview_win()
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(win)):find('gc-mail://preview', 1, true) then
+      return win
+    end
+  end
+  return nil
+end
+
+-- Feeds `keys` in the current window, then fires CursorMoved as Neovim does
+-- after a key in a redrawn UI (a headless -l run draws nothing, so it never
+-- does after feedkeys).
+local function move(keys)
+  vim.api.nvim_feedkeys(keys, 'x', false)
+  vim.api.nvim_exec_autocmds('CursorMoved', { buffer = vim.api.nvim_get_current_buf() })
+end
+
+-- Waits until the pane shows exactly `expected`.
+local function pane_shows(expected, what)
+  local function shown()
+    local pane = preview_win()
+    return pane and lines_of(pane)
+  end
+  if not vim.wait(5000, function()
+    return vim.deep_equal(shown(), expected)
+  end, 10) then
+    eq(shown(), expected, what)
+  end
+end
+
+-- Two messages in one city, newest first; a wide editor so the pane fits right of the list.
+local function two_messages(extra)
+  preload()
+  gc_mail.config.preview = true
+  vim.o.columns = 200
+  inbox('imd-city', {
+    msg('ic-wisp-a1', vim.tbl_extend('force', { subject = 'newer subject', body = 'alpha one\nalpha two',
+      created_at = '2026-10-07T13:00:00Z' }, extra or {})),
+    msg('ic-wisp-a2', { subject = 'older subject', body = 'beta only', created_at = '2026-10-07T12:00:00Z' }),
+  })
+  inbox('side city', {})
+end
+
+-- Waits until every inbox call of the open has answered and nothing else runs.
+local function quiet()
+  wait('both cities were listed', function()
+    return #mail_calls() >= 2
+  end)
+  vim.wait(200)
+end
+
+test('preview: the float shows the body under the cursor, follows it, and never moves focus', function()
+  two_messages()
+  local win = mailbox().open()
+  settled(win, 2)
+  pane_shows({ 'alpha one', 'alpha two' }, 'the first body')
+  local pane = preview_win()
+  eq(vim.api.nvim_get_current_win(), win, 'focus stays in the list')
+  local list_at, pane_at = vim.api.nvim_win_get_config(win), vim.api.nvim_win_get_config(pane)
+  eq(pane_at.relative, 'editor', 'a second float')
+  eq(pane_at.row, list_at.row, 'the top of the list')
+  eq(pane_at.height, vim.o.lines - vim.o.cmdheight - list_at.row - 2, 'down to the bottom of the editor')
+  eq(pane_at.col, list_at.col + list_at.width + 2, 'right of the list')
+  eq(pane_at.width, 200 - pane_at.col - 2 - 1, 'the rest of the editor minus a margin')
+  eq(pane_at.focusable, false, 'it cannot take focus')
+  local buf = vim.api.nvim_win_get_buf(pane)
+  eq({ vim.bo[buf].buftype, vim.bo[buf].bufhidden, vim.bo[buf].modifiable, vim.bo[buf].filetype },
+    { 'nofile', 'wipe', false, 'markdown' }, 'a markdown scratch buffer')
+  move('j')
+  pane_shows({ 'beta only' }, 'the second body after the debounce')
+  for _, line in ipairs(lines_of(preview_win())) do
+    eq(line:find('From', 1, true) or line:find('ubject', 1, true) or line:find('thread-', 1, true), nil, 'only the body')
+  end
+  vim.api.nvim_feedkeys('q', 'x', false)
+  eq(#floats(), 0, 'the pane closes with the float')
+  eq(preview_win(), nil, 'and its window is gone')
+end)
+
+test('preview: the buffer name, and no filetype with markdown = false', function()
+  two_messages()
+  gc_mail.config.markdown = false
+  local win = mailbox().open()
+  settled(win, 2)
+  pane_shows({ 'alpha one', 'alpha two' }, 'the body')
+  local buf = vim.api.nvim_win_get_buf(preview_win())
+  eq(vim.api.nvim_buf_get_name(buf):sub(-18), 'gc-mail://preview', 'its name')
+  eq(vim.bo[buf].filetype, '', 'no filetype')
+  vim.api.nvim_feedkeys('q', 'x', false)
+end)
+
+test('preview: updates make no gc call and mark nothing read', function()
+  two_messages()
+  local win = mailbox().open()
+  settled(win, 2)
+  pane_shows({ 'alpha one', 'alpha two' }, 'the first body')
+  quiet()
+  local before = mail_calls()
+  move('j')
+  pane_shows({ 'beta only' }, 'the second body')
+  move('k')
+  pane_shows({ 'alpha one', 'alpha two' }, 'the first body again')
+  vim.api.nvim_feedkeys('p', 'x', false)
+  vim.api.nvim_feedkeys('p', 'x', false)
+  pane_shows({ 'alpha one', 'alpha two' }, 'shown again')
+  eq(mail_calls(), before, 'the fake gc mail log gained no line')
+  eq(#vim.tbl_filter(function(c)
+    return c[4] == 'read' or c[4] == 'mark-read'
+  end, mail_calls()), 0, 'no read or mark-read')
+  eq(rows(win), { ' ● imd-city  mayor  newer subject', ' ● imd-city  mayor  older subject' }, 'both still unread')
+  eq(#kept_files(), 0, 'and no kept copy')
+  vim.api.nvim_feedkeys('q', 'x', false)
+end)
+
+test('preview: holding j redraws once after the debounce, not once per line', function()
+  preload()
+  gc_mail.config.preview = true
+  vim.o.columns = 200
+  local messages = {}
+  for i = 1, 4 do
+    messages[i] = msg('ic-wisp-a' .. i, { body = 'body ' .. i, created_at = ('2026-10-07T1%d:00:00Z'):format(5 - i) })
+  end
+  inbox('imd-city', messages)
+  inbox('side city', {})
+  local win = mailbox().open()
+  settled(win, 4)
+  pane_shows({ 'body 1' }, 'the first body')
+  quiet()
+  local changes = 0
+  vim.api.nvim_buf_attach(vim.api.nvim_win_get_buf(preview_win()), false, { on_lines = function()
+    changes = changes + 1
+  end })
+  move('j')
+  move('j')
+  move('j')
+  pane_shows({ 'body 4' }, 'the last body')
+  vim.wait(150)
+  eq(changes, 1, 'one redraw for three lines')
+  vim.api.nvim_feedkeys('q', 'x', false)
+end)
+
+test('preview: an empty body shows one dim line, a line that is no message clears the pane', function()
+  two_messages({ body = '' })
+  local win = mailbox().open()
+  settled(win, 2)
+  pane_shows({ '(no content)' }, 'one line for an empty body')
+  local marks = vim.api.nvim_buf_get_extmarks(vim.api.nvim_win_get_buf(preview_win()), -1, 0, -1, { details = true })
+  eq(#marks, 1, 'one highlight')
+  eq(marks[1][4].line_hl_group, 'Comment', 'a dim line')
+  vim.api.nvim_feedkeys('q', 'x', false)
+  -- Nothing listed: the only row is "no mail", which is no message.
+  inbox('imd-city', {})
+  vim.fn.delete(mailbox_dir, 'rf')
+  mailbox().reset()
+  win = mailbox().open()
+  settled(win, 1)
+  pane_shows({ '' }, 'a cleared pane')
+  vim.api.nvim_feedkeys('q', 'x', false)
+end)
+
+test('preview: p hides and shows the pane for that float; preview = false opens it hidden', function()
+  two_messages()
+  local win = mailbox().open()
+  settled(win, 2)
+  pane_shows({ 'alpha one', 'alpha two' }, 'shown by default')
+  vim.api.nvim_feedkeys('p', 'x', false)
+  eq(preview_win(), nil, 'p hides it')
+  eq(#floats(), 1, 'only the list is left')
+  move('j')
+  vim.wait(150)
+  eq(preview_win(), nil, 'moving the cursor keeps it hidden')
+  vim.api.nvim_feedkeys('p', 'x', false)
+  pane_shows({ 'beta only' }, 'p shows it again, on the message under the cursor')
+  vim.api.nvim_feedkeys('q', 'x', false)
+  -- The choice lasts until the view closes: a new float starts from the option.
+  gc_mail.config.preview = false
+  win = mailbox().open()
+  settled(win, 2)
+  vim.wait(150)
+  eq(preview_win(), nil, 'hidden when preview = false')
+  vim.api.nvim_feedkeys('p', 'x', false)
+  pane_shows({ 'alpha one', 'alpha two' }, 'p shows it for this view')
+  vim.api.nvim_feedkeys('q', 'x', false)
+end)
+
+test('preview: setup refuses anything but true or false, and defaults to true', function()
+  local ok, err = pcall(gc_mail.setup, { preview = 'yes' })
+  eq(ok, false, 'preview = yes')
+  assert(tostring(err):find('preview must be true or false', 1, true), tostring(err))
+  local opts = { keymap = false, mailbox_keymap = false, panel_keymap = false, chat_keymap = false, watch = false,
+    state_dir = vim.fs.dirname(queue_dir) }
+  gc_mail.setup(opts)
+  eq(gc_mail.config.preview, true, 'the default')
+  gc_mail.setup(vim.tbl_extend('force', opts, { preview = false }))
+  eq(gc_mail.config.preview, false, 'false is accepted')
+end)
+
+test('preview: the pane goes below a list with no room on its right, and hides without room below', function()
+  local preview = require('gc_mail.preview')
+  local list = { row = 5, col = 10, width = 40, height = 6 }
+  eq(preview.float_layout(list, 120, 40, 1), { row = 5, col = 52, width = 65, height = 32 }, 'right of the list, down to the bottom')
+  eq(preview.float_layout(list, 120, 10, 1), { row = 5, col = 52, width = 65, height = 6 }, 'never shorter than the list')
+  eq(preview.float_layout(list, 82, 40, 1), { row = 13, col = 10, width = 40, height = 24 }, 'below at the list width')
+  eq(preview.float_layout({ row = 5, col = 10, width = 20, height = 6 }, 60, 40, 1),
+    { row = 13, col = 10, width = 30, height = 24 }, 'below, at least 30 wide')
+  eq(preview.float_layout(list, 82, 18, 1), nil, 'under 3 rows below: hidden')
+  eq(preview.float_layout({ row = 5, col = 10, width = 20, height = 6 }, 35, 40, 1), nil, 'under 30 columns: hidden')
+  eq(preview.split_width(80), 40, 'half the panel')
+  eq(preview.split_width(61), 30, 'at least 30 columns')
+  eq(preview.split_width(50), nil, 'the list would keep under 20 columns')
+end)
+
+test('preview: a narrow editor puts the pane below the list', function()
+  two_messages()
+  vim.o.columns = 80
+  local win = mailbox().open()
+  settled(win, 2)
+  pane_shows({ 'alpha one', 'alpha two' }, 'the body')
+  local list_at, pane_at = vim.api.nvim_win_get_config(win), vim.api.nvim_win_get_config(preview_win())
+  eq(pane_at.row, list_at.row + list_at.height + 2, 'under the list')
+  eq(pane_at.col, list_at.col, 'in its column')
+  vim.api.nvim_feedkeys('q', 'x', false)
+end)
+
+test('preview: a refresh that removes the message under the cursor shows the next one', function()
+  two_messages()
+  local win = mailbox().open()
+  settled(win, 2)
+  pane_shows({ 'alpha one', 'alpha two' }, 'the first body')
+  quiet()
+  inbox('imd-city', { msg('ic-wisp-a2', { subject = 'older subject', body = 'beta only',
+    created_at = '2026-10-07T12:00:00Z' }) })
+  vim.api.nvim_feedkeys('R', 'x', false)
+  pane_shows({ 'beta only' }, 'the message now under the cursor')
+  inbox('imd-city', {})
+  quiet()
+  vim.api.nvim_feedkeys('R', 'x', false)
+  pane_shows({ '' }, 'a cleared pane when nothing is under the cursor')
+  vim.api.nvim_feedkeys('q', 'x', false)
+end)
+
+test('preview: a body that cannot be rendered is said once and clears the pane, the list works on', function()
+  two_messages()
+  mailbox().body_lines = function()
+    error('no body for you')
+  end
+  local win = mailbox().open()
+  settled(win, 2)
+  pane_shows({ '' }, 'a cleared pane')
+  move('j')
+  move('k')
+  vim.wait(150)
+  local said = vim.tbl_filter(function(n)
+    return n.message:find('cannot show the preview', 1, true)
+  end, notes)
+  eq(#said, 1, 'said once')
+  eq(rows(win), { ' ● imd-city  mayor  newer subject', ' ● imd-city  mayor  older subject' }, 'the list is as it was')
+  vim.api.nvim_feedkeys('q', 'x', false)
+end)
+
+test('preview: nothing exists before a list opens and nothing is left when it closes', function()
+  local function groups()
+    local found = {}
+    for _, au in ipairs(vim.api.nvim_get_autocmds({})) do
+      if au.group_name and au.group_name:find('^gc_mail_preview') then
+        found[au.group_name] = true
+      end
+    end
+    return vim.tbl_keys(found)
+  end
+  two_messages()
+  eq(groups(), {}, 'no autocmd before the float opens')
+  local win = mailbox().open()
+  settled(win, 2)
+  eq(#groups(), 1, 'one group while it is open')
+  vim.api.nvim_feedkeys('q', 'x', false)
+  eq(groups(), {}, 'none after it closed')
+  eq(preview_win(), nil, 'no pane')
+end)
+
 -- ---- the panel ---------------------------------------------------------------
 
 local function panel()
@@ -2625,6 +2910,87 @@ test('an archive from the panel also leaves the open float and survives a late i
   eq(rows(fwin), { ' ● imd-city  mayor  stays' }, 'nor to the float')
   eq(#floats(), 1, 'the float stayed open')
   vim.api.nvim_feedkeys('q', 'x', false)
+end)
+
+test('preview: the panel shows the pane as a split right of the list, follows its cursor and closes with it', function()
+  local cities, log = city_dirs()
+  write(log, '')
+  gc_mail.config.preview = true
+  inbox('imd-city', {
+    msg('ic-wisp-a1', { subject = 'newer subject', body = 'alpha one', created_at = '2026-10-07T13:00:00Z' }),
+    msg('ic-wisp-a2', { subject = 'older subject', body = 'beta only', created_at = '2026-10-07T12:00:00Z' }),
+  })
+  inbox('side city', {})
+  local origin = vim.api.nvim_get_current_win()
+  local pwin = panel().open()
+  settled(pwin, 2)
+  pane_shows({ 'alpha one' }, 'the first body')
+  local pane = preview_win()
+  eq(#floats(), 0, 'a split, not a float')
+  eq(vim.api.nvim_get_current_win(), origin, 'focus stays where it was')
+  eq(vim.api.nvim_win_get_position(pane)[1], vim.api.nvim_win_get_position(pwin)[1], 'in the panel row')
+  eq(vim.api.nvim_win_get_position(pane)[2] > vim.api.nvim_win_get_position(pwin)[2], true, 'right of the list')
+  eq(vim.api.nvim_win_get_height(pane), vim.api.nvim_win_get_height(pwin), 'the height of the panel')
+  eq(vim.api.nvim_win_get_width(pane), 40, 'about half the panel width')
+  local wo = vim.wo[pane]
+  eq({ wo.winfixheight, wo.number, wo.signcolumn }, { true, false, 'no' }, 'a quiet window')
+  vim.api.nvim_set_current_win(pwin)
+  move('j')
+  pane_shows({ 'beta only' }, 'it follows the panel cursor')
+  eq(vim.api.nvim_get_current_win(), pwin, 'focus is in the list')
+  -- p hides and shows it for this panel.
+  panel_key(pwin, 'p')()
+  eq(preview_win(), nil, 'p hides it')
+  panel_key(pwin, 'p')()
+  pane_shows({ 'beta only' }, 'p shows it again')
+  vim.api.nvim_set_current_win(origin)
+  panel().toggle()
+  eq(vim.api.nvim_win_is_valid(pwin), false, 'the panel closed')
+  eq(preview_win(), nil, 'and the pane with it')
+  eq(#vim.api.nvim_tabpage_list_wins(0), 1, 'one window is left')
+end)
+
+test('preview: a panel refresh that removes the message under the cursor updates the pane', function()
+  local cities, log = city_dirs()
+  write(log, '')
+  gc_mail.config.preview = true
+  inbox('imd-city', {
+    msg('ic-wisp-a1', { subject = 'newer subject', body = 'alpha one', created_at = '2026-10-07T13:00:00Z' }),
+    msg('ic-wisp-a2', { subject = 'older subject', body = 'beta only', created_at = '2026-10-07T12:00:00Z' }),
+  })
+  inbox('side city', {})
+  local pwin = panel().open()
+  settled(pwin, 2)
+  pane_shows({ 'alpha one' }, 'the first body')
+  listed(cities)
+  inbox('imd-city', { msg('ic-wisp-a2', { subject = 'older subject', body = 'beta only',
+    created_at = '2026-10-07T12:00:00Z' }) })
+  append(log, event('mail.sent'))
+  pane_shows({ 'beta only' }, 'the message now under the cursor')
+  local before = #mail_calls()
+  vim.wait(200)
+  eq(#vim.tbl_filter(function(c)
+    return c[4] == 'read' or c[4] == 'mark-read'
+  end, mail_calls()), 0, 'no read mark')
+  eq(#mail_calls() >= before, true, 'only inbox calls')
+  panel().toggle()
+end)
+
+test('preview: a panel too narrow for the pane keeps it hidden and the panel works', function()
+  local cities, log = city_dirs()
+  write(log, '')
+  gc_mail.config.preview = true
+  vim.cmd('vsplit')
+  vim.cmd('vertical resize 50')
+  inbox('imd-city', { msg('ic-wisp-a1', { subject = 'newer subject', body = 'alpha one' }) })
+  inbox('side city', {})
+  local pwin = panel().open()
+  eq(vim.api.nvim_win_get_width(pwin), 50, 'a panel 50 columns wide')
+  settled(pwin, 1)
+  vim.wait(150)
+  eq(preview_win(), nil, 'no pane')
+  eq(#vim.api.nvim_tabpage_list_wins(0), 3, 'both windows and the panel only')
+  panel().toggle()
 end)
 
 test('history.load runs the exact argv and returns the five good messages oldest first; skipped = 2 and the notice said once', function()

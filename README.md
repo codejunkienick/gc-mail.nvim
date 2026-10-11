@@ -51,6 +51,7 @@ unchanged; the mailbox lists mail only when you open it.
 | `panel_keymap` | `'<Space>mp'` | normal-mode mapping that opens or closes the mail panel; `false` sets none |
 | `panel_height` | `10` | rows of the mail panel |
 | `panel_poll_ms` | `60000` | while the panel is open, every city is listed again this often (ms, at least `15000`) |
+| `preview` | `true` | the mailbox float and the panel show the body of the message under the cursor in a pane beside the list; `false` opens them with the pane hidden (`p` shows it) |
 | `events_rearm_ms` | `60000` | how often to retry watching a missing or refused event log (ms, at least `15000`) |
 | `history_days` | `14` | how many days of mail history to load from the bead store; a whole number of at least 1 |
 | `markdown` | `true` | the opened message and the thread are markdown buffers; `false` keeps the plain text layout |
@@ -65,7 +66,8 @@ unchanged; the mailbox lists mail only when you open it.
 character, the two together over 40 characters, a `check_ms` that is
 neither `false` nor at least a minute, a `watch` that is not `true` or
 `false`, a `watch_resync_ms` under a minute, a `panel_poll_ms` under 15 seconds,
-an `events_rearm_ms` under 15 seconds, a `panel_height` that is not a
+an `events_rearm_ms` under 15 seconds, a `preview` that is not `true` or
+`false`, a `panel_height` that is not a
 whole number of at least 1, a `history_days` that is not a whole number
 of at least 1, a `markdown` that is not `true` or `false`, a `chat_width`
 under 20, a `chat_compose_height` under 1, a `chat_send_keys` that is neither
@@ -176,6 +178,7 @@ Two invariants hold every gc answer to what it may change:
 | `u` | mark unread | `mail mark-unread <id>` |
 | `a` | archive | `mail archive <id>` |
 | `d` | delete, after a Yes/No question | `mail delete <id>` |
+| `p` | show or hide the preview pane for this view | none |
 | `R` | list every city again (ignored while a listing is still running) | `mail inbox human`, once per city |
 | `q`, `<Esc>` | close | |
 
@@ -252,14 +255,14 @@ notes.md
  ● imd-city  mayor  Re: mail panel  2m
    imd-city  mayor  Deploy plan accepted  1h
 
- gc mail: <CR> open  r reply  t thread  m read  u unread  a archive  d delete  R refresh  q close
+ gc mail: <CR> open  r reply  t thread  m read  u unread  a archive  d delete  p preview  R refresh  q close
 ```
 
 It is a second view of the mailbox, not a copy: the same `gc mail inbox`
 listing, I1 and I2, kept copies and actions, so an action taken in the panel
-or in the float shows in both. The keys are the mailbox's; `<CR>`, `r` and
-`t` open their window above the panel, never inside it, and `q` closes the
-panel. The panel's cursor stays on the message it was on when the list
+or in the float shows in both. The keys are the mailbox's (`p` shows or hides
+its preview pane); `<CR>`, `r` and `t` open their window above the panel,
+never inside it, and `q` closes the panel. The panel's cursor stays on the message it was on when the list
 changes.
 
 **Live updates without polling.** A shared event-log watcher
@@ -287,6 +290,31 @@ watch such a file again, and refreshes the city list.
 Nothing runs while the panel is closed: closing the last one (the key, `q`,
 `:close`, or closing its tab page) stops every watcher and timer, and an
 answer that arrives later only updates the mailbox state.
+
+## Preview
+
+Moving onto a message in the mailbox float or the panel shows just its body
+in a pane beside the list: no `From`, `To`, city or thread lines and no
+subject, which the list line already shows. It comes from the message the
+list holds in memory, so it is instant, runs no gc command and never marks
+anything read; the body is drawn the way the opened message draws it, and an
+empty body shows one dim `(no content)` line. A cursor on a line that is not
+a message (a header, an empty list) clears the pane, and a refresh or a live
+mail event redraws it for whatever is under the cursor then. The pane
+follows the cursor after about 50 ms, so holding `j` does not redraw on
+every line.
+
+In the float the pane is a second float right of the list at the same top,
+running down to the bottom of the editor, as wide as the rest of the editor less a one-column margin (at
+least 30 columns); in an editor too narrow for that it goes below the list
+when 3 rows fit, else stays hidden. In the panel it is a vertical split in
+the panel's row, about half its width (at least 30 columns; hidden when the
+list would keep under 20). Focus never moves into it, and it closes with
+its list. `p` in either list shows or hides it until that list closes;
+`preview = false` opens lists with it hidden. The pane buffer is
+`gc-mail://preview`, `nofile` and not modifiable, with `filetype=markdown`
+when `markdown` is on. A body that cannot be drawn is reported once and
+clears the pane.
 
 ## Background watch
 

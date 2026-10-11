@@ -571,6 +571,9 @@ local function render()
   if view and not view.picker.closed() then
     view.entries = M.entries()
     view.picker.set(M.lines(view.entries, os.time(), view.pending > 0))
+    if view.preview then
+      view.preview.update()
+    end
   end
   for _, fn in pairs(views) do
     fn()
@@ -664,9 +667,12 @@ local function scratch(name, lines, keys, split, filetype)
   return buf
 end
 
+--- The lines of a message body, verbatim: the one renderer of a body, for the
+--- message view, the thread view and the preview pane.
 local function body_lines(text)
   return vim.split(text, '\n', { plain = true })
 end
+M.body_lines = body_lines
 
 local function header(m, city)
   local one_line = require('gc_mail').one_line
@@ -927,6 +933,11 @@ function M.open()
     u = on(actions.unread),
     a = on(actions.archive),
     d = on(actions.delete),
+    p = function()
+      if view and view.preview then
+        view.preview.toggle()
+      end
+    end,
     R = function()
       if view and view.pending == 0 then
         reload_kept()
@@ -940,6 +951,9 @@ function M.open()
   })
   local this = { picker = picker, entries = entries, pending = 0, listed = {} }
   view = this
+  this.preview = require('gc_mail.preview').attach({
+    kind = 'float', win = picker.win, buf = picker.buf, entry_at = function(row) return this.entries[row] end,
+  })
   local function list_new(cities)
     for _, city in ipairs(cities or {}) do
       if not this.listed[city.path] then

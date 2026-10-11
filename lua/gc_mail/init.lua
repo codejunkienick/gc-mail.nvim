@@ -46,6 +46,10 @@ local defaults = {
   -- While the panel is open: every city listed again this often (ms, at least
   -- 15000), besides the updates gc's event log brings.
   panel_poll_ms = 60000,
+  -- true: the mailbox float and the panel show the body of the message under the
+  -- cursor in a pane beside the list (p toggles it while a list is open). false:
+  -- they open with the pane hidden.
+  preview = true,
   -- How often to retry watching a missing or refused event log (ms, at least 15000).
   events_rearm_ms = 60000,
   -- true: the opened message and the thread are markdown buffers (filetype
@@ -548,6 +552,9 @@ local function invalid_options(opts)
   end
   if type(opts.markdown) ~= 'boolean' then
     return 'markdown must be true or false'
+  end
+  if type(opts.preview) ~= 'boolean' then
+    return 'preview must be true or false'
   end
   if type(opts.panel_poll_ms) ~= 'number' or opts.panel_poll_ms < 15000 then
     return 'panel_poll_ms must be a number of milliseconds of at least 15000'

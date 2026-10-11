@@ -22,7 +22,7 @@ local M = {}
 
 local uv = vim.uv
 
-local TITLE = ' gc mail: <CR> open  r reply  t thread  m read  u unread  a archive  d delete  R refresh  q close '
+local TITLE = ' gc mail: <CR> open  r reply  t thread  m read  u unread  a archive  d delete  p preview  R refresh  q close '
 
 local config = {
   poll_ms = nil, -- default: gc_mail.config.panel_poll_ms
@@ -237,6 +237,9 @@ local function forget(panel)
     return
   end
   panels[panel.tab] = nil
+  if panel.preview then
+    panel.preview.close()
+  end
   pcall(vim.api.nvim_del_augroup_by_id, panel.group)
   if next(panels) == nil then
     stop()
@@ -264,6 +267,9 @@ local function draw(panel)
     end
   end
   vim.api.nvim_win_set_cursor(panel.win, { row, 0 })
+  if panel.preview then
+    panel.preview.update()
+  end
 end
 
 render = function()
@@ -323,6 +329,11 @@ local function keys(panel)
     u = on(actions.unread),
     a = on(actions.archive),
     d = on(actions.delete),
+    p = function()
+      if panel.preview then
+        panel.preview.toggle()
+      end
+    end,
     R = function()
       if live then
         refresh_all(live)
@@ -373,6 +384,9 @@ function M.open()
     forget(panel)
   end })
   panels[tab] = panel
+  panel.preview = require('gc_mail.preview').attach({
+    kind = 'split', win = win, buf = buf, entry_at = function(row) return panel.entries[row] end,
+  })
   keys(panel)
   if not live then
     start()

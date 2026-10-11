@@ -1,4 +1,4 @@
-# The default tour: the plugin's existing windows, about 85 seconds.
+# The default tour: the plugin's windows and the preview pane, about 90 seconds.
 # Steps: key, type, wait, say, agent (see record.sh).
 
 say gc-mail.nvim: the mail of your Gas City agents, inside Neovim
@@ -10,7 +10,7 @@ wait 1500
 key space m p
 wait 2500
 
-say Ctrl-w j moves into the panel, then j and k walk the list
+say Ctrl-w j moves into the panel, then j and k walk the list: the pane on the right previews each body
 wait 1000
 key ctrl+w j
 wait 1000
@@ -54,9 +54,15 @@ wait 1500
 key space m i
 wait 2500
 key j
-wait 800
+wait 1500
 key k
 wait 2000
+say p hides and shows the preview pane
+wait 1200
+key p
+wait 1500
+key p
+wait 1500
 
 # A reply
 say r starts a reply to the message under the cursor
