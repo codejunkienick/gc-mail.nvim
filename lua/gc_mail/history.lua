@@ -47,7 +47,8 @@ end
 ---   gc --city <path> bd list --type message --all --json --limit 0 -l thread:<id>
 --- `on_done(list, err, skipped)` runs on the main loop. Every message it
 --- caches carries `loaded_since`, the vim.uv.hrtime() at which the gc call that
---- listed it started (a joined load keeps the running call's stamp).
+--- listed it started (a joined load keeps the running call's stamp); a load
+--- of the whole history stamps the city's cache entry the same way.
 function M.load(city, opts, on_done)
   if type(opts) == 'function' and on_done == nil then
     on_done = opts
@@ -223,7 +224,7 @@ function M.load(city, opts, on_done)
         for _, msg in ipairs(list) do
           by_id[msg.id] = msg
         end
-        M.cache[city.path] = { by_id = by_id, loaded_at = os.time() }
+        M.cache[city.path] = { by_id = by_id, loaded_at = os.time(), loaded_since = started }
       end
 
       if skipped > 0 and not said_skipped[city.path] then

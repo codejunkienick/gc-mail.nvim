@@ -59,6 +59,7 @@ unchanged; the mailbox lists mail only when you open it.
 | `chat_compose_height` | `3` | rows of the chat compose box (whole number of at least 1) |
 | `chat_send_keys` | `{ '<Space>ms' }` | keys mapped in normal mode of the compose box that send the message; `false` maps none |
 | `chat_mark_read` | `true` | `true`: unread mail to human in the rendered conversation is marked read when viewed; `false` marks nothing |
+| `chat_poll_ms` | `60000` | while a chat is open, its city's history is loaded again this often (ms, at least `15000`) |
 
 `setup()` refuses (raises an error) a prefix or suffix with a control
 character, the two together over 40 characters, a `check_ms` that is
@@ -69,8 +70,8 @@ whole number of at least 1, a `history_days` that is not a whole number
 of at least 1, a `markdown` that is not `true` or `false`, a `chat_width`
 under 20, a `chat_compose_height` under 1, a `chat_send_keys` that is neither
 `false` nor a list of key mapping strings, a `chat_mark_read` that is not
-`true` or `false`, and a `chat_keymap` that is neither `false` nor a
-non-empty string.
+`true` or `false`, a `chat_keymap` that is neither `false` nor a
+non-empty string, and a `chat_poll_ms` under 15 seconds.
 
 ## Use
 
@@ -266,7 +267,7 @@ changes.
 city's `<city path>/.gc/events.jsonl` (`vim.uv` fs_event, inotify on Linux)
 from its current end and decodes `mail.*` events (`mail.sent`, `mail.read`,
 `mail.marked_read`, `mail.archived` and `mail.deleted`), pushing them to live
-views (the panel today, the chat and background watch later) without each view
+views (the panel, the chat and the background watch) without each view
 watching the files itself. A missing file or refused watch is retried every
 `events_rearm_ms` (default 60000 ms, minimum 15000 ms). On a change, only the
 bytes appended since its last read are read (more than 1 MiB at once is
@@ -349,6 +350,8 @@ placing the cursor in the compose box in normal mode.
   (after stripping prefix and suffix), an empty line, the body verbatim, and `---`.
   `<who>` is `you` for `human`, else the sender. `<when>` is `%H:%M` for today, else
   `%Y-%m-%d %H:%M`. `●` indicates unread mail to `human`.
+- **Closed mail.** A closed message (archived, deleted, or read and swept by
+  gc) stays in the conversation, its heading marked ` (closed)` before any `●`.
 - **Pending and failed sends.** Queue records render `## you · sending…` (claimed),
   `## you · queued` (pending), or `## you · failed: <error>` (failed), followed by
   the body verbatim. The record is replaced once the delivered message appears in
@@ -381,6 +384,30 @@ placing the cursor in the compose box in normal mode.
      or answered after the load began, keeps the local value.
   6. **RS6** A refused mark-read keeps the `●` and is not retried automatically until
      a load shows the message read.
+- **Live updates.** While a chat is open it follows its city's event log through the
+  shared watcher, with no polling: a `mail.sent` or `mail.replied` event carrying its
+  message puts the message in the history cache and renders every open chat of that
+  conversation at once, with no gc call (your own sends arrive the same way and
+  replace their `sending…` record); a message of another conversation is only cached.
+  `mail.read` and `mail.marked_read` clear the `●` of a cached message,
+  `mail.marked_unread` brings it back, `mail.archived` and `mail.deleted` mark it
+  closed; an id not cached changes nothing. An event is newer than any read or
+  unread the chat had already got gc's answer to, so it moves the `●` also of a
+  message the chat marked read itself (RS5). A history load that began before an
+  event never takes back what the event showed: the chat keeps the event's message
+  and flags until a load that began after it lists the city. A mail event without a
+  readable message, an `overflow` or a `rotated` log loads the city's history once.
+  The scrolling rule holds on every live render.
+- **Fallback.** Every `chat_poll_ms` (default one minute) the history of each city
+  with an open chat is loaded again, also when its event log cannot be watched; a
+  city with an open chat is also loaded once after a queued send to it is delivered.
+  A failed load, that one included, is said once, until a load of that city
+  succeeds; the timeline keeps what it showed, and one that has nothing to show
+  says `cannot load the history: <error>`.
+  Closing the last chat of a city stops that city's timer and watch; closing the last
+  chat stops everything the chat started (the watcher itself stops when no panel or
+  background watch uses it), and an event or answer that arrives later touches no
+  closed chat.
 
 ## The send queue
 

@@ -4,10 +4,18 @@
 -- Opening it splits the current window to the right and puts the cursor in the
 -- compose box in normal mode; nothing else about the user's windows changes.
 -- q in the timeline closes both windows.
+--
+-- Live updates: while at least one chat is open, the chat is one subscriber
+-- ('chat') of the shared event log watcher (gc_mail.events) for the open
+-- chats' cities, and each such city has one fallback timer that loads its
+-- history every chat_poll_ms. Closing the last chat of a city drops the city
+-- and stops its timer; closing the last chat unsubscribes. Every callback
+-- checks that its watch is still the live one before touching anything.
 local gc_mail = require('gc_mail')
 local queue = require('gc_mail.queue')
 local history = require('gc_mail.history')
 local mailbox = require('gc_mail.mailbox')
+local events = require('gc_mail.events')
 
 local M = {}
 
@@ -45,7 +53,9 @@ local saved_compose = {}
 --      started (history.load). A message whose last action answered before
 --      then takes gc's flag and drops its record when they disagree; an
 --      action still pending, or answered at or after then, keeps the local
---      value.
+--      value. An event that changes a cached message's read flag stamps
+--      the message with the event's time, so it wins over an action answered
+--      before it.
 --  RS6 A refused mark-read keeps the dot and is not retried automatically
 --      until a load shows the message read.
 local reads = {}
@@ -213,12 +223,78 @@ local function sync_cache_read(city)
   end
 end
 
-local function reload(chat)
-  history.load(chat.city, function()
-    if valid_chat(chat) then
-      M.render(chat)
+-- What events changed, per city path: id -> { at = <hrtime of the event>,
+-- target = <the cached message it put or changed>, message = <the message an
+-- event carried>, read = <boolean>, closed = <true> }. A history load that
+-- began before an event replaces the cache with a list gc made before it:
+-- every render first puts the changes back on such a copy, and drops a change
+-- once a load that began after its event has listed the city.
+local live_changes = {}
+
+local function apply_live(city)
+  local changes = live_changes[city.path]
+  if not changes then
+    return
+  end
+  local cached = history.cache[city.path]
+  for id, ch in pairs(changes) do
+    local m = cached and cached.by_id and cached.by_id[id]
+    if m ~= ch.target then
+      local seen = (m and m.loaded_since) or (cached and cached.loaded_since) or 0
+      if seen >= ch.at then
+        changes[id] = nil
+      elseif m then
+        if ch.read ~= nil or ch.closed then
+          if ch.read ~= nil then
+            m.read = ch.read
+          end
+          if ch.closed then
+            m.closed = true
+          end
+          m.loaded_since = ch.at
+        end
+        ch.target = m
+      elseif ch.message then
+        history.put(city, ch.message)
+        ch.target = ch.message
+      end
     end
+  end
+  if next(changes) == nil then
+    live_changes[city.path] = nil
+  end
+end
+
+local render_city
+
+-- The watch while any chat is open: { cities = city path -> { city, timer } }.
+local live = nil
+
+-- Cities whose last history load failed, with the error: it is said once,
+-- until a load of that city succeeds again.
+local load_failed = {}
+
+-- Loads `city`'s history (joining a load already running) and renders every
+-- open chat of that city; an answer after the last chat closed does nothing.
+local function load_city(city)
+  history.load(city, function(_, err)
+    if not live then
+      return
+    end
+    if err then
+      if not load_failed[city.path] then
+        vim.notify('gc-mail: ' .. err, vim.log.levels.ERROR)
+      end
+      load_failed[city.path] = err
+    else
+      load_failed[city.path] = nil
+    end
+    render_city(city)
   end)
+end
+
+local function reload(chat)
+  load_city(chat.city)
 end
 
 -- An answer is stale (RS1) when the id's record is gone or carries a newer seq
@@ -293,6 +369,7 @@ function M.render(chat)
     return
   end
 
+  apply_live(chat.city)
   sync_cache_read(chat.city)
   local history_messages = history.conversation(chat.city, chat.with)
   check_mark_read(chat, history_messages)
@@ -352,14 +429,20 @@ function M.render(chat)
   local blocks = {}
 
   if #history_messages == 0 and #relevant_queue == 0 then
-    lines[1] = ('no messages with %s in %s yet'):format(chat.with, chat.city.name)
+    local err = load_failed[chat.city.path]
+    if err then
+      lines[1] = 'cannot load the history: ' .. md_escape(err)
+    else
+      lines[1] = ('no messages with %s in %s yet'):format(chat.with, chat.city.name)
+    end
   else
     for _, m in ipairs(history_messages) do
       local start_line = #lines + 1
       local who = (m.from == 'human') and 'you' or m.from
       local when = format_when(m.created)
+      local closed_mark = m.closed and ' (closed)' or ''
       local unread_bullet = (m.to == 'human' and not m.read) and ' ●' or ''
-      lines[#lines + 1] = ('## %s · %s%s'):format(md_escape(who), md_escape(when), unread_bullet)
+      lines[#lines + 1] = ('## %s · %s%s%s'):format(md_escape(who), md_escape(when), closed_mark, unread_bullet)
       lines[#lines + 1] = ''
 
       local omit_subject = false
@@ -427,10 +510,17 @@ function M.render(chat)
   end
 end
 
-local function render_all_for_city(city)
+-- Whether message `m` belongs to the conversation of the human with `with`
+local function belongs(m, with)
+  return (m.from == with and m.to == 'human') or (m.from == 'human' and m.to == with)
+end
+
+-- Renders every open chat of `city`; with `m`, only those whose conversation
+-- holds it
+render_city = function(city, m)
   for _, tab_chats in pairs(chats) do
     for _, chat in pairs(tab_chats) do
-      if valid_chat(chat) and chat.city.path == city.path then
+      if valid_chat(chat) and chat.city.path == city.path and (m == nil or belongs(m, chat.with)) then
         M.render(chat)
       end
     end
@@ -447,6 +537,154 @@ local function render_all()
   end
 end
 
+-- ---- live updates -------------------------------------------------------------
+
+-- chat.configure({ poll_ms = ... }): the fallback period without setup()'s
+-- floor (the tests); nil takes gc_mail.config.chat_poll_ms.
+local poll_override = nil
+
+local READ_EVENTS = { ['mail.read'] = true, ['mail.marked_read'] = true, ['mail.marked_unread'] = false }
+local CLOSED_EVENTS = { ['mail.archived'] = true, ['mail.deleted'] = true }
+
+function M.configure(opts)
+  opts = opts or {}
+  if opts.poll_ms ~= nil then
+    poll_override = opts.poll_ms
+  end
+end
+
+-- One decoded event of a watched city's log (gc_mail.events). A message the
+-- event carries is put in the history cache with no gc call; an event that
+-- tells less than that loads the city once.
+local function on_event(this, city, event)
+  if live ~= this or not this.cities[city.path] then
+    return
+  end
+  local kind = event.type
+  local cached = history.cache[city.path]
+  if kind == 'mail.sent' or kind == 'mail.replied' then
+    local m = event.message
+    if not m then
+      return load_city(city)
+    end
+    -- A copy already cached came from a load that listed the message
+    if not (cached and cached.by_id and cached.by_id[m.id]) then
+      history.put(city, m)
+      live_changes[city.path] = live_changes[city.path] or {}
+      live_changes[city.path][m.id] = { at = vim.uv.hrtime(), target = m, message = m }
+    end
+    render_city(city, m)
+  elseif kind == 'overflow' or kind == 'rotated' then
+    -- A rotated reported twice joins the load still running (history.load)
+    load_city(city)
+  elseif READ_EVENTS[kind] ~= nil or CLOSED_EVENTS[kind] then
+    local m = event.id and cached and cached.by_id and cached.by_id[event.id]
+    if not m then
+      return
+    end
+    local changed = false
+    if READ_EVENTS[kind] ~= nil and m.read ~= READ_EVENTS[kind] then
+      m.read = READ_EVENTS[kind]
+      changed = true
+    elseif CLOSED_EVENTS[kind] and not m.closed then
+      m.closed = true
+      changed = true
+    end
+    if changed then
+      -- RS5: the event is newer than any action the chat had answered
+      local at = vim.uv.hrtime()
+      m.loaded_since = at
+      live_changes[city.path] = live_changes[city.path] or {}
+      local ch = live_changes[city.path][event.id] or {}
+      live_changes[city.path][event.id] = ch
+      ch.at, ch.target = at, m
+      if READ_EVENTS[kind] ~= nil then
+        ch.read = m.read
+      else
+        ch.closed = true
+      end
+      render_city(city, m)
+    end
+  end
+end
+
+local function close_handle(h)
+  if h and not h:is_closing() then
+    h:stop()
+    h:close()
+  end
+end
+
+-- The fallback: `entry`'s city loaded every poll period while it is watched.
+local function start_timer(this, entry)
+  local ms = poll_override or gc_mail.config.chat_poll_ms or 60000
+  entry.timer = vim.uv.new_timer()
+  entry.timer:start(ms, ms, function()
+    vim.schedule(function()
+      if live ~= this or this.cities[entry.city.path] ~= entry then
+        return
+      end
+      load_city(entry.city)
+    end)
+  end)
+end
+
+local function stop_live()
+  local this = live
+  if not this then
+    return
+  end
+  live = nil
+  live_changes = {}
+  for _, entry in pairs(this.cities) do
+    close_handle(entry.timer)
+  end
+  this.cities = {}
+  events.unsubscribe('chat')
+end
+
+-- Makes the watch match the open chats: their cities subscribed and timed,
+-- nothing at all once none is open.
+local function sync_live()
+  local open = {}
+  for _, tab_chats in pairs(chats) do
+    for _, chat in pairs(tab_chats) do
+      open[chat.city.path] = chat.city
+    end
+  end
+  if next(open) == nil then
+    return stop_live()
+  end
+  local this = live
+  local first = this == nil
+  if first then
+    this = { cities = {} }
+    live = this
+  end
+  for path, entry in pairs(this.cities) do
+    if not open[path] then
+      close_handle(entry.timer)
+      this.cities[path] = nil
+      live_changes[path] = nil
+    end
+  end
+  local list = {}
+  for path, city in pairs(open) do
+    if not this.cities[path] then
+      local entry = { city = { name = city.name, path = city.path } }
+      this.cities[path] = entry
+      start_timer(this, entry)
+    end
+    list[#list + 1] = this.cities[path].city
+  end
+  events.cities('chat', list)
+  if first then
+    events.subscribe('chat', function(city, event)
+      on_event(this, city, event)
+    end)
+  end
+end
+
 local queue_subscribed = false
 
 local function ensure_queue_subscriber()
@@ -456,10 +694,11 @@ local function ensure_queue_subscriber()
   queue_subscribed = true
   queue.subscribe('chat', function(held)
     if held and held.kind == 'delete' and held.record and held.record.city then
+      -- A delivered send: its city loaded once, if a chat of it is open
       local c = held.record.city
-      history.load(c, function()
-        render_all_for_city(c)
-      end)
+      if live and type(c.path) == 'string' and live.cities[c.path] then
+        load_city(live.cities[c.path].city)
+      end
     else
       render_all()
     end
@@ -499,9 +738,14 @@ function M.close(chat)
     saved_compose[compose_key] = #kept > 0 and kept or nil
   end
 
-  if chats[tab] then
+  -- A late second close never drops a newer chat opened under the same key
+  if chats[tab] and chats[tab][k] == chat then
     chats[tab][k] = nil
+    if next(chats[tab]) == nil then
+      chats[tab] = nil
+    end
   end
+  sync_live()
 
   pcall(vim.api.nvim_del_augroup_by_id, chat.group)
   release_unreading(chat)
@@ -692,6 +936,7 @@ function M.open(city_arg, with_arg)
   }
 
   chats[tab][k] = chat
+  sync_live()
 
   local send_keys = gc_mail.config.chat_send_keys
   if send_keys ~= false and type(send_keys) == 'table' then
@@ -813,6 +1058,9 @@ function M.reset()
   end
   chats = {}
   last_chat = nil
+  stop_live()
+  poll_override = nil
+  load_failed = {}
   for _, bufs in pairs(saved_compose) do
     for _, buf in ipairs(bufs) do
       if vim.api.nvim_buf_is_valid(buf) then

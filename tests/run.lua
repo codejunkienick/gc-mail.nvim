@@ -3963,7 +3963,7 @@ test(':GcMailChat imd-city opens two windows to the right with expected geometry
   end)
 
   local expected_lines = {
-    '## you · ' .. os.date('%Y-%m-%d %H:%M', past),
+    '## you · ' .. os.date('%Y-%m-%d %H:%M', past) .. ' (closed)',
     '',
     'closed topic',
     'first message body',
@@ -4911,6 +4911,348 @@ test('timeline keys: <CR> opens message, t opens thread, u marks unread, R reloa
   wait('history.load called from R', function()
     return #mail_calls() > before_calls
   end)
+end)
+
+-- ---- the chat's live updates ---------------------------------------------------
+
+local function bd_list_calls(path)
+  return #vim.tbl_filter(function(c)
+    return c[3] == 'bd' and c[4] == 'list' and c[2] == path
+  end, mail_calls())
+end
+
+-- One event log line of a mail event that carries its message, as gc writes it.
+local function message_line(kind, fields)
+  local m = vim.tbl_extend('force', {
+    from = 'mayor', to = 'human', read = false, created_at = os.date('!%Y-%m-%dT%H:%M:%SZ', os.time()),
+  }, fields)
+  return vim.json.encode({ seq = 1, type = kind, ts = m.created_at, actor = m.from, subject = m.id,
+    payload = { message = m } }) .. '\n'
+end
+
+-- One event log line of a mail event about message `id`, with no payload.
+local function id_line(kind, id)
+  return vim.json.encode({ seq = 1, type = kind, ts = '2026-10-08T10:00:00Z', actor = 'human', subject = id }) .. '\n'
+end
+
+-- A chat with mayor in imd-city (a real directory with an empty event log),
+-- opened on the conversation fixture, after its first history load. No
+-- background watch; nothing is marked read unless `opts` says so.
+local function live_chat(opts)
+  require('gc_mail.history').reset()
+  local fix, past, t1, t2 = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  gc_mail.setup(vim.tbl_extend('force', { state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY,
+    chat_mark_read = false, watch = false }, opts or {}))
+  local cities, log = city_dirs()
+  write(log, '')
+  vim.cmd('GcMailChat imd-city')
+  local chat = { cities = cities, log = log, compose_win = vim.api.nvim_get_current_win(), past = past, t1 = t1, t2 = t2,
+    fix = fix }
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(w)):match('/chat/') then
+      chat.timeline_win = w
+    end
+  end
+  wait('the chat loaded its history once', function()
+    return bd_list_calls(cities[1].path) == 1 and table.concat(lines_of(chat.timeline_win), '\n'):find('all good', 1, true)
+  end)
+  vim.wait(100)
+  return chat
+end
+
+local function shown(chat)
+  return table.concat(lines_of(chat.timeline_win), '\n')
+end
+
+test('chat live: a mail.replied for the conversation renders at once with no gc call; another conversation changes nothing; no message loads once', function()
+  local chat = live_chat()
+  local path = chat.cities[1].path
+  local calls = #mail_calls()
+  local lines = lines_of(chat.timeline_win)
+  eq(vim.api.nvim_win_get_cursor(chat.timeline_win)[1], #lines, 'the timeline cursor starts at the end')
+  local when = os.time()
+  append(chat.log, message_line('mail.replied', { id = 'tc-wisp-live1', subject = 'live answer',
+    body = 'live answer\nfrom the log', created_at = os.date('!%Y-%m-%dT%H:%M:%SZ', when) }))
+  wait('the answer shows within 1 s', function()
+    return shown(chat):find('from the log', 1, true) ~= nil
+  end, 1000)
+  local after = lines_of(chat.timeline_win)
+  eq(vim.list_slice(after, #after - 5), { '## mayor · ' .. os.date('%H:%M', when) .. ' ●', '', 'live answer',
+    'from the log', '', '---' }, 'at the bottom, unread')
+  eq(vim.api.nvim_win_get_cursor(chat.timeline_win)[1], #after, 'the cursor follows the end')
+  eq(#mail_calls(), calls, 'no bd list, inbox or other gc call')
+
+  append(chat.log, message_line('mail.replied', { id = 'tc-wisp-live2', to = 'planner', subject = 'for the planner',
+    body = 'for the planner' }))
+  vim.wait(300)
+  eq(lines_of(chat.timeline_win), after, 'another conversation changes nothing shown')
+  eq(require('gc_mail.history').cache[path].by_id['tc-wisp-live2'] ~= nil, true, 'but it is cached')
+  eq(#mail_calls(), calls, 'and calls nothing')
+
+  append(chat.log, id_line('mail.sent', 'tc-wisp-live3'))
+  wait('a mail.sent without its message loads the city', function()
+    return bd_list_calls(path) == 2
+  end)
+  vim.wait(300)
+  eq(bd_list_calls(path), 2, 'exactly one bd list call')
+  eq(#mail_calls(), calls + 1, 'and nothing else')
+end)
+
+test('chat live: read, unread and archived events move the dot and the closed mark; an unknown id changes nothing', function()
+  local chat = live_chat()
+  local heading = '## mayor · ' .. os.date('%H:%M', chat.t1)
+  local calls = #mail_calls()
+  eq(lines_of(chat.timeline_win)[7], heading .. ' ●', 'unread to begin with')
+  append(chat.log, id_line('mail.marked_read', 'tc-wisp-m2'))
+  wait('marked_read removes the dot', function()
+    return lines_of(chat.timeline_win)[7] == heading
+  end, 1000)
+  append(chat.log, id_line('mail.marked_unread', 'tc-wisp-m2'))
+  wait('marked_unread brings it back', function()
+    return lines_of(chat.timeline_win)[7] == heading .. ' ●'
+  end, 1000)
+  append(chat.log, id_line('mail.archived', 'tc-wisp-m2'))
+  wait('archived marks it closed in the heading', function()
+    return lines_of(chat.timeline_win)[7] == heading .. ' (closed) ●'
+  end, 1000)
+  local before = lines_of(chat.timeline_win)
+  append(chat.log, id_line('mail.read', 'tc-wisp-nope') .. id_line('mail.deleted', 'tc-wisp-nope'))
+  vim.wait(300)
+  eq(lines_of(chat.timeline_win), before, 'an unknown id changes nothing')
+  eq(#mail_calls(), calls, 'no gc call for any of them')
+end)
+
+test('chat live: with the timeline cursor moved up, an appended message does not move it', function()
+  local chat = live_chat()
+  vim.api.nvim_win_set_cursor(chat.timeline_win, { 3, 0 })
+  append(chat.log, message_line('mail.replied', { id = 'tc-wisp-live1', subject = 'later', body = 'later\nanswer' }))
+  wait('the answer shows', function()
+    return shown(chat):find('later\nanswer', 1, true) ~= nil
+  end, 1000)
+  eq(vim.api.nvim_win_get_cursor(chat.timeline_win), { 3, 0 }, 'the cursor stays where it was')
+end)
+
+test('chat live: your own mail.sent hides its sending record without a load', function()
+  local chat = live_chat()
+  local path = chat.cities[1].path
+  vim.env.FAKE_GC_DELAY = '2'
+  local compose_buf = vim.api.nvim_win_get_buf(chat.compose_win)
+  vim.api.nvim_buf_set_lines(compose_buf, 0, -1, false, { 'my question', 'more of it' })
+  vim.api.nvim_set_current_win(chat.compose_win)
+  vim.api.nvim_feedkeys(vim.keycode('<Space>ms'), 'x', false)
+  wait('sending… shows', function()
+    return shown(chat):find('## you · sending…', 1, true) ~= nil
+  end)
+  append(chat.log, message_line('mail.sent', { id = 'tc-wisp-mine', from = 'human', to = 'mayor', read = false,
+    subject = 'my question', body = 'my question\nmore of it' }))
+  wait('the logged message replaces the record', function()
+    local text = shown(chat)
+    return text:find('sending…', 1, true) == nil and select(2, text:gsub('more of it', '')) == 1
+  end, 1500)
+  eq(bd_list_calls(path), 1, 'no load before the send ends')
+  wait('the send ends', drained, 5000)
+end)
+
+test('chat live: the fallback loads the city again every poll period with no event', function()
+  require('gc_mail.chat').configure({ poll_ms = 100 })
+  local chat = live_chat()
+  wait('the fallback loaded again', function()
+    return bd_list_calls(chat.cities[1].path) >= 3
+  end, 2000)
+end)
+
+test('chat live: after q nothing runs and the watcher stops; an open panel keeps its own subscription', function()
+  local events = require('gc_mail.events')
+  require('gc_mail.chat').configure({ poll_ms = 100 })
+  local chat = live_chat()
+  local path = chat.cities[1].path
+  eq(events.running(), true, 'the chat subscribed')
+  vim.api.nvim_set_current_win(chat.timeline_win)
+  vim.api.nvim_feedkeys('q', 'x', false)
+  eq(vim.api.nvim_win_is_valid(chat.timeline_win), false, 'closed')
+  eq(events.running(), false, 'no subscriber left')
+  local calls = #mail_calls()
+  append(chat.log, message_line('mail.replied', { id = 'tc-wisp-late', subject = 'late', body = 'late' })
+    .. id_line('mail.sent', 'tc-wisp-late2') .. id_line('mail.marked_read', 'tc-wisp-m2'))
+  vim.wait(500)
+  eq(#mail_calls(), calls, 'no call after close, from the events or the fallback')
+  eq(require('gc_mail.history').cache[path].by_id['tc-wisp-late'], nil, 'and nothing cached')
+
+  -- The panel's subscription outlives the chat's.
+  inbox('imd-city', {})
+  inbox('side city', {})
+  panel().open()
+  listed(chat.cities)
+  vim.cmd('GcMailChat imd-city')
+  wait('the chat loaded', function()
+    return bd_list_calls(path) >= 2
+  end)
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(w)):match('/chat/') then
+      vim.api.nvim_set_current_win(w)
+    end
+  end
+  vim.api.nvim_feedkeys('q', 'x', false)
+  eq(events.running(), true, 'the panel still watches')
+  local inboxes = inbox_calls(path)
+  local loads = bd_list_calls(path)
+  append(chat.log, id_line('mail.sent', 'tc-wisp-late3'))
+  wait('the panel lists the city', function()
+    return inbox_calls(path) == inboxes + 1
+  end)
+  vim.wait(300)
+  eq(bd_list_calls(path), loads, 'the closed chat loads nothing')
+end)
+
+test('chat live: a failing load is said once over every fallback tick and shown, never as an empty conversation', function()
+  require('gc_mail.history').reset()
+  require('gc_mail.chat').configure({ poll_ms = 100 })
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.exit', '1\n')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.stderr', 'store unavailable\n')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false, watch = false })
+  local cities, log = city_dirs()
+  write(log, '')
+  vim.cmd('GcMailChat imd-city')
+  wait('three failed loads', function()
+    return bd_list_calls(cities[1].path) >= 3
+  end, 2000)
+  local errors = vim.tbl_filter(function(note)
+    return note.level == vim.log.levels.ERROR
+  end, notes)
+  eq(#errors, 1, 'said once')
+  eq(errors[1].message:find('store unavailable', 1, true) ~= nil, true, errors[1].message)
+  local timeline
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(w)):match('/chat/') then
+      timeline = w
+    end
+  end
+  eq(lines_of(timeline)[1]:find('^cannot load the history: ') ~= nil, true, lines_of(timeline)[1])
+end)
+
+-- The fixture's list with `change(list)` applied, as the next bd list answer.
+local function relist(chat, change)
+  local list = vim.json.decode(chat.fix)
+  change(list)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', vim.json.encode(list))
+end
+
+test('chat live: a load that began before an event never takes back what the event showed', function()
+  local chat = live_chat()
+  local path = chat.cities[1].path
+  local m2 = '## mayor · ' .. os.date('%H:%M', chat.t1)
+  local m3 = '## mayor · ' .. os.date('%H:%M', chat.t2)
+  -- The answer is read before the events are logged and given a second later
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.delay', '1\n')
+  vim.api.nvim_set_current_win(chat.timeline_win)
+  vim.api.nvim_feedkeys('R', 'x', false)
+  wait('the slow load started', function()
+    return bd_list_calls(path) == 2
+  end)
+  vim.wait(200)
+  append(chat.log, message_line('mail.replied', { id = 'tc-wisp-live1', subject = 'live answer',
+    body = 'live answer\nduring the load' }) .. id_line('mail.marked_read', 'tc-wisp-m2')
+    .. id_line('mail.archived', 'tc-wisp-m3'))
+  local function current()
+    local text = shown(chat)
+    return text:find('during the load', 1, true) ~= nil and lines_of(chat.timeline_win)[7] == m2
+      and text:find(m3 .. ' (closed)', 1, true) ~= nil
+  end
+  wait('the events show', current, 1000)
+  vim.wait(1500)
+  eq(bd_list_calls(path), 2, 'the slow load ended with no other load')
+  eq(current(), true, 'the answer, the read message and the closed one stay after the load ends: '
+    .. table.concat(lines_of(chat.timeline_win), '|'))
+
+  -- A load that began after the events lists them: no duplicate
+  vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.delay')
+  relist(chat, function(list)
+    list[2].labels[#list[2].labels + 1] = 'read'
+    list[3].status = 'closed'
+    list[#list + 1] = { id = 'tc-wisp-live1', title = 'live answer', sender = 'mayor', assignee = 'human',
+      status = 'open', description = 'live answer\nduring the load', created_at = os.date('!%Y-%m-%dT%H:%M:%SZ'),
+      labels = {} }
+  end)
+  vim.api.nvim_feedkeys('R', 'x', false)
+  wait('the next load', function()
+    return bd_list_calls(path) == 3
+  end)
+  vim.wait(300)
+  eq(select(2, shown(chat):gsub('during the load', '')), 1, 'the answer shows once')
+  eq(current(), true, 'as gc lists it')
+
+  -- After that, gc's list decides again
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', chat.fix)
+  vim.api.nvim_feedkeys('R', 'x', false)
+  wait('a later load takes gc\'s flags', function()
+    return lines_of(chat.timeline_win)[7] == m2 .. ' ●'
+  end)
+end)
+
+test('chat live: a read event moves the dot of a message the chat marked read itself', function()
+  acted('mark-read', 'tc-wisp-m2')
+  local chat = live_chat({ chat_mark_read = true })
+  local heading = '## mayor · ' .. os.date('%H:%M', chat.t1)
+  wait('the chat marked it read', function()
+    return read_calls('tc-wisp-m2') == 1 and lines_of(chat.timeline_win)[7] == heading
+  end)
+  vim.cmd('wincmd h')
+  append(chat.log, id_line('mail.marked_unread', 'tc-wisp-m2'))
+  wait('marked_unread brings the dot back', function()
+    return lines_of(chat.timeline_win)[7] == heading .. ' ●'
+  end, 1000)
+  append(chat.log, id_line('mail.marked_read', 'tc-wisp-m2'))
+  wait('marked_read removes it', function()
+    return lines_of(chat.timeline_win)[7] == heading
+  end, 1000)
+  eq(read_calls('tc-wisp-m2'), 1, 'the chat marked nothing again')
+end)
+
+test('chat live: a mail.read event clears the dot a refused mark-read kept', function()
+  write(vim.env.FAKE_GC_MAIL .. '/mark-read.exit', '1\n')
+  write(vim.env.FAKE_GC_MAIL .. '/mark-read.stderr', 'fake mark-read error\n')
+  local chat = live_chat({ chat_mark_read = true })
+  local heading = '## mayor · ' .. os.date('%H:%M', chat.t1)
+  wait('the mark-read was refused', function()
+    return read_calls('tc-wisp-m2') == 1 and lines_of(chat.timeline_win)[7] == heading .. ' ●'
+  end)
+  vim.cmd('wincmd h')
+  append(chat.log, id_line('mail.read', 'tc-wisp-m2'))
+  wait('mail.read removes the dot', function()
+    return lines_of(chat.timeline_win)[7] == heading
+  end, 1000)
+end)
+
+test('chat live: a failed load after a delivered send is said as an error', function()
+  local chat = live_chat()
+  local path = chat.cities[1].path
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.exit', '1\n')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.stderr', 'store unavailable\n')
+  vim.api.nvim_buf_set_lines(vim.api.nvim_win_get_buf(chat.compose_win), 0, -1, false, { 'my question' })
+  vim.api.nvim_set_current_win(chat.compose_win)
+  vim.api.nvim_feedkeys(vim.keycode('<Space>ms'), 'x', false)
+  wait('the send ends', drained, 5000)
+  wait('the load after it failed', function()
+    return bd_list_calls(path) == 2
+  end)
+  local function errors()
+    return vim.tbl_filter(function(note)
+      return note.level == vim.log.levels.ERROR and note.message:find('store unavailable', 1, true) ~= nil
+    end, notes)
+  end
+  wait('the failure is said', function()
+    return #errors() == 1
+  end)
+  eq(shown(chat):find('all good', 1, true) ~= nil, true, 'the timeline keeps what it showed')
+end)
+
+test('setup({ chat_poll_ms = 1000 }) raises; 15000 is taken', function()
+  local ok, err = pcall(gc_mail.setup, { chat_poll_ms = 1000 })
+  eq(ok, false, 'refused')
+  eq(tostring(err):find('chat_poll_ms must be a number of milliseconds of at least 15000', 1, true) ~= nil, true, err)
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_poll_ms = 15000, watch = false })
+  eq(gc_mail.config.chat_poll_ms, 15000, 'taken')
 end)
 
 local failed = 0

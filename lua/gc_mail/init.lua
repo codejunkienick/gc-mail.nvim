@@ -63,6 +63,9 @@ local defaults = {
   chat_send_keys = { '<Space>ms' },
   -- true: unread mail to human in the rendered conversation is marked read when viewed.
   chat_mark_read = true,
+  -- While a chat is open: its city's history loaded again this often (ms, at
+  -- least 15000), besides the updates gc's event log brings.
+  chat_poll_ms = 60000,
 }
 
 M.config = vim.deepcopy(defaults)
@@ -576,6 +579,9 @@ local function invalid_options(opts)
   end
   if type(opts.chat_mark_read) ~= 'boolean' then
     return 'chat_mark_read must be true or false'
+  end
+  if type(opts.chat_poll_ms) ~= 'number' or opts.chat_poll_ms < 15000 then
+    return 'chat_poll_ms must be a number of milliseconds of at least 15000'
   end
   if opts.chat_keymap ~= false and (type(opts.chat_keymap) ~= 'string' or opts.chat_keymap == '') then
     return 'chat_keymap must be false or a non-empty string'
