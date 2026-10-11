@@ -53,6 +53,16 @@ local defaults = {
   markdown = true,
   -- How many days back to load mail history from the bead store.
   history_days = 14,
+  -- Normal-mode mapping that opens the last chat; false sets none (:GcMailChat works).
+  chat_keymap = '<Space>mc',
+  -- Columns of the chat window (at least 20).
+  chat_width = 60,
+  -- Rows of the chat compose box (at least 1).
+  chat_compose_height = 3,
+  -- Keys mapped in normal mode of the chat compose box ({ '<Space>ms' }); false maps none.
+  chat_send_keys = { '<Space>ms' },
+  -- true: unread mail to human in the rendered conversation is marked read when viewed.
+  chat_mark_read = true,
 }
 
 M.config = vim.deepcopy(defaults)
@@ -548,6 +558,28 @@ local function invalid_options(opts)
   if type(opts.history_days) ~= 'number' or opts.history_days < 1 or opts.history_days ~= math.floor(opts.history_days) then
     return 'history_days must be a whole number of at least 1'
   end
+  if type(opts.chat_width) ~= 'number' or opts.chat_width < 20 or opts.chat_width ~= math.floor(opts.chat_width) then
+    return 'chat_width must be a whole number of columns of at least 20'
+  end
+  if type(opts.chat_compose_height) ~= 'number' or opts.chat_compose_height < 1 or opts.chat_compose_height ~= math.floor(opts.chat_compose_height) then
+    return 'chat_compose_height must be a whole number of rows of at least 1'
+  end
+  if opts.chat_send_keys ~= false then
+    if type(opts.chat_send_keys) ~= 'table' or not vim.islist(opts.chat_send_keys) then
+      return 'chat_send_keys must be false or a list of key mappings'
+    end
+    for _, key in ipairs(opts.chat_send_keys) do
+      if type(key) ~= 'string' or key == '' then
+        return 'chat_send_keys must be false or a list of key mappings'
+      end
+    end
+  end
+  if type(opts.chat_mark_read) ~= 'boolean' then
+    return 'chat_mark_read must be true or false'
+  end
+  if opts.chat_keymap ~= false and (type(opts.chat_keymap) ~= 'string' or opts.chat_keymap == '') then
+    return 'chat_keymap must be false or a non-empty string'
+  end
 end
 
 function M.setup(opts)
@@ -573,6 +605,11 @@ function M.setup(opts)
       require('gc_mail.panel').toggle()
     end, { desc = 'Toggle the gc mail panel' })
   end
+  if M.config.chat_keymap then
+    vim.keymap.set('n', M.config.chat_keymap, function()
+      require('gc_mail.chat').open_last()
+    end, { desc = 'Open the gc chat' })
+  end
   vim.api.nvim_create_user_command('GcMail', function(cmd_opts)
     local to = vim.trim(cmd_opts.args or '') ~= '' and vim.trim(cmd_opts.args) or nil
     require('gc_mail').open(to)
@@ -586,6 +623,9 @@ function M.setup(opts)
   vim.api.nvim_create_user_command('GcMailPanel', function()
     require('gc_mail.panel').toggle()
   end, { desc = 'Toggle the gc mail panel', force = true })
+  vim.api.nvim_create_user_command('GcMailChat', function(cmd_opts)
+    require('gc_mail.chat').command(cmd_opts.fargs)
+  end, { desc = 'Open the gc chat window', force = true, nargs = '*' })
   -- check_ms = false stops a check an earlier setup() started (only then is
   -- the mailbox loaded already).
   if not M.config.check_ms and package.loaded['gc_mail.mailbox'] then

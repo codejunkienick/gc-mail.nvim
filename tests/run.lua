@@ -77,6 +77,9 @@ local function fresh()
   if package.loaded['gc_mail.watch'] then
     pcall(package.loaded['gc_mail.watch'].reset)
   end
+  if package.loaded['gc_mail.chat'] and package.loaded['gc_mail.chat'].reset then
+    pcall(package.loaded['gc_mail.chat'].reset)
+  end
   if package.loaded['gc_mail.events'] then
     pcall(package.loaded['gc_mail.events'].reset)
   end
@@ -87,9 +90,9 @@ local function fresh()
   package.loaded['gc_mail.queue'] = nil
   package.loaded['gc_mail.mailbox'] = nil
   package.loaded['gc_mail.panel'] = nil
+  package.loaded['gc_mail.chat'] = nil
   package.loaded['gc_mail.events'] = nil
   package.loaded['gc_mail.watch'] = nil
-  package.loaded['gc_mail.chat'] = nil
   gc_mail = require('gc_mail')
   run_id = run_id + 1
   queue_dir = ('%s/state-%d/queue'):format(scratch, run_id)
@@ -223,6 +226,8 @@ test('nothing runs at load time and setup maps <Space>mm, <Space>mi, <Space>mp a
   eq(vim.fn.maparg('<Space>mi', 'n') ~= '', true, 'default mailbox keymap missing')
   eq(vim.fn.exists(':GcMailPanel'), 2, ':GcMailPanel missing')
   eq(vim.fn.maparg('<Space>mp', 'n') ~= '', true, 'default panel keymap missing')
+  eq(vim.fn.exists(':GcMailChat'), 2, ':GcMailChat missing')
+  eq(vim.fn.maparg('<Space>mc', 'n') ~= '', true, 'default chat keymap missing')
   -- After startup the list is preloaded in the background.
   wait('no preload after setup', function()
     return gc_mail.cached_cities() ~= nil
@@ -233,17 +238,29 @@ test('nothing runs at load time and setup maps <Space>mm, <Space>mi, <Space>mp a
   vim.keymap.del('n', '<Space>mm')
   vim.keymap.del('n', '<Space>mi')
   vim.keymap.del('n', '<Space>mp')
-  gc_mail.setup({ keymap = false, mailbox_keymap = false, panel_keymap = false, state_dir = vim.fs.dirname(queue_dir) })
+  vim.keymap.del('n', '<Space>mc')
+  gc_mail.setup({ keymap = false, mailbox_keymap = false, panel_keymap = false, chat_keymap = false, state_dir = vim.fs.dirname(queue_dir) })
   eq(vim.fn.maparg('<Space>mm', 'n'), '', 'keymap = false still mapped')
   eq(vim.fn.maparg('<Space>mi', 'n'), '', 'mailbox_keymap = false still mapped')
   eq(vim.fn.maparg('<Space>mp', 'n'), '', 'panel_keymap = false still mapped')
+  eq(vim.fn.maparg('<Space>mc', 'n'), '', 'chat_keymap = false still mapped')
   eq(package.loaded['gc_mail.panel'], nil, 'setup loaded the panel')
   eq(package.loaded['gc_mail.events'], nil, 'setup loaded events')
   eq(package.loaded['gc_mail.history'], nil, 'history loaded at load time')
+  eq(package.loaded['gc_mail.chat'], nil, 'chat loaded at load time')
   local bad_zero = pcall(gc_mail.setup, { history_days = 0 })
   eq(bad_zero, false, 'setup refuses history_days = 0')
   local bad_str = pcall(gc_mail.setup, { history_days = 'x' })
   eq(bad_str, false, 'setup refuses history_days = x')
+  local bad_cw = pcall(gc_mail.setup, { chat_width = 10 })
+  eq(bad_cw, false, 'setup refuses chat_width = 10')
+  local bad_ch = pcall(gc_mail.setup, { chat_compose_height = 0 })
+  eq(bad_ch, false, 'setup refuses chat_compose_height = 0')
+  local bad_cs = pcall(gc_mail.setup, { chat_send_keys = 'x' })
+  eq(bad_cs, false, 'setup refuses chat_send_keys = "x"')
+  local bad_ck, bad_ck_err = pcall(gc_mail.setup, { chat_keymap = '' })
+  eq(bad_ck, false, 'setup refuses chat_keymap = ""')
+  assert(tostring(bad_ck_err):find('chat_keymap', 1, true), 'the refusal names chat_keymap')
   eq(vim.fn.exists(':GcMail'), 2, ':GcMail missing without a keymap')
   gc_mail.setup({ keymap = '<leader>gm', state_dir = vim.fs.dirname(queue_dir) })
   eq(vim.fn.maparg('<leader>gm', 'n') ~= '', true, 'custom keymap missing')
@@ -3849,6 +3866,1051 @@ test('demo gc: an agent reply appends to the store and the event log, and the wa
   local bad = gc_run(dir, { 'agent', 'mayor', 'reply', 'dc-zzzzzz', 'x' })
   eq(bad.code, 1, 'an unknown message is refused')
   eq(#vim.fn.readfile(log), 2, 'and writes nothing')
+end)
+
+local function conversation_fixture()
+  local now = os.time()
+  local past = now - 86400 * 3
+  local past_stamp = os.date('!%Y-%m-%dT%H:%M:%SZ', past)
+  local today_stamp = os.date('!%Y-%m-%dT%H:%M:%SZ', now - 1800)
+  local today_stamp2 = os.date('!%Y-%m-%dT%H:%M:%SZ', now - 900)
+
+  local msgs = {
+    {
+      id = "tc-wisp-m1",
+      title = "closed topic",
+      sender = "human",
+      assignee = "mayor",
+      status = "closed",
+      description = "closed topic\nfirst message body",
+      created_at = past_stamp,
+      labels = {},
+    },
+    {
+      id = "tc-wisp-m2",
+      title = "Re: closed topic",
+      sender = "mayor",
+      assignee = "human",
+      status = "open",
+      description = "this is a reply",
+      created_at = today_stamp,
+      labels = { "thread:thread-1a2b3c", "reply-to:tc-wisp-m1" },
+    },
+    {
+      id = "tc-wisp-m3",
+      title = "read update",
+      sender = "mayor",
+      assignee = "human",
+      status = "open",
+      description = "read update\nall good",
+      created_at = today_stamp2,
+      labels = { "read" },
+    },
+    {
+      id = "tc-wisp-m4",
+      title = "secret planner talk",
+      sender = "mayor",
+      assignee = "planner",
+      status = "open",
+      description = "secret planner talk\nshould not show",
+      created_at = today_stamp2,
+      labels = {},
+    },
+  }
+  return vim.json.encode(msgs), past, now - 1800, now - 900
+end
+
+test(':GcMailChat imd-city opens two windows to the right with expected geometry and markdown timeline', function()
+  local fix, past, t1, t2 = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
+  preload()
+
+  local origin_win = vim.api.nvim_get_current_win()
+  local origin_buf = vim.api.nvim_win_get_buf(origin_win)
+  local origin_width_before = vim.api.nvim_win_get_width(origin_win)
+
+  vim.cmd('GcMailChat imd-city')
+  local compose_win = vim.api.nvim_get_current_win()
+  assert(compose_win ~= origin_win, 'cursor in compose box')
+  eq(vim.api.nvim_get_mode().mode, 'n', 'normal mode in compose box')
+
+  local wins = vim.api.nvim_tabpage_list_wins(0)
+  eq(#wins, 3, 'origin + timeline + compose windows')
+
+  local timeline_win = nil
+  for _, w in ipairs(wins) do
+    if w ~= origin_win and w ~= compose_win then
+      timeline_win = w
+    end
+  end
+  assert(timeline_win, 'timeline window exists')
+
+  eq(vim.api.nvim_win_get_width(timeline_win), 60, 'timeline width 60')
+  eq(vim.api.nvim_win_get_width(compose_win), 60, 'compose width 60')
+  eq(vim.api.nvim_win_get_height(compose_win), 3, 'compose height 3')
+  eq(vim.api.nvim_win_get_width(origin_win), origin_width_before - 60 - 1, 'origin window unchanged except for split')
+  eq(vim.api.nvim_win_get_buf(origin_win), origin_buf, 'origin buffer unchanged')
+
+  local tl_buf = vim.api.nvim_win_get_buf(timeline_win)
+  local cp_buf = vim.api.nvim_win_get_buf(compose_win)
+  eq(vim.api.nvim_buf_get_name(tl_buf):match('gc%-mail://imd%-city/chat/mayor$') ~= nil, true, 'timeline buf name')
+  eq(vim.api.nvim_buf_get_name(cp_buf):match('gc%-mail://imd%-city/compose/mayor$') ~= nil, true, 'compose buf name')
+
+  wait('timeline rendered', function()
+    local lines = vim.api.nvim_buf_get_lines(tl_buf, 0, -1, false)
+    return #lines > 1
+  end)
+
+  local expected_lines = {
+    '## you · ' .. os.date('%Y-%m-%d %H:%M', past),
+    '',
+    'closed topic',
+    'first message body',
+    '',
+    '---',
+    '## mayor · ' .. os.date('%H:%M', t1) .. ' ●',
+    '',
+    'Re: closed topic',
+    '',
+    'this is a reply',
+    '',
+    '---',
+    '## mayor · ' .. os.date('%H:%M', t2),
+    '',
+    'read update',
+    'all good',
+    '',
+    '---',
+  }
+  eq(vim.api.nvim_buf_get_lines(tl_buf, 0, -1, false), expected_lines, 'exact timeline markdown lines')
+end)
+
+test('<Space>ms in normal mode queues to mayor; typing ms in insert mode, <C-s> and <CR> queue nothing', function()
+  local fix = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY })
+  preload()
+
+  vim.cmd('GcMailChat imd-city')
+  local compose_win = vim.api.nvim_get_current_win()
+  local compose_buf = vim.api.nvim_win_get_buf(compose_win)
+  local timeline_buf = nil
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local b = vim.api.nvim_win_get_buf(w)
+    if vim.api.nvim_buf_get_name(b):match('/chat/') then
+      timeline_buf = b
+    end
+  end
+
+  vim.env.FAKE_GC_DELAY = '0.3'
+
+  vim.api.nvim_set_current_win(compose_win)
+  -- Typing " ms" in insert mode does NOT trigger send
+  vim.api.nvim_feedkeys('ihello mayor' .. vim.keycode('<CR>') .. 'body line ms', 'x', false)
+  eq(#gc_mail.queue.list(), 0, 'nothing queued while typing ms in insert mode')
+
+  -- <C-s> and <CR> in normal mode do NOT trigger send with defaults
+  vim.api.nvim_feedkeys(vim.keycode('<C-s>'), 'x', false)
+  eq(#gc_mail.queue.list(), 0, 'nothing queued by <C-s>')
+  vim.api.nvim_feedkeys(vim.keycode('<CR>'), 'x', false)
+  eq(#gc_mail.queue.list(), 0, 'nothing queued by <CR>')
+
+  -- Clear buffer and write test content for send
+  vim.api.nvim_buf_set_lines(compose_buf, 0, -1, false, { 'hello mayor', 'body line' })
+  -- <Space>ms in normal mode sends
+  vim.api.nvim_feedkeys(vim.keycode('<Space>ms'), 'x', false)
+
+  eq(vim.api.nvim_buf_get_lines(compose_buf, 0, -1, false), { '' }, 'box empty after send')
+  vim.cmd('silent undo')
+  eq(vim.api.nvim_buf_get_lines(compose_buf, 0, -1, false), { 'hello mayor', 'body line' }, 'u restores text')
+  vim.api.nvim_buf_set_lines(compose_buf, 0, -1, false, { '' })
+
+  wait('sending… appears in timeline', function()
+    local text = table.concat(vim.api.nvim_buf_get_lines(timeline_buf, 0, -1, false), '\n')
+    return text:find('## you · sending…', 1, true) ~= nil
+  end)
+  local sending_text = table.concat(vim.api.nvim_buf_get_lines(timeline_buf, 0, -1, false), '\n')
+  assert(sending_text:find('hello mayor\nbody line', 1, true) ~= nil, 'sending… includes body')
+
+  local updated_fixture = vim.json.decode(fix)
+  updated_fixture[#updated_fixture + 1] = {
+    id = "tc-wisp-sent1",
+    title = "hello mayor",
+    sender = "human",
+    assignee = "mayor",
+    status = "open",
+    description = "hello mayor\nbody line",
+    created_at = os.date('!%Y-%m-%dT%H:%M:%SZ', os.time()),
+    labels = {},
+  }
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', vim.json.encode(updated_fixture))
+
+  wait('sent and drained', drained)
+  eq(recorded_argv(), { '--city', '/srv/imd-city', 'mail', 'send', 'mayor', '-s', 'hello mayor',
+    '-m', 'hello mayor\nbody line', '--notify' }, 'exact argv sent')
+
+  wait('sending… line gone and message shows once', function()
+    local text = table.concat(vim.api.nvim_buf_get_lines(timeline_buf, 0, -1, false), '\n')
+    return text:find('sending…', 1, true) == nil and text:find('hello mayor\nbody line', 1, true) ~= nil
+  end)
+
+  vim.env.FAKE_GC_DELAY = '0.3'
+  vim.api.nvim_buf_set_lines(compose_buf, 0, -1, false, { 'second test', 'second body' })
+  vim.api.nvim_set_current_win(compose_win)
+  vim.api.nvim_feedkeys(vim.keycode('<Space>ms'), 'x', false)
+
+  eq(vim.api.nvim_buf_get_lines(compose_buf, 0, -1, false), { '' }, 'box empty after <Space>ms send')
+  vim.cmd('silent undo')
+  eq(vim.api.nvim_buf_get_lines(compose_buf, 0, -1, false), { 'second test', 'second body' }, 'u restores text')
+
+  wait('sending… appears for second message', function()
+    local text = table.concat(vim.api.nvim_buf_get_lines(timeline_buf, 0, -1, false), '\n')
+    return text:find('## you · sending…', 1, true) ~= nil
+  end)
+
+  updated_fixture[#updated_fixture + 1] = {
+    id = "tc-wisp-sent2",
+    title = "second test",
+    sender = "human",
+    assignee = "mayor",
+    status = "open",
+    description = "second test\nsecond body",
+    created_at = os.date('!%Y-%m-%dT%H:%M:%SZ', os.time()),
+    labels = {},
+  }
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', vim.json.encode(updated_fixture))
+
+  wait('second sent and drained', drained)
+  eq(recorded_argv(), { '--city', '/srv/imd-city', 'mail', 'send', 'mayor', '-s', 'second test',
+    '-m', 'second test\nsecond body', '--notify' }, 'exact argv for second send')
+
+  wait('second sending… line gone and message shows', function()
+    local text = table.concat(vim.api.nvim_buf_get_lines(timeline_buf, 0, -1, false), '\n')
+    return text:find('sending…', 1, true) == nil and text:find('second test\nsecond body', 1, true) ~= nil
+  end)
+end)
+
+test('a failed send (FAKE_GC_FAIL_TIMES) shows ## you · queued during retries, and ## you · failed: after last retry', function()
+  reset({ FAKE_GC_FAIL_TIMES = '1' })
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = { 5000, 5000 } })
+  preload()
+
+  vim.cmd('GcMailChat imd-city')
+  local compose_win = vim.api.nvim_get_current_win()
+  local compose_buf = vim.api.nvim_win_get_buf(compose_win)
+  local timeline_buf = nil
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local b = vim.api.nvim_win_get_buf(w)
+    if vim.api.nvim_buf_get_name(b):match('/chat/') then
+      timeline_buf = b
+    end
+  end
+
+  vim.api.nvim_buf_set_lines(compose_buf, 0, -1, false, { 'will retry', 'body' })
+  vim.api.nvim_feedkeys(vim.keycode('<Space>ms'), 'x', false)
+
+  wait('attempt failed and queued retry scheduled', function()
+    local entries = gc_mail.queue.list()
+    return entries and entries[1] and entries[1].record and entries[1].record.attempts == 1 and not entries[1].record.failed
+  end)
+
+  wait('timeline shows ## you · queued during retry', function()
+    local text = table.concat(vim.api.nvim_buf_get_lines(timeline_buf, 0, -1, false), '\n')
+    return text:find('## you · queued', 1, true) ~= nil and text:find('## you · failed', 1, true) == nil
+  end)
+
+  reset({ FAKE_GC_FAIL_TIMES = '99' })
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = { 20 } })
+  preload()
+  vim.cmd('GcMailChat imd-city')
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local b = vim.api.nvim_win_get_buf(w)
+    if vim.api.nvim_buf_get_name(b):match('/chat/') then
+      timeline_buf = b
+    end
+  end
+  compose_win = vim.api.nvim_get_current_win()
+  compose_buf = vim.api.nvim_win_get_buf(compose_win)
+  vim.api.nvim_buf_set_lines(compose_buf, 0, -1, false, { 'will fail permanently', 'body' })
+  vim.api.nvim_feedkeys(vim.keycode('<Space>ms'), 'x', false)
+
+  wait('failed line appears in timeline after all retries', function()
+    local text = table.concat(vim.api.nvim_buf_get_lines(timeline_buf, 0, -1, false), '\n')
+    return text:find('## you · failed:', 1, true) ~= nil
+  end)
+  local text = table.concat(vim.api.nvim_buf_get_lines(timeline_buf, 0, -1, false), '\n')
+  assert(text:find('store unavailable', 1, true) ~= nil, 'error message shown in failed line')
+end)
+
+test('RS6: refused mark-read keeps dot, is called exactly once, and does not loop', function()
+  local history = require('gc_mail.history')
+  history.reset()
+  local fix = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/mark-read.exit', '1\n')
+  write(vim.env.FAKE_GC_MAIL .. '/mark-read.stderr', 'fake mark-read error\n')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = true })
+  preload()
+
+  vim.cmd('GcMailChat imd-city')
+  local timeline_buf = nil
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local b = vim.api.nvim_win_get_buf(w)
+    if vim.api.nvim_buf_get_name(b):match('/chat/') then
+      timeline_buf = b
+    end
+  end
+
+  wait('mark-read called once in fake gc', function()
+    local calls = mail_calls()
+    for _, call in ipairs(calls) do
+      if call[4] == 'mark-read' and call[5] == 'tc-wisp-m2' then
+        return true
+      end
+    end
+    return false
+  end)
+
+  vim.wait(300)
+
+  local mark_calls = 0
+  for _, call in ipairs(mail_calls()) do
+    if call[4] == 'mark-read' and call[5] == 'tc-wisp-m2' then
+      mark_calls = mark_calls + 1
+    end
+  end
+  eq(mark_calls, 1, 'mark-read was refused and called exactly once (no loop)')
+
+  wait('dot is still present for refused message', function()
+    local text = table.concat(vim.api.nvim_buf_get_lines(timeline_buf, 0, -1, false), '\n')
+    return text:find('●', 1, true) ~= nil
+  end)
+end)
+
+local function header_row(win, stamp)
+  for i, l in ipairs(lines_of(win)) do
+    if l:find('## mayor · ' .. stamp, 1, true) then
+      return i
+    end
+  end
+end
+
+local function list_calls()
+  local n = 0
+  for _, c in ipairs(mail_calls()) do
+    if c[3] == 'bd' and c[4] == 'list' then
+      n = n + 1
+    end
+  end
+  return n
+end
+
+local function read_calls(id)
+  local n = 0
+  for _, c in ipairs(mail_calls()) do
+    if c[4] == 'mark-read' and c[5] == id then
+      n = n + 1
+    end
+  end
+  return n
+end
+
+test('RS4: u in the chat keeps the message unread with the default chat_mark_read until the chat is left', function()
+  local fix, _, t1, t2 = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  acted('mark-read', 'tc-wisp-m2')
+  acted('mark-unread', 'tc-wisp-m3')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = true })
+  preload()
+
+  local chat_mod = require('gc_mail.chat')
+  local chat = chat_mod.open('imd-city', 'mayor')
+  local win = chat.timeline_win
+  local stamp = os.date('%H:%M', t2)
+  wait('history rendered', function()
+    return header_row(win, stamp) ~= nil
+  end)
+  wait('the unread message is marked read', function()
+    return read_calls('tc-wisp-m2') == 1
+  end)
+
+  vim.api.nvim_set_current_win(win)
+  vim.api.nvim_win_set_cursor(win, { header_row(win, stamp), 0 })
+  vim.api.nvim_feedkeys('u', 'x', false)
+  wait('mark-unread called', function()
+    for _, c in ipairs(mail_calls()) do
+      if c[4] == 'mark-unread' and c[5] == 'tc-wisp-m3' then
+        return true
+      end
+    end
+    return false
+  end)
+  vim.wait(300)
+  eq(read_calls('tc-wisp-m3'), 0, 'u does not undo itself')
+  assert(table.concat(lines_of(win), '\n'):find('## mayor · ' .. stamp .. ' ●', 1, true),
+    'the dot stays: ' .. table.concat(lines_of(win), '|'))
+
+  -- Moving to the chat's other window keeps it; leaving the chat lets the
+  -- next entry mark it read.
+  vim.api.nvim_set_current_win(chat.compose_win)
+  vim.wait(100)
+  eq(read_calls('tc-wisp-m3'), 0, 'compose box is the same chat')
+  vim.api.nvim_set_current_win(chat.origin)
+  vim.wait(100)
+  vim.api.nvim_set_current_win(win)
+  wait('entering the chat again marks it read', function()
+    return read_calls('tc-wisp-m3') == 1
+  end)
+  vim.api.nvim_set_current_win(chat.origin)
+end)
+
+test('RS5: a load while a mark-read is pending keeps the local read value', function()
+  local fix, _, t1 = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  acted('mark-read', 'tc-wisp-m2')
+  write(vim.env.FAKE_GC_MAIL .. '/mark-read.delay', '0.8\n')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = true })
+  preload()
+
+  local chat_mod = require('gc_mail.chat')
+  local chat = chat_mod.open('imd-city', 'mayor')
+  local win = chat.timeline_win
+  local stamp = os.date('%H:%M', t1)
+  wait('mark-read started', function()
+    return read_calls('tc-wisp-m2') == 1
+  end)
+  vim.api.nvim_set_current_win(win)
+  vim.api.nvim_feedkeys('R', 'x', false)
+  vim.wait(400)
+  -- The list still says unread; the pending mark-read keeps the local value
+  assert(header_row(win, stamp), 'history rendered')
+  assert(not table.concat(lines_of(win), '\n'):find('## mayor · ' .. stamp .. ' ●', 1, true), 'no dot while pending')
+  vim.wait(900)
+  eq(read_calls('tc-wisp-m2'), 1, 'not passed again')
+  vim.api.nvim_set_current_win(chat.origin)
+end)
+
+test('RS5 and RS6: a refused mark-read is not retried until a load shows the message read', function()
+  local fix, _, t1 = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/mark-read.exit', '1\n')
+  write(vim.env.FAKE_GC_MAIL .. '/mark-read.stderr', 'fake mark-read error\n')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = true })
+  preload()
+
+  local chat_mod = require('gc_mail.chat')
+  local chat = chat_mod.open('imd-city', 'mayor')
+  local win = chat.timeline_win
+  local stamp = os.date('%H:%M', t1)
+  local function dot()
+    return table.concat(lines_of(win), '\n'):find('## mayor · ' .. stamp .. ' ●', 1, true) ~= nil
+  end
+  wait('refused once', function()
+    return read_calls('tc-wisp-m2') == 1
+  end)
+  vim.wait(300)
+  vim.api.nvim_set_current_win(win)
+  -- A load that still lists it unread: the dot stays, no retry
+  vim.api.nvim_feedkeys('R', 'x', false)
+  vim.wait(400)
+  eq(dot(), true, 'the dot stays')
+  eq(read_calls('tc-wisp-m2'), 1, 'not retried')
+  -- A load that lists it read drops the record
+  local read_fix = vim.json.decode(fix)
+  for _, m in ipairs(read_fix) do
+    if m.id == 'tc-wisp-m2' then
+      table.insert(m.labels, 'read')
+    end
+  end
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', vim.json.encode(read_fix))
+  vim.api.nvim_feedkeys('R', 'x', false)
+  wait('the dot is gone', function()
+    return not dot()
+  end)
+  eq(read_calls('tc-wisp-m2'), 1, 'still not retried')
+  -- Unread again in gc: with the record gone it is passed once more
+  vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/mark-read.exit')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  vim.api.nvim_feedkeys('R', 'x', false)
+  wait('passed again', function()
+    return read_calls('tc-wisp-m2') == 2
+  end)
+  vim.api.nvim_set_current_win(chat.origin)
+end)
+
+test('RS4: u with a second chat open in another tab page keeps the message unread through window moves', function()
+  local fix, _, _, t2 = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  acted('mark-read', 'tc-wisp-m2')
+  acted('mark-unread', 'tc-wisp-m3')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = true })
+  preload()
+
+  local chat_mod = require('gc_mail.chat')
+  local chat = chat_mod.open('imd-city', 'mayor')
+  local win = chat.timeline_win
+  local stamp = os.date('%H:%M', t2)
+  wait('history rendered', function()
+    return header_row(win, stamp) ~= nil
+  end)
+  wait('the unread message is marked read', function()
+    return read_calls('tc-wisp-m2') == 1
+  end)
+
+  vim.cmd('tabnew')
+  local other = chat_mod.open('imd-city', 'planner')
+  assert(other, 'second chat opened')
+  vim.cmd('tabprevious')
+  vim.api.nvim_set_current_win(win)
+  vim.api.nvim_win_set_cursor(win, { header_row(win, stamp), 0 })
+  vim.api.nvim_feedkeys('u', 'x', false)
+  wait('mark-unread called', function()
+    for _, c in ipairs(mail_calls()) do
+      if c[4] == 'mark-unread' and c[5] == 'tc-wisp-m3' then
+        return true
+      end
+    end
+    return false
+  end)
+
+  -- Moves inside the first chat must not reach the other chat's handler
+  vim.api.nvim_set_current_win(chat.compose_win)
+  vim.wait(150)
+  vim.api.nvim_set_current_win(win)
+  vim.wait(300)
+  eq(read_calls('tc-wisp-m3'), 0, 'a second chat does not end the u')
+  assert(table.concat(lines_of(win), '\n'):find('## mayor · ' .. stamp .. ' ●', 1, true),
+    'the dot stays: ' .. table.concat(lines_of(win), '|'))
+
+  vim.api.nvim_set_current_win(chat.origin)
+  vim.wait(100)
+  vim.api.nvim_set_current_win(win)
+  wait('entering the chat again marks it read', function()
+    return read_calls('tc-wisp-m3') == 1
+  end)
+  vim.api.nvim_set_current_win(chat.origin)
+  vim.cmd('tabclose!')
+end)
+
+test('RS2: a u that a later read on the message made stale takes the state from gc', function()
+  local fix, _, _, t2 = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  acted('mark-unread', 'tc-wisp-m3')
+  write(vim.env.FAKE_GC_MAIL .. '/mark-unread.delay', '0.6\n')
+  acted('mark-read', 'tc-wisp-m3')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
+  preload()
+
+  local chat_mod = require('gc_mail.chat')
+  local chat = chat_mod.open('imd-city', 'mayor')
+  local win = chat.timeline_win
+  local stamp = os.date('%H:%M', t2)
+  wait('history rendered', function()
+    return header_row(win, stamp) ~= nil
+  end)
+  vim.api.nvim_set_current_win(win)
+  vim.api.nvim_win_set_cursor(win, { header_row(win, stamp), 0 })
+  vim.api.nvim_feedkeys('u', 'x', false)
+  -- A read from elsewhere (the mailbox) starts after the u and wins
+  require('gc_mail.mailbox').actions.read({
+    city = chat.city,
+    message = { id = 'tc-wisp-m3', subject = 'read update', from = 'mayor' },
+    read = false,
+  })
+  wait('the late unread answer is dropped and the history reloaded', function()
+    local text = table.concat(lines_of(win), '\n')
+    return text:find('## mayor · ' .. stamp, 1, true) ~= nil and not text:find('## mayor · ' .. stamp .. ' ●', 1, true)
+  end)
+  vim.api.nvim_set_current_win(chat.origin)
+end)
+
+test('RS4 and RS2: a stale mark-unread answer after the chat was left drops the record', function()
+  local fix, _, _, t2 = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  acted('mark-unread', 'tc-wisp-m3')
+  write(vim.env.FAKE_GC_MAIL .. '/mark-unread.delay', '0.6\n')
+  acted('mark-read', 'tc-wisp-m3')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = true })
+  preload()
+
+  local chat_mod = require('gc_mail.chat')
+  local chat = chat_mod.open('imd-city', 'mayor')
+  local win = chat.timeline_win
+  local stamp = os.date('%H:%M', t2)
+  wait('history rendered', function()
+    return header_row(win, stamp) ~= nil
+  end)
+  vim.api.nvim_set_current_win(win)
+  vim.api.nvim_win_set_cursor(win, { header_row(win, stamp), 0 })
+  vim.api.nvim_feedkeys('u', 'x', false)
+  -- The chat is left while the unread is pending
+  vim.api.nvim_set_current_win(chat.origin)
+  vim.wait(100)
+  -- A read from elsewhere starts after the u and wins; gc lists it unread
+  require('gc_mail.mailbox').actions.read({
+    city = chat.city,
+    message = { id = 'tc-wisp-m3', subject = 'read update', from = 'mayor' },
+    read = false,
+  })
+  local unread = vim.json.decode(fix)
+  for _, m in ipairs(unread) do
+    if m.id == 'tc-wisp-m3' then
+      m.labels = {}
+    end
+  end
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', vim.json.encode(unread))
+  vim.wait(1000)
+  local before = read_calls('tc-wisp-m3')
+  -- The stale unread record is gone: entering the chat passes the message
+  vim.api.nvim_set_current_win(win)
+  wait('entering the chat marks the unread message read', function()
+    return read_calls('tc-wisp-m3') == before + 1
+  end)
+  vim.api.nvim_set_current_win(chat.origin)
+end)
+
+test('RS5: the load after a send keeps a pending mark-read from bringing the dot back', function()
+  local fix, _, t1 = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  acted('mark-read', 'tc-wisp-m2')
+  write(vim.env.FAKE_GC_MAIL .. '/mark-read.delay', '1.0\n')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = true })
+  preload()
+
+  local chat_mod = require('gc_mail.chat')
+  local chat = chat_mod.open('imd-city', 'mayor')
+  local win = chat.timeline_win
+  local stamp = os.date('%H:%M', t1)
+  local function dot()
+    return table.concat(lines_of(win), '\n'):find('## mayor · ' .. stamp .. ' ●', 1, true) ~= nil
+  end
+  wait('mark-read started', function()
+    return read_calls('tc-wisp-m2') == 1
+  end)
+  wait('the opening load ran', function()
+    return list_calls() == 1
+  end)
+  vim.wait(300)
+  local loads = list_calls()
+  vim.api.nvim_set_current_win(chat.compose_win)
+  vim.api.nvim_buf_set_lines(chat.compose_buf, 0, -1, false, { 'hello', 'body' })
+  vim.api.nvim_feedkeys(vim.keycode('<Space>ms'), 'x', false)
+  wait('the send drained', drained)
+  wait('the load after the send ran', function()
+    return list_calls() > loads
+  end)
+  vim.wait(300)
+  eq(dot(), false, 'no dot from the send load while the mark-read is pending')
+  vim.wait(1000)
+  eq(dot(), false, 'no dot after gc answered')
+  eq(read_calls('tc-wisp-m2'), 1, 'not passed again')
+  vim.api.nvim_set_current_win(chat.origin)
+end)
+
+test('RS5: a u during a load that a later R joined is not undone by the older snapshot', function()
+  local fix, _, _, t2 = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  acted('mark-unread', 'tc-wisp-m3')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
+  preload()
+
+  local chat_mod = require('gc_mail.chat')
+  local chat = chat_mod.open('imd-city', 'mayor')
+  local win = chat.timeline_win
+  local stamp = os.date('%H:%M', t2)
+  wait('history rendered', function()
+    return header_row(win, stamp) ~= nil
+  end)
+  local function dot()
+    return table.concat(lines_of(win), '\n'):find('## mayor · ' .. stamp .. ' ●', 1, true) ~= nil
+  end
+  wait('the opening load ran', function()
+    return list_calls() == 1
+  end)
+  vim.wait(300)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.delay', '0.8\n')
+  local loads = list_calls()
+  vim.api.nvim_set_current_win(chat.compose_win)
+  vim.api.nvim_buf_set_lines(chat.compose_buf, 0, -1, false, { 'hello', 'body' })
+  vim.api.nvim_feedkeys(vim.keycode('<Space>ms'), 'x', false)
+  wait('the load after the send started', function()
+    return list_calls() > loads
+  end)
+  -- u while that load runs, then R joins it with a later start
+  vim.api.nvim_set_current_win(win)
+  vim.api.nvim_win_set_cursor(win, { header_row(win, stamp), 0 })
+  vim.api.nvim_feedkeys('u', 'x', false)
+  wait('mark-unread answered', function()
+    return dot()
+  end)
+  vim.wait(200)
+  vim.api.nvim_feedkeys('R', 'x', false)
+  vim.wait(1500)
+  eq(list_calls(), loads + 1, 'R joined the running load')
+  eq(dot(), true, 'the older snapshot did not undo the u')
+  vim.api.nvim_set_current_win(chat.origin)
+end)
+
+test('GcMailChat with a registry that lists no city says so instead of raising', function()
+  write(vim.env.FAKE_GC_CITIES, cities_record({}))
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY })
+  preload()
+  notes = {}
+  local chat_mod = require('gc_mail.chat')
+  local ok, result = pcall(chat_mod.open, nil, 'mayor')
+  eq(ok, true, 'no error raised: ' .. tostring(result))
+  eq(result, nil, 'no chat opened')
+  wait('the no-cities notice', function()
+    for _, n in ipairs(notes) do
+      if n.message == 'gc-mail: no cities are registered with gc' then
+        return true
+      end
+    end
+    return false
+  end)
+end)
+
+test('RS1: a mark-read answer that a later u made stale leaves the message unread', function()
+  local fix, _, t1 = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  acted('mark-read', 'tc-wisp-m2')
+  write(vim.env.FAKE_GC_MAIL .. '/mark-read.delay', '0.6\n')
+  acted('mark-unread', 'tc-wisp-m2')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = true })
+  preload()
+
+  local chat_mod = require('gc_mail.chat')
+  local chat = chat_mod.open('imd-city', 'mayor')
+  local win = chat.timeline_win
+  local stamp = os.date('%H:%M', t1)
+  wait('history rendered', function()
+    return header_row(win, stamp) ~= nil
+  end)
+  wait('mark-read started', function()
+    return read_calls('tc-wisp-m2') == 1
+  end)
+  vim.api.nvim_set_current_win(win)
+  vim.api.nvim_win_set_cursor(win, { header_row(win, stamp), 0 })
+  vim.api.nvim_feedkeys('u', 'x', false)
+  vim.wait(1200)
+  chat_mod.render(chat)
+  assert(table.concat(lines_of(win), '\n'):find('## mayor · ' .. stamp .. ' ●', 1, true), 'the late read answer leaves the dot')
+  eq(read_calls('tc-wisp-m2'), 1, 'not passed again')
+  vim.api.nvim_set_current_win(chat.origin)
+end)
+
+test('RS5: a message marked unread outside the chat is passed again on the next reload', function()
+  local fix = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  acted('mark-read', 'tc-wisp-m2')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = true })
+  preload()
+
+  local chat_mod = require('gc_mail.chat')
+  local chat = chat_mod.open('imd-city', 'mayor')
+  wait('marked read', function()
+    return read_calls('tc-wisp-m2') == 1
+  end)
+  vim.wait(300)
+  -- The list still says unread: the mark-read answered before this reload began
+  vim.api.nvim_set_current_win(chat.timeline_win)
+  vim.api.nvim_feedkeys('R', 'x', false)
+  wait('passed again', function()
+    return read_calls('tc-wisp-m2') == 2
+  end)
+  vim.wait(300)
+  eq(read_calls('tc-wisp-m2'), 2, 'once per reload, no loop')
+  vim.api.nvim_set_current_win(chat.origin)
+end)
+
+test('two drafts of one chat kept from two tab pages both come back', function()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
+  preload()
+  local chat_mod = require('gc_mail.chat')
+
+  vim.cmd('tabnew')
+  local chat1 = chat_mod.open('imd-city', 'mayor')
+  vim.api.nvim_buf_set_lines(chat1.compose_buf, 0, -1, false, { 'draft one' })
+  vim.cmd('tabnew')
+  local chat2 = chat_mod.open('imd-city', 'mayor')
+  assert(chat2.compose_buf ~= chat1.compose_buf, 'own compose buffer per tab page')
+  vim.api.nvim_buf_set_lines(chat2.compose_buf, 0, -1, false, { 'draft two' })
+  chat_mod.close(chat1)
+  chat_mod.close(chat2)
+  eq({ vim.api.nvim_buf_is_valid(chat1.compose_buf), vim.api.nvim_buf_is_valid(chat2.compose_buf) }, { true, true },
+    'both drafts are kept')
+
+  local seen = {}
+  vim.cmd('tabnew')
+  local chat3 = chat_mod.open('imd-city', 'mayor')
+  seen[#seen + 1] = vim.api.nvim_buf_get_lines(chat3.compose_buf, 0, -1, false)[1]
+  vim.cmd('tabnew')
+  local chat4 = chat_mod.open('imd-city', 'mayor')
+  seen[#seen + 1] = vim.api.nvim_buf_get_lines(chat4.compose_buf, 0, -1, false)[1]
+  table.sort(seen)
+  eq(seen, { 'draft one', 'draft two' }, 'each reopening gets a kept draft')
+  chat_mod.close(chat3)
+  chat_mod.close(chat4)
+  while #vim.api.nvim_list_tabpages() > 1 do
+    vim.cmd('tabclose!')
+  end
+end)
+
+test('chat opened in a second tab does not share compose buffer or close first tab windows', function()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY })
+  preload()
+
+  vim.cmd('tabnew')
+  local tab1 = vim.api.nvim_get_current_tabpage()
+  vim.cmd('GcMailChat imd-city')
+  local tab1_wins = #vim.api.nvim_tabpage_list_wins(tab1)
+  eq(tab1_wins, 3, 'tab1 has 3 windows')
+
+  -- A kept draft is reopened in tab 1; tab 2 must not share its buffer.
+  local kept_buf = vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win())
+  vim.api.nvim_buf_set_lines(kept_buf, 0, -1, false, { 'kept draft' })
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(tab1)) do
+    if vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(w)):match('/chat/') then
+      vim.api.nvim_set_current_win(w)
+    end
+  end
+  vim.api.nvim_feedkeys('q', 'x', false)
+  vim.cmd('GcMailChat imd-city')
+  eq(vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win()), kept_buf, 'kept draft comes back in tab 1')
+  eq(#vim.api.nvim_tabpage_list_wins(tab1), 3, 'tab1 has 3 windows again')
+
+  vim.cmd('tabnew')
+  local tab2 = vim.api.nvim_get_current_tabpage()
+  vim.cmd('GcMailChat imd-city')
+  local tab2_wins = #vim.api.nvim_tabpage_list_wins(tab2)
+  eq(tab2_wins, 3, 'tab2 has 3 windows')
+  assert(vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win()) ~= kept_buf, 'tab 2 has its own compose buffer')
+
+  local tab2_tl = nil
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(tab2)) do
+    local b = vim.api.nvim_win_get_buf(w)
+    if vim.api.nvim_buf_get_name(b):match('/chat/') then
+      tab2_tl = w
+    end
+  end
+  assert(tab2_tl)
+  vim.api.nvim_set_current_win(tab2_tl)
+  vim.api.nvim_feedkeys('q', 'x', false)
+
+  eq(#vim.api.nvim_tabpage_list_wins(tab1), 3, 'tab1 still has 3 windows after tab2 chat closed')
+  vim.cmd('tabclose!')
+  vim.cmd('tabclose!')
+end)
+
+test('all chat compose and timeline buffer mappings have desc', function()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY })
+  preload()
+
+  vim.cmd('GcMailChat imd-city')
+  local compose_win = vim.api.nvim_get_current_win()
+  local compose_buf = vim.api.nvim_win_get_buf(compose_win)
+  local timeline_buf = nil
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local b = vim.api.nvim_win_get_buf(w)
+    if vim.api.nvim_buf_get_name(b):match('/chat/') then
+      timeline_buf = b
+    end
+  end
+
+  local cp_maps = vim.api.nvim_buf_get_keymap(compose_buf, 'n')
+  local has_send_desc = false
+  for _, m in ipairs(cp_maps) do
+    if m.lhs == '<Space>ms' or m.lhs == ' ms' then
+      eq(m.desc, 'gc-mail: send', 'compose mapping has desc')
+      has_send_desc = true
+    end
+  end
+  assert(has_send_desc, 'compose has <Space>ms mapping with desc')
+
+  local tl_maps = vim.api.nvim_buf_get_keymap(timeline_buf, 'n')
+  local descs = {}
+  for _, m in ipairs(tl_maps) do
+    descs[m.lhs] = m.desc
+  end
+  eq(descs['<CR>'], 'gc-mail: open message')
+  eq(descs['t'], 'gc-mail: open thread')
+  eq(descs['u'], 'gc-mail: mark unread')
+  eq(descs['R'], 'gc-mail: reload history')
+  eq(descs['q'], 'gc-mail: close chat')
+end)
+
+test('RS3: with chat_mark_read true the unread message is marked read once when current, not twice; with false, no call', function()
+  local fix = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  acted('mark-read', 'tc-wisp-m2')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = true })
+  preload()
+
+  vim.cmd('GcMailChat imd-city')
+  local timeline_buf = nil
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local b = vim.api.nvim_win_get_buf(w)
+    if vim.api.nvim_buf_get_name(b):match('/chat/') then
+      timeline_buf = b
+    end
+  end
+
+  wait('mark-read called in fake gc', function()
+    local calls = mail_calls()
+    for _, call in ipairs(calls) do
+      if call[4] == 'mark-read' and call[5] == 'tc-wisp-m2' then
+        return true
+      end
+    end
+    return false
+  end)
+
+  local mark_calls = 0
+  for _, call in ipairs(mail_calls()) do
+    if call[4] == 'mark-read' and call[5] == 'tc-wisp-m2' then
+      mark_calls = mark_calls + 1
+    end
+  end
+  eq(mark_calls, 1, 'mark-read called exactly once')
+
+  wait('● is gone from timeline', function()
+    local text = table.concat(vim.api.nvim_buf_get_lines(timeline_buf, 0, -1, false), '\n')
+    return text:find('●', 1, true) == nil
+  end)
+
+  require('gc_mail.chat').render(require('gc_mail.chat').open('imd-city', 'mayor'))
+  vim.wait(100)
+  mark_calls = 0
+  for _, call in ipairs(mail_calls()) do
+    if call[4] == 'mark-read' and call[5] == 'tc-wisp-m2' then
+      mark_calls = mark_calls + 1
+    end
+  end
+  eq(mark_calls, 1, 'not called twice on re-render')
+
+  reset()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
+  preload()
+  vim.cmd('GcMailChat imd-city')
+  vim.wait(200)
+  mark_calls = 0
+  for _, call in ipairs(mail_calls()) do
+    if call[4] == 'mark-read' then
+      mark_calls = mark_calls + 1
+    end
+  end
+  eq(mark_calls, 0, 'no mark-read call with chat_mark_read = false')
+end)
+
+test('q closes both windows and keeps non-empty compose text for next open; <Space>mc reopens last chat', function()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY })
+  preload()
+
+  vim.cmd('GcMailChat imd-city')
+  local compose_win = vim.api.nvim_get_current_win()
+  local compose_buf = vim.api.nvim_win_get_buf(compose_win)
+  local timeline_win = nil
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local b = vim.api.nvim_win_get_buf(w)
+    if vim.api.nvim_buf_get_name(b):match('/chat/') then
+      timeline_win = w
+    end
+  end
+  assert(timeline_win and compose_win)
+
+  vim.api.nvim_buf_set_lines(compose_buf, 0, -1, false, { 'draft in progress', 'line 2' })
+
+  vim.api.nvim_set_current_win(timeline_win)
+  vim.api.nvim_feedkeys('q', 'x', false)
+
+  eq(vim.api.nvim_win_is_valid(timeline_win), false, 'timeline window closed')
+  eq(vim.api.nvim_win_is_valid(compose_win), false, 'compose window closed')
+
+  vim.api.nvim_feedkeys(vim.keycode('<Space>mc'), 'x', false)
+  local new_compose_win = vim.api.nvim_get_current_win()
+  local new_compose_buf = vim.api.nvim_win_get_buf(new_compose_win)
+  eq(vim.api.nvim_buf_get_lines(new_compose_buf, 0, -1, false), { 'draft in progress', 'line 2' }, 'compose text preserved')
+
+  vim.api.nvim_buf_set_lines(new_compose_buf, 0, -1, false, { '' })
+  local new_timeline_win = nil
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local b = vim.api.nvim_win_get_buf(w)
+    if vim.api.nvim_buf_get_name(b):match('/chat/') then
+      new_timeline_win = w
+    end
+  end
+  vim.api.nvim_set_current_win(new_timeline_win)
+  vim.api.nvim_feedkeys('q', 'x', false)
+  eq(vim.api.nvim_buf_is_valid(new_compose_buf), false, 'empty compose buffer was wiped')
+end)
+
+test('timeline keys: <CR> opens message, t opens thread, u marks unread, R reloads', function()
+  local fix, past, t1, t2 = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  acted('mark-unread', 'tc-wisp-m3')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
+  preload()
+
+  vim.cmd('GcMailChat imd-city')
+  local timeline_win = nil
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local b = vim.api.nvim_win_get_buf(w)
+    if vim.api.nvim_buf_get_name(b):match('/chat/') then
+      timeline_win = w
+    end
+  end
+  wait('timeline rendered', function()
+    return #vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(timeline_win), 0, -1, false) > 5
+  end)
+
+  vim.api.nvim_set_current_win(timeline_win)
+  vim.api.nvim_win_set_cursor(timeline_win, { 1, 0 })
+
+  vim.api.nvim_feedkeys(vim.keycode('<CR>'), 'x', false)
+  wait('message view opened', function()
+    local b = vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win())
+    return vim.api.nvim_buf_get_name(b):match('gc%-mail://imd%-city/tc%-wisp%-m1$') ~= nil
+  end)
+  vim.cmd('close')
+
+  vim.api.nvim_set_current_win(timeline_win)
+  vim.api.nvim_win_set_cursor(timeline_win, { 7, 0 })
+  vim.api.nvim_feedkeys('t', 'x', false)
+  wait('thread view opened', function()
+    local b = vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win())
+    return vim.api.nvim_buf_get_name(b):match('gc%-mail://imd%-city/thread/thread%-1a2b3c$') ~= nil
+  end)
+  vim.cmd('close')
+
+  vim.api.nvim_set_current_win(timeline_win)
+  vim.api.nvim_win_set_cursor(timeline_win, { 14, 0 })
+  vim.api.nvim_feedkeys('u', 'x', false)
+  wait('mark-unread called in fake log', function()
+    for _, call in ipairs(mail_calls()) do
+      if call[4] == 'mark-unread' and call[5] == 'tc-wisp-m3' then
+        return true
+      end
+    end
+    return false
+  end)
+  wait('● appears for tc-wisp-m3', function()
+    local lines = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(timeline_win), 0, -1, false)
+    return table.concat(lines, '\n'):find('## mayor · ' .. os.date('%H:%M', t2) .. ' ●', 1, true) ~= nil
+  end)
+
+  local before_calls = #mail_calls()
+  vim.api.nvim_feedkeys('R', 'x', false)
+  wait('history.load called from R', function()
+    return #mail_calls() > before_calls
+  end)
 end)
 
 local failed = 0

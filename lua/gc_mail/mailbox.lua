@@ -763,27 +763,38 @@ function actions.open(entry, split)
   return buf
 end
 
-function actions.read(entry)
+function actions.read(entry, on_done)
   local at = started(entry)
   run(entry.city, 'mark-read', entry.message.id, function(ok, err)
     if not ok then
-      return notify(('cannot mark "%s" read: %s'):format(entry.message.subject, err), vim.log.levels.ERROR)
+      notify(('cannot mark "%s" read: %s'):format(entry.message.subject, err), vim.log.levels.ERROR)
+      if type(on_done) == 'function' then
+        on_done(false, err)
+      end
+      return
     end
-    apply(entry, at, function()
+    local applied = apply(entry, at, function()
       now_read(entry)
     end)
+    if type(on_done) == 'function' then
+      on_done(true, nil, applied)
+    end
   end)
 end
 
 -- Unread again in gc; the kept copy stays (gc may already have closed the
 -- message) and says unread.
-function actions.unread(entry)
+function actions.unread(entry, on_done)
   local at = started(entry)
   run(entry.city, 'mark-unread', entry.message.id, function(ok, err)
     if not ok then
-      return notify(('cannot mark "%s" unread: %s'):format(entry.message.subject, err), vim.log.levels.ERROR)
+      notify(('cannot mark "%s" unread: %s'):format(entry.message.subject, err), vim.log.levels.ERROR)
+      if type(on_done) == 'function' then
+        on_done(false, err)
+      end
+      return
     end
-    apply(entry, at, function()
+    local applied = apply(entry, at, function()
       entry.read, entry.message.read = false, false
       if entry.kept then
         local kept, kerr = keep(entry)
@@ -792,6 +803,9 @@ function actions.unread(entry)
         end
       end
     end)
+    if type(on_done) == 'function' then
+      on_done(true, nil, applied)
+    end
   end)
 end
 

@@ -54,6 +54,11 @@ unchanged; the mailbox lists mail only when you open it.
 | `events_rearm_ms` | `60000` | how often to retry watching a missing or refused event log (ms, at least `15000`) |
 | `history_days` | `14` | how many days of mail history to load from the bead store; a whole number of at least 1 |
 | `markdown` | `true` | the opened message and the thread are markdown buffers; `false` keeps the plain text layout |
+| `chat_keymap` | `'<Space>mc'` | normal-mode mapping that opens the last chat; `false` sets none |
+| `chat_width` | `60` | columns of the chat window (whole number of at least 20) |
+| `chat_compose_height` | `3` | rows of the chat compose box (whole number of at least 1) |
+| `chat_send_keys` | `{ '<Space>ms' }` | keys mapped in normal mode of the compose box that send the message; `false` maps none |
+| `chat_mark_read` | `true` | `true`: unread mail to human in the rendered conversation is marked read when viewed; `false` marks nothing |
 
 `setup()` refuses (raises an error) a prefix or suffix with a control
 character, the two together over 40 characters, a `check_ms` that is
@@ -61,7 +66,11 @@ neither `false` nor at least a minute, a `watch` that is not `true` or
 `false`, a `watch_resync_ms` under a minute, a `panel_poll_ms` under 15 seconds,
 an `events_rearm_ms` under 15 seconds, a `panel_height` that is not a
 whole number of at least 1, a `history_days` that is not a whole number
-of at least 1, and a `markdown` that is not `true` or `false`.
+of at least 1, a `markdown` that is not `true` or `false`, a `chat_width`
+under 20, a `chat_compose_height` under 1, a `chat_send_keys` that is neither
+`false` nor a list of key mapping strings, a `chat_mark_read` that is not
+`true` or `false`, and a `chat_keymap` that is neither `false` nor a
+non-empty string.
 
 ## Use
 
@@ -314,6 +323,64 @@ sections = { lualine_x = { function() return 'mail' .. require('gc_mail').status
 " the built-in statusline: shows " 3" with three unread mails, else nothing
 set statusline+=%{v:lua.require('gc_mail').status()}
 ```
+
+## The chat
+
+`<Space>mc` (configured via `chat_keymap`, `false` for none, default `'<Space>mc'`)
+or `:GcMailChat [city] [with]` opens a two-window conversation view
+beside the current window: a vertical split of `chat_width` columns (default 60,
+`winfixwidth`) on the right for the timeline, and a split below of
+`chat_compose_height` rows (default 3, `winfixheight`) for the compose box,
+placing the cursor in the compose box in normal mode.
+
+| key | context | action |
+| --- | --- | --- |
+| `<Space>ms` | compose box | send message (normal mode only; option `chat_send_keys`, default `{ '<Space>ms' }`) |
+| `<CR>` | timeline | open message under cursor in message view |
+| `t` | timeline | open thread of message under cursor |
+| `u` | timeline | mark message under cursor unread (`mailbox.actions.unread`) |
+| `R` | timeline | reload history (`history.load`) and re-render |
+| `q` | timeline | close both chat windows (non-empty draft preserved) |
+
+- **Timeline rendering.** Rendered oldest first from `history.conversation(city, with)`
+  and pending send queue records for `(city.path, with)` that are not replies or
+  reply to this conversation. Each message displays `## <who> · <when>[ ●]`,
+  followed by the subject line unless it equals the first non-empty line of the body
+  (after stripping prefix and suffix), an empty line, the body verbatim, and `---`.
+  `<who>` is `you` for `human`, else the sender. `<when>` is `%H:%M` for today, else
+  `%Y-%m-%d %H:%M`. `●` indicates unread mail to `human`.
+- **Pending and failed sends.** Queue records render `## you · sending…` (claimed),
+  `## you · queued` (pending), or `## you · failed: <error>` (failed), followed by
+  the body verbatim. The record is replaced once the delivered message appears in
+  history. An empty conversation displays `no messages with <with> in <city> yet`.
+- **Scrolling.** Cursor remains at the end on open and on re-render if it was
+  previously at the end; otherwise it stays on its line without moving cursors in
+  other windows.
+- **Sending.** Sends through `gc_mail.send(compose_buf, city, { to = with })`.
+  The compose box clears in one undo step (`u` restores the text). The timeline
+  shows `sending…` immediately, and refreshes via `history.load` upon queue delivery.
+- **Read marks.** With `chat_mark_read` (default `true`), unread messages to `human`
+  are passed to `mailbox.actions.read` when the chat is current or on `WinEnter`.
+  The `●` bullet disappears immediately, returning if gc refuses. `u` on a message
+  keeps it unread until you leave the chat. `chat_mark_read = false` marks nothing.
+  The chat keeps one record per message id (`reading`, `read`, `refused` or
+  `unreading`; no record is idle), under these rules:
+  1. **RS1** Every read or unread the chat starts bumps that id's sequence number; an
+     answer whose number is no longer current changes nothing (state, cache, render).
+  2. **RS2** `actions.unread` reports whether its answer was applied, as `actions.read`
+     does; an answer that was not applied is the stale case of RS1, and gc's state
+     is taken from a history load (RS5).
+  3. **RS3** Automatic mark-read passes only an id with no record, at most once until
+     its record is dropped.
+  4. **RS4** `u` marks the message `unreading`, owned by the chat that pressed it; only
+     leaving that chat's own two windows releases the ids it owns. Moving between
+     windows of another chat never touches them.
+  5. **RS5** After a history load, an id whose last action answered before the load
+     began takes gc's loaded read flag and drops its record when they disagree
+     (a message marked unread elsewhere is then passed again); an action still pending,
+     or answered after the load began, keeps the local value.
+  6. **RS6** A refused mark-read keeps the `●` and is not retried automatically until
+     a load shows the message read.
 
 ## The send queue
 

@@ -45,7 +45,9 @@ end
 ---   gc --city <path> bd list --type message --all --json --limit 0 --created-after <T>
 --- or with `opts.thread` set:
 ---   gc --city <path> bd list --type message --all --json --limit 0 -l thread:<id>
---- `on_done(list, err, skipped)` runs on the main loop.
+--- `on_done(list, err, skipped)` runs on the main loop. Every message it
+--- caches carries `loaded_since`, the vim.uv.hrtime() at which the gc call that
+--- listed it started (a joined load keeps the running call's stamp).
 function M.load(city, opts, on_done)
   if type(opts) == 'function' and on_done == nil then
     on_done = opts
@@ -66,6 +68,8 @@ function M.load(city, opts, on_done)
     return
   end
   inflight[inflight_key] = { on_done }
+  -- The stamp is the call's own; a caller that joins it shares the stamp
+  local started = vim.uv.hrtime()
 
   local argv
   if opts.thread then
@@ -192,6 +196,7 @@ function M.load(city, opts, on_done)
           else
             msg.closed = closed
             msg.reply_to = reply_to
+            msg.loaded_since = started
             list[#list + 1] = msg
           end
         end

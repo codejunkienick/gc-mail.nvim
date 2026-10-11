@@ -85,7 +85,7 @@ M.token = vim.text.hexencode(uv.random(8)):lower()
 local subscribers = {}
 local subscriber_errors = {}
 
-local function notify_subscribers()
+local function notify_subscribers(payload)
   if not next(subscribers) then
     return
   end
@@ -96,7 +96,7 @@ local function notify_subscribers()
     end
     for name, fn in pairs(current) do
       if subscribers[name] then
-        local ok, err = pcall(fn)
+        local ok, err = pcall(fn, payload)
         if not ok and not subscriber_errors[name] then
           subscriber_errors[name] = true
           config.notify(('subscriber %s failed: %s'):format(name, tostring(err)), vim.log.levels.ERROR)
@@ -576,12 +576,13 @@ local function settle(wait_ms)
   end
   local name = who(held.record)
   if ok then
+    local settled_held = held
     worker.held = nil
     if held.notified then
       config.notify(('the queue file of the message to %s is in order again'):format(name))
     end
     if not took_away then
-      notify_subscribers()
+      notify_subscribers(settled_held)
     end
     return true
   end
