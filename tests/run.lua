@@ -230,6 +230,8 @@ test('nothing runs at load time and setup maps <Space>mm, <Space>mi, <Space>mp a
   eq(vim.fn.exists(':GcMailPanel'), 2, ':GcMailPanel missing')
   eq(vim.fn.maparg('<Space>mp', 'n') ~= '', true, 'default panel keymap missing')
   eq(vim.fn.exists(':GcMailChat'), 2, ':GcMailChat missing')
+  eq(vim.fn.exists(':GcMailChats'), 2, ':GcMailChats missing')
+  eq(vim.fn.maparg('<Space>ml', 'n') ~= '', true, 'default chats keymap missing')
   eq(vim.fn.maparg('<Space>mc', 'n') ~= '', true, 'default chat keymap missing')
   -- After startup the list is preloaded in the background.
   wait('no preload after setup', function()
@@ -242,11 +244,13 @@ test('nothing runs at load time and setup maps <Space>mm, <Space>mi, <Space>mp a
   vim.keymap.del('n', '<Space>mi')
   vim.keymap.del('n', '<Space>mp')
   vim.keymap.del('n', '<Space>mc')
-  gc_mail.setup({ keymap = false, mailbox_keymap = false, panel_keymap = false, chat_keymap = false, state_dir = vim.fs.dirname(queue_dir) })
+  vim.keymap.del('n', '<Space>ml')
+  gc_mail.setup({ keymap = false, mailbox_keymap = false, panel_keymap = false, chat_keymap = false, chats_keymap = false, state_dir = vim.fs.dirname(queue_dir) })
   eq(vim.fn.maparg('<Space>mm', 'n'), '', 'keymap = false still mapped')
   eq(vim.fn.maparg('<Space>mi', 'n'), '', 'mailbox_keymap = false still mapped')
   eq(vim.fn.maparg('<Space>mp', 'n'), '', 'panel_keymap = false still mapped')
   eq(vim.fn.maparg('<Space>mc', 'n'), '', 'chat_keymap = false still mapped')
+  eq(vim.fn.maparg('<Space>ml', 'n'), '', 'chats_keymap = false still mapped')
   eq(package.loaded['gc_mail.panel'], nil, 'setup loaded the panel')
   eq(package.loaded['gc_mail.events'], nil, 'setup loaded events')
   eq(package.loaded['gc_mail.history'], nil, 'history loaded at load time')
@@ -1729,13 +1733,13 @@ test('markdown message view: title, escaped header lines, a rule, then the body 
   local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
   eq(lines[1], '# Re: \\*plan\\* \\[v2\\] \\<now\\> \\#1 \\| \\`x\\` \\\\ end', 'escaped title')
   eq(lines[3], '**From** may\\_or · **To** human · **City** imd-city · 2026-10-07T12:00:00Z', 'sender line')
-  assert(lines[5]:find('^`ic%-wisp%-a1` · thread `thread%-0a1b2c3d4e5f` · r reply  t thread  u unread  a archive  d delete  q close · Read mail stays'),
+  assert(lines[5]:find('^`ic%-wisp%-a1` · thread `thread%-0a1b2c3d4e5f` · r reply  t thread  c chat  u unread  a archive  d delete  q close · Read mail stays'),
     'id line: ' .. lines[5])
   eq(lines[7], '---', 'rule')
   eq(vim.list_slice(lines, 9), vim.split(body, '\n', { plain = true }), 'body verbatim, not escaped')
   -- Blank lines keep the id line from reading as a heading over the rule.
   eq({ lines[2], lines[4], lines[6], lines[8] }, { '', '', '', '' }, 'blank separators')
-  eq(view_keys(buf), { 'a', 'd', 'q', 'r', 't', 'u' }, 'the same keys as before')
+  eq(view_keys(buf), { 'a', 'c', 'd', 'q', 'r', 't', 'u' }, 'the same keys as before')
 end)
 
 test('markdown thread view: first subject as the title, a heading per message, a rule between messages', function()
@@ -1785,7 +1789,7 @@ test('markdown = false keeps the plain message and thread layouts, with no filet
   eq(vim.api.nvim_buf_get_lines(buf, 0, -1, false), {
     'From:    mayor', 'To:      human', 'City:    imd-city', 'Date:    2026-10-07T13:00:00Z', 'Subject: Re: plan',
     'Id:      ic-wisp-a3   thread thread-0a1b2c3d4e5f',
-    'Keys:    r reply  t thread  u unread  a archive  d delete  q close',
+    'Keys:    r reply  t thread  c chat  u unread  a archive  d delete  q close',
     'Read mail stays in this mailbox until you archive or delete it; gc closes read mail an hour after it was sent.',
     '', 'body of ic-wisp-a3', 'second line',
   }, 'plain message')
@@ -5619,6 +5623,221 @@ test('setup({ chat_poll_ms = 1000 }) raises; 15000 is taken', function()
   eq(tostring(err):find('chat_poll_ms must be a number of milliseconds of at least 15000', 1, true) ~= nil, true, err)
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_poll_ms = 15000, watch = false })
   eq(gc_mail.config.chat_poll_ms, 15000, 'taken')
+end)
+
+-- ---- the conversations list ---------------------------------------------------
+
+-- A bd list record of a mail message, `ago` seconds old.
+local function bd_mail(id, sender, assignee, title, ago, read)
+  return { id = id, title = title, sender = sender, assignee = assignee, status = 'open', description = title .. '\nbody',
+    created_at = os.date('!%Y-%m-%dT%H:%M:%SZ', os.time() - ago), labels = read and { 'read' } or {}, issue_type = 'message' }
+end
+
+-- imd-city: a conversation with the mayor of three messages, two unread, and
+-- one with the planner; side-city has no mail at all.
+local function chats_fixture()
+  local cities = city_dirs()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', vim.json.encode({
+    bd_mail('ic-wisp-c1', 'human', 'mayor', 'Deploy question', 3 * 3600, true),
+    bd_mail('ic-wisp-c2', 'mayor', 'human', 'Re: Deploy question', 2 * 3600, false),
+    bd_mail('ic-wisp-c3', 'mayor', 'human', 'Plan update', 1800, false),
+    bd_mail('ic-wisp-c4', 'human', 'planner', 'Plan check', 5 * 3600, true),
+  }))
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.side city.json', '[]')
+  return cities
+end
+
+local CHAT_LINES = {
+  '  2  imd-city  mayor  Plan update  30m ',
+  '     imd-city  planner  Plan check  5h ',
+  '     side-city  mayor  no messages yet ',
+}
+
+local function chat_timeline_names()
+  local names = {}
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(w))
+    if name:match('/chat/') then
+      names[#names + 1] = name:match('gc%-mail://(.*)$')
+    end
+  end
+  return names
+end
+
+test(':GcMailChats opens at once with loading…, then lists every conversation newest first, one bd list per city', function()
+  local cities = chats_fixture()
+  vim.env.FAKE_GC_DELAY = nil
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.delay', '0.4\n')
+  vim.cmd('GcMailChats')
+  local win = vim.api.nvim_get_current_win()
+  eq(#floats(), 1, 'the float is open')
+  eq(vim.api.nvim_win_get_config(win).title[1][1], ' gc mail chats: <CR> open  q close ', 'its title')
+  eq(lines_of(win), { ' loading… ' }, 'loading… until the first answer')
+  wait('the lists arrive', function()
+    return #lines_of(win) == 3
+  end)
+  eq(lines_of(win), CHAT_LINES, 'one line per conversation, newest last message first')
+  vim.wait(300)
+  eq({ bd_list_calls(cities[1].path), bd_list_calls(cities[2].path) }, { 1, 1 }, 'one bd list call per city')
+  eq(#mail_calls(), 2, 'and nothing else')
+
+  -- Opened again with the cache: the lines at once, one more load per city
+  vim.api.nvim_feedkeys('q', 'x', false)
+  eq(#floats(), 0, 'q closes')
+  vim.cmd('GcMailChats')
+  eq(lines_of(vim.api.nvim_get_current_win()), CHAT_LINES, 'from the cache at once')
+  vim.wait(800)
+  eq({ bd_list_calls(cities[1].path), bd_list_calls(cities[2].path) }, { 2, 2 }, 'each city loaded once more')
+  vim.api.nvim_feedkeys(vim.keycode('<Esc>'), 'x', false)
+  eq(#floats(), 0, '<Esc> closes')
+end)
+
+test('<CR> in the conversations list closes it and opens the chat of that line', function()
+  chats_fixture()
+  vim.cmd('GcMailChats')
+  local win = vim.api.nvim_get_current_win()
+  wait('the lists arrive', function()
+    return #lines_of(win) == 3
+  end)
+  vim.api.nvim_win_set_cursor(win, { 2, 0 })
+  vim.api.nvim_feedkeys(vim.keycode('<CR>'), 'x', false)
+  eq(#floats(), 0, 'the float is closed')
+  eq(chat_timeline_names(), { 'imd-city/chat/planner' }, 'the chat of the planner in imd-city')
+  vim.cmd('only')
+  vim.api.nvim_feedkeys(vim.keycode('<Esc>'), 'x', false)
+
+  -- The empty city's mayor line starts a first chat
+  vim.cmd('GcMailChats')
+  win = vim.api.nvim_get_current_win()
+  wait('the lists arrive', function()
+    return #lines_of(win) == 3
+  end)
+  vim.api.nvim_win_set_cursor(win, { 3, 0 })
+  vim.api.nvim_feedkeys(vim.keycode('<CR>'), 'x', false)
+  eq(vim.tbl_contains(chat_timeline_names(), 'side-city/chat/mayor'), true, 'the first chat with side-city mayor')
+end)
+
+test('a failed load for one city is said once and the other city still lists', function()
+  local cities = chats_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.side city.exit', '1\n')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.side city.stderr', 'store unavailable\n')
+  vim.cmd('GcMailChats')
+  local win = vim.api.nvim_get_current_win()
+  wait('both answered', function()
+    return bd_list_calls(cities[1].path) == 1 and bd_list_calls(cities[2].path) == 1 and #lines_of(win) == 3
+  end)
+  vim.wait(300)
+  eq(lines_of(win), { CHAT_LINES[1], CHAT_LINES[2], '     side-city  cannot load the history ' },
+    'imd-city lists, side-city says it could not load')
+  local errors = vim.tbl_filter(function(note)
+    return note.level == vim.log.levels.ERROR
+  end, notes)
+  eq(#errors, 1, 'said once')
+  eq(errors[1].message:find('store unavailable', 1, true) ~= nil, true, errors[1].message)
+  eq(bd_list_calls(cities[2].path), 1, 'and not retried')
+  vim.api.nvim_feedkeys('q', 'x', false)
+end)
+
+test('c in the mailbox float opens the chat with the sender in its city and closes the float', function()
+  chats_fixture()
+  inbox('imd-city', { msg('ic-wisp-a1', { from = 'planner', subject = 'from the planner' }) })
+  inbox('side city', {})
+  local win = mailbox().open()
+  settled(win, 1)
+  vim.api.nvim_feedkeys('c', 'x', false)
+  eq(#floats(), 0, 'the float is closed')
+  eq(chat_timeline_names(), { 'imd-city/chat/planner' }, 'the chat with the sender, in the message city')
+  -- A message from human opens the chat with its recipient
+  vim.cmd('only')
+  local entry = { city = { name = 'imd-city', path = '/srv/imd-city' }, message = msg('ic-wisp-a9', { from = 'human', to = 'builder' }) }
+  mailbox().actions.chat(entry)
+  eq(vim.tbl_contains(chat_timeline_names(), 'imd-city/chat/builder'), true, 'a message from human: its recipient')
+end)
+
+test('c in the panel opens the chat beside its origin window and the panel stays', function()
+  local cities = chats_fixture()
+  inbox('imd-city', { msg('ic-wisp-a1', { subject = 'first' }) })
+  inbox('side city', {})
+  buffer({ 'one', 'two' })
+  local origin = vim.api.nvim_get_current_win()
+  local win = panel().open()
+  listed(cities)
+  settled(win, 1)
+  vim.api.nvim_set_current_win(win)
+  vim.api.nvim_feedkeys('c', 'x', false)
+  eq(chat_timeline_names(), { 'imd-city/chat/mayor' }, 'the chat with the sender')
+  eq(vim.api.nvim_win_is_valid(win), true, 'the panel stays')
+  local timeline
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(w)):match('/chat/') then
+      timeline = w
+    end
+  end
+  eq(vim.api.nvim_win_get_position(timeline)[1], vim.api.nvim_win_get_position(origin)[1], 'level with the origin window')
+  eq(vim.api.nvim_win_get_position(timeline)[2] > vim.api.nvim_win_get_position(origin)[2], true, 'to its right')
+  eq(vim.api.nvim_win_get_buf(win) ~= vim.api.nvim_win_get_buf(timeline), true, 'never inside the panel')
+  eq(vim.api.nvim_win_get_height(win), 10, 'the panel keeps its rows')
+end)
+
+test('c in the message view opens the chat and keeps the view', function()
+  chats_fixture()
+  inbox('imd-city', { msg('ic-wisp-a1', { subject = 'first' }) })
+  inbox('side city', {})
+  acted('read', 'ic-wisp-a1')
+  local win = mailbox().open()
+  settled(win, 1)
+  vim.api.nvim_feedkeys(vim.keycode('<CR>'), 'x', false)
+  local view_win = vim.api.nvim_get_current_win()
+  local view_buf = vim.api.nvim_win_get_buf(view_win)
+  eq(vim.api.nvim_buf_get_name(view_buf):match('gc%-mail://imd%-city/ic%-wisp%-a1') ~= nil, true, 'the message view')
+  vim.api.nvim_feedkeys('c', 'x', false)
+  eq(chat_timeline_names(), { 'imd-city/chat/mayor' }, 'the chat opened')
+  eq(vim.api.nvim_win_is_valid(view_win) and vim.api.nvim_win_get_buf(view_win) == view_buf, true, 'the view stays')
+end)
+
+test('every mapping the conversations list and the c key add carries a gc-mail: desc', function()
+  chats_fixture()
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, watch = false })
+  local function desc_of(maps, lhs)
+    for _, map in ipairs(maps) do
+      if map.lhs == lhs then
+        return map.desc
+      end
+    end
+  end
+  local function every_desc(buf, lhs_list)
+    local maps = vim.api.nvim_buf_get_keymap(buf, 'n')
+    for _, lhs in ipairs(lhs_list) do
+      local desc = desc_of(maps, lhs)
+      eq(type(desc) == 'string' and desc:sub(1, 9) == 'gc-mail: ', true, ('mapping %s has a gc-mail: desc, got %s'):format(lhs, tostring(desc)))
+    end
+  end
+  eq((vim.fn.maparg('<Space>ml', 'n', false, true).desc or ''):sub(1, 9), 'gc-mail: ', 'the <Space>ml mapping')
+  vim.cmd('GcMailChats')
+  every_desc(vim.api.nvim_get_current_buf(), { '<CR>', 'q', '<Esc>' })
+  vim.api.nvim_feedkeys('q', 'x', false)
+  inbox('imd-city', { msg('ic-wisp-a1', { subject = 'first' }) })
+  inbox('side city', {})
+  local win = mailbox().open()
+  settled(win, 1)
+  every_desc(vim.api.nvim_win_get_buf(win), { '<CR>', 'r', 't', 'c', 'm', 'u', 'a', 'd', 'p', 'R', 'q' })
+  vim.api.nvim_feedkeys('q', 'x', false)
+  local pwin = panel().open()
+  settled(pwin, 1)
+  every_desc(vim.api.nvim_win_get_buf(pwin), { '<CR>', 'r', 't', 'c', 'm', 'u', 'a', 'd', 'p', 'R', 'q' })
+end)
+
+test('setup({ chats_keymap = false }) maps nothing, a bad value is refused, and the command is there', function()
+  eq(vim.fn.exists(':GcMailChats'), 2, ':GcMailChats exists before setup')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, watch = false })
+  eq(vim.fn.maparg('<Space>ml', 'n') ~= '', true, 'the default mapping')
+  vim.keymap.del('n', '<Space>ml')
+  gc_mail.setup({ chats_keymap = false, state_dir = vim.fs.dirname(queue_dir), watch = false })
+  eq(vim.fn.maparg('<Space>ml', 'n'), '', 'chats_keymap = false maps nothing')
+  eq(vim.fn.exists(':GcMailChats'), 2, ':GcMailChats still works')
+  local ok, err = pcall(gc_mail.setup, { chats_keymap = '' })
+  eq(ok, false, 'an empty chats_keymap is refused')
+  eq(tostring(err):find('chats_keymap', 1, true) ~= nil, true, 'the refusal names it')
 end)
 
 local failed = 0

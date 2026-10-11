@@ -56,6 +56,7 @@ unchanged; the mailbox lists mail only when you open it.
 | `history_days` | `14` | how many days of mail history to load from the bead store; a whole number of at least 1 |
 | `markdown` | `true` | the opened message and the thread are markdown buffers; `false` keeps the plain text layout |
 | `chat_keymap` | `'<Space>mc'` | normal-mode mapping that opens the last chat; `false` sets none |
+| `chats_keymap` | `'<Space>ml'` | normal-mode mapping that opens the conversations list; `false` sets none |
 | `chat_width` | `60` | columns of the chat window (whole number of at least 20) |
 | `chat_compose_height` | `3` | rows of the chat compose box (whole number of at least 1) |
 | `chat_send_keys` | `{ '<Space>ms' }` | keys mapped in normal mode of the compose box that send the message; `false` maps none |
@@ -72,7 +73,7 @@ whole number of at least 1, a `history_days` that is not a whole number
 of at least 1, a `markdown` that is not `true` or `false`, a `chat_width`
 under 20, a `chat_compose_height` under 1, a `chat_send_keys` that is neither
 `false` nor a list of key mapping strings, a `chat_mark_read` that is not
-`true` or `false`, a `chat_keymap` that is neither `false` nor a
+`true` or `false`, a `chat_keymap` or `chats_keymap` that is neither `false` nor a
 non-empty string, and a `chat_poll_ms` under 15 seconds.
 
 ## Use
@@ -174,6 +175,7 @@ Two invariants hold every gc answer to what it may change:
 | `<CR>` | open the message in a new window: headers, then the body | `mail read <id>` (marks it read; nothing for mail already read) |
 | `r` | reply: a new buffer with `Re: <subject>`; `<Space>mm` (or `:GcMail`) in it queues the reply | `mail reply <id> -s <subject> -m <body> --notify`, from the send queue |
 | `t` | the thread, oldest first, in a new window | load from the bead store (`gc bd list`); `mail thread <id>` if no thread id |
+| `c` | open the chat with the message's sender in its city (with the recipient, for a message from you); the float closes first | none (the chat loads its own history) |
 | `m` | mark read | `mail mark-read <id>` |
 | `u` | mark unread | `mail mark-unread <id>` |
 | `a` | archive | `mail archive <id>` |
@@ -183,8 +185,8 @@ Two invariants hold every gc answer to what it may change:
 | `q`, `<Esc>` | close | |
 
 Each action names only the message under the cursor and is shown as an error
-when gc refuses it. The opened message has the same keys (`r`, `t`, `u`, `a`,
-`d`, and `q` to close the window).
+when gc refuses it. The opened message has the same keys (`r`, `t`, `c`, `u`, `a`,
+`d`, and `q` to close the window); `c` opens the chat beside the view and keeps it.
 
 **Markdown views.** With `markdown = true` (the default) the opened message
 and the thread are scratch buffers with `filetype=markdown`, so a markdown
@@ -255,14 +257,15 @@ notes.md
  ● imd-city  mayor  Re: mail panel  2m
    imd-city  mayor  Deploy plan accepted  1h
 
- gc mail: <CR> open  r reply  t thread  m read  u unread  a archive  d delete  p preview  R refresh  q close
+ gc mail: <CR> open  r reply  t thread  c chat  m read  u unread  a archive  d delete  p preview  R refresh  q close
 ```
 
 It is a second view of the mailbox, not a copy: the same `gc mail inbox`
 listing, I1 and I2, kept copies and actions, so an action taken in the panel
 or in the float shows in both. The keys are the mailbox's (`p` shows or hides
 its preview pane); `<CR>`, `r` and `t` open their window above the panel,
-never inside it, and `q` closes the panel. The panel's cursor stays on the message it was on when the list
+never inside it; `c` opens the chat beside the window the panel is docked under, and
+the panel stays; `q` closes the panel. The panel's cursor stays on the message it was on when the list
 changes.
 
 **Live updates without polling.** A shared event-log watcher
@@ -436,6 +439,22 @@ placing the cursor in the compose box in normal mode.
   chat stops everything the chat started (the watcher itself stops when no panel or
   background watch uses it), and an event or answer that arrives later touches no
   closed chat.
+
+- **Conversations.** `<Space>ml` (option `chats_keymap`, `false` for none) or
+  `:GcMailChats` opens a float, ` gc mail chats: <CR> open  q close `, with one line
+  per conversation across the cached cities, newest last message first:
+  ` <unread, 2 wide>  <city>  <with>  <subject of the last message>  <age> `. A
+  conversation is the messages between `human` and one other address in one city
+  (the rule of `history.conversation`); unread counts its messages to `human` that are
+  not read. A city with no conversation gets a ` <city>  mayor  no messages yet ` line,
+  so a first chat can start from here. The float opens at once from the history
+  cache (` loading… ` while nothing is known) and loads each city once, in the
+  background, filling the lines in; a city that fails to load is said once as an error,
+  its line says `cannot load the history`, and the other cities still list. It is not
+  live: it shows what the cache held when it opened and after each load it started.
+  `<CR>` closes it and opens that chat; `q` and `<Esc>` close it. `c` in the mailbox
+  float, the message view and the panel opens the chat with the message's sender
+  (or, for a message from you, its recipient) in the message's city.
 
 ## The send queue
 

@@ -55,11 +55,18 @@ M.dir = dir
 
 local first_lines = queue.first_lines
 local RECIPIENT = 'human'
-local TITLE = ' gc mail: <CR> open  r reply  t thread  m read  u unread  a archive  d delete  R refresh '
+local TITLE = ' gc mail: <CR> open  r reply  t thread  c chat  m read  u unread  a archive  d delete  R refresh '
 local LOADING = ' loading… '
 local EMPTY = ' no mail '
-local KEYS_HINT = 'r reply  t thread  u unread  a archive  d delete  q close'
+local KEYS_HINT = 'r reply  t thread  c chat  u unread  a archive  d delete  q close'
 local READ_NOTE = 'Read mail stays in this mailbox until you archive or delete it; gc closes read mail an hour after it was sent.'
+
+-- What each key of the mailbox float, the panel and the message view does, for
+-- the desc of its mapping (all start with `gc-mail: ` once mapped).
+M.KEY_DESC = {
+  ['<CR>'] = 'open message', r = 'reply', t = 'open thread', c = 'open chat with the sender', m = 'mark read',
+  u = 'mark unread', a = 'archive', d = 'delete', p = 'toggle preview', R = 'refresh', q = 'close',
+}
 
 local function notify(message, level)
   config.notify(message, level)
@@ -661,9 +668,9 @@ local function scratch(name, lines, keys, split, filetype)
   vim.bo[buf].modifiable = false
   vim.bo[buf].modified = false
   for lhs, fn in pairs(keys or {}) do
-    vim.keymap.set('n', lhs, fn, { buffer = buf, nowait = true, silent = true })
+    vim.keymap.set('n', lhs, fn, { buffer = buf, nowait = true, silent = true, desc = 'gc-mail: ' .. (M.KEY_DESC[lhs] or lhs) })
   end
-  vim.keymap.set('n', 'q', '<Cmd>close<CR>', { buffer = buf, nowait = true, silent = true })
+  vim.keymap.set('n', 'q', '<Cmd>close<CR>', { buffer = buf, nowait = true, silent = true, desc = 'gc-mail: close' })
   return buf
 end
 
@@ -751,6 +758,7 @@ function actions.open(entry, split)
   local buf = scratch(('gc-mail://%s/%s'):format(entry.city.name, entry.message.id), lines, {
     r = function() actions.reply(entry) end,
     t = function() actions.thread(entry) end,
+    c = function() actions.chat(entry) end,
     u = function() actions.unread(entry) end,
     a = function() actions.archive(entry) end,
     d = function() actions.delete(entry) end,
@@ -879,6 +887,19 @@ function actions.thread(entry, split)
   end
 end
 
+-- Opens the chat with the other side of `entry`'s message in its city: the
+-- sender, or for a message from human its recipient. `enter` (optional) first
+-- moves to the window the chat should open beside, as `split` does for the
+-- other actions.
+function actions.chat(entry, enter)
+  local m = entry.message
+  local with = m.from == 'human' and m.to or m.from
+  if enter then
+    enter()
+  end
+  return require('gc_mail.chat').open(entry.city.name, with)
+end
+
 -- A compose buffer for a reply to `entry`; the send keys (<Space>mm,
 -- :GcMail) queue it as `gc mail reply` (gc_mail.open()).
 function actions.reply(entry, split)
@@ -929,6 +950,10 @@ function M.open()
       picker.close()
       actions.thread(entry)
     end),
+    c = on(function(entry, picker)
+      picker.close()
+      actions.chat(entry)
+    end),
     m = on(actions.read),
     u = on(actions.unread),
     a = on(actions.archive),
@@ -948,7 +973,7 @@ function M.open()
         render()
       end
     end,
-  })
+  }, M.KEY_DESC)
   local this = { picker = picker, entries = entries, pending = 0, listed = {} }
   view = this
   this.preview = require('gc_mail.preview').attach({

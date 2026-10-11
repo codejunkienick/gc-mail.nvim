@@ -59,6 +59,8 @@ local defaults = {
   history_days = 14,
   -- Normal-mode mapping that opens the last chat; false sets none (:GcMailChat works).
   chat_keymap = '<Space>mc',
+  -- Normal-mode mapping that opens the conversations list; false sets none (:GcMailChats works).
+  chats_keymap = '<Space>ml',
   -- Columns of the chat window (at least 20).
   chat_width = 60,
   -- Rows of the chat compose box (at least 1).
@@ -303,9 +305,10 @@ function M.layout(count, width, lines, columns, cmdheight)
 end
 
 -- A small bordered float listing `items` with `title`, focused, closed by
--- <Esc>, q or leaving it. Returns { win, buf, set(items), close(), closed() }.
+-- <Esc>, q or leaving it; `descs` names each key in `keys` for its mapping
+-- desc. Returns { win, buf, set(items), close(), closed() }.
 -- The mailbox uses it too (M.float).
-local function float(title, items, keys)
+local function float(title, items, keys, descs)
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].bufhidden = 'wipe'
   local function geometry(lines)
@@ -350,17 +353,18 @@ local function float(title, items, keys)
     vim.api.nvim_win_set_config(win, { relative = 'editor', row = l.row, col = l.col, width = l.width, height = l.height })
     vim.api.nvim_win_set_cursor(win, { math.min(row, #lines), 0 })
   end
-  local function map(lhs, rhs)
-    vim.keymap.set('n', lhs, rhs, { buffer = buf, nowait = true, silent = true })
+  -- Every key carries a desc starting `gc-mail: `, for which-key and :map.
+  local function map(lhs, rhs, desc)
+    vim.keymap.set('n', lhs, rhs, { buffer = buf, nowait = true, silent = true, desc = 'gc-mail: ' .. desc })
   end
-  map('<Esc>', picker.close)
-  map('q', picker.close)
-  map('<Down>', 'j')
-  map('<Up>', 'k')
+  map('<Esc>', picker.close, 'close')
+  map('q', picker.close, 'close')
+  map('<Down>', 'j', 'next line')
+  map('<Up>', 'k', 'previous line')
   for lhs, fn in pairs(keys) do
     map(lhs, function()
       fn(picker, vim.api.nvim_win_get_cursor(win)[1])
-    end)
+    end, descs and descs[lhs] or lhs)
   end
   vim.api.nvim_create_autocmd('WinLeave', { buffer = buf, once = true, callback = picker.close })
   return picker
@@ -593,6 +597,9 @@ local function invalid_options(opts)
   if opts.chat_keymap ~= false and (type(opts.chat_keymap) ~= 'string' or opts.chat_keymap == '') then
     return 'chat_keymap must be false or a non-empty string'
   end
+  if opts.chats_keymap ~= false and (type(opts.chats_keymap) ~= 'string' or opts.chats_keymap == '') then
+    return 'chats_keymap must be false or a non-empty string'
+  end
 end
 
 function M.setup(opts)
@@ -623,6 +630,11 @@ function M.setup(opts)
       require('gc_mail.chat').open_last()
     end, { desc = 'Open the gc chat' })
   end
+  if M.config.chats_keymap then
+    vim.keymap.set('n', M.config.chats_keymap, function()
+      require('gc_mail.chat').open_list()
+    end, { desc = 'gc-mail: open the conversations list' })
+  end
   vim.api.nvim_create_user_command('GcMail', function(cmd_opts)
     local to = vim.trim(cmd_opts.args or '') ~= '' and vim.trim(cmd_opts.args) or nil
     require('gc_mail').open(to)
@@ -639,6 +651,9 @@ function M.setup(opts)
   vim.api.nvim_create_user_command('GcMailChat', function(cmd_opts)
     require('gc_mail.chat').command(cmd_opts.fargs)
   end, { desc = 'Open the gc chat window', force = true, nargs = '*' })
+  vim.api.nvim_create_user_command('GcMailChats', function()
+    require('gc_mail.chat').open_list()
+  end, { desc = 'List the gc conversations with their unread counts', force = true })
   -- check_ms = false stops a check an earlier setup() started (only then is
   -- the mailbox loaded already).
   if not M.config.check_ms and package.loaded['gc_mail.mailbox'] then

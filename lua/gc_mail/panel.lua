@@ -22,7 +22,7 @@ local M = {}
 
 local uv = vim.uv
 
-local TITLE = ' gc mail: <CR> open  r reply  t thread  m read  u unread  a archive  d delete  p preview  R refresh  q close '
+local TITLE = ' gc mail: <CR> open  r reply  t thread  c chat  m read  u unread  a archive  d delete  p preview  R refresh  q close '
 
 local config = {
   poll_ms = nil, -- default: gc_mail.config.panel_poll_ms
@@ -303,6 +303,21 @@ local function split_above(panel)
   end
 end
 
+-- Moves to the window `panel` is docked under (its origin), else the one
+-- right above it, else a new window at the top: where a chat opens, never
+-- inside the panel.
+local function beside(panel)
+  return function()
+    local target = vim.api.nvim_win_is_valid(panel.origin) and panel.origin ~= panel.win
+      and vim.api.nvim_win_get_tabpage(panel.origin) == panel.tab and panel.origin or nil
+    if target then
+      vim.api.nvim_set_current_win(target)
+    else
+      split_above(panel)()
+    end
+  end
+end
+
 local function close(panel)
   forget(panel)
   if vim.api.nvim_win_is_valid(panel.win) and not pcall(vim.api.nvim_win_close, panel.win, true) then
@@ -325,6 +340,7 @@ local function keys(panel)
     ['<CR>'] = on(function(entry) actions.open(entry, split_above(panel)) end),
     r = on(function(entry) actions.reply(entry, split_above(panel)) end),
     t = on(function(entry) actions.thread(entry, split_above(panel)) end),
+    c = on(function(entry) actions.chat(entry, beside(panel)) end),
     m = on(actions.read),
     u = on(actions.unread),
     a = on(actions.archive),
@@ -343,7 +359,8 @@ local function keys(panel)
     q = function() close(panel) end,
   }
   for lhs, fn in pairs(map) do
-    vim.keymap.set('n', lhs, fn, { buffer = panel.buf, nowait = true, silent = true })
+    vim.keymap.set('n', lhs, fn, { buffer = panel.buf, nowait = true, silent = true,
+      desc = 'gc-mail: ' .. (mailbox.KEY_DESC[lhs] or lhs) })
   end
 end
 

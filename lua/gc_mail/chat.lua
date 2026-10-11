@@ -1039,6 +1039,165 @@ function M.open_last()
   end
 end
 
+-- ---- the conversations list --------------------------------------------------
+
+local CHATS_TITLE = ' gc mail chats: <CR> open  q close '
+local CHATS_LOADING = ' loading… '
+
+--- The conversations of the cached history of `city`, newest last message
+--- first: { city, with, last (the newest message), unread (messages to human
+--- not read) }. A conversation is the messages between human and one other
+--- address (history.conversation's rule).
+function M.conversations(city)
+  local by_with, list = {}, {}
+  for _, m in ipairs(history.messages(city)) do
+    local with = (m.from == 'human' and m.to ~= 'human') and m.to or (m.to == 'human' and m.from ~= 'human') and m.from or nil
+    if with then
+      local c = by_with[with]
+      if not c then
+        c = { city = city, with = with, unread = 0 }
+        by_with[with] = c
+        list[#list + 1] = c
+      end
+      -- history.messages is oldest first: the last one seen is the newest
+      c.last = m
+      if m.to == 'human' and not m.read then
+        c.unread = c.unread + 1
+      end
+    end
+  end
+  table.sort(list, function(a, b)
+    if a.last.created ~= b.last.created then
+      return a.last.created > b.last.created
+    end
+    return a.with < b.with
+  end)
+  return list
+end
+
+-- The rows of the list for `view` ({ cities, loaded (city path -> true once
+-- its answer came), failed (city path -> error) }): every city's
+-- conversations newest first, then a line for each city without one, so a
+-- first chat can start from the list (the mayor), or says why it has none.
+local function chat_rows(view)
+  local conversations, bare = {}, {}
+  for _, city in ipairs(view.cities) do
+    local found = M.conversations(city)
+    if #found > 0 then
+      vim.list_extend(conversations, found)
+    elseif view.failed[city.path] then
+      bare[#bare + 1] = { city = city, error = view.failed[city.path] }
+    elseif view.loaded[city.path] or history.cache[city.path] then
+      bare[#bare + 1] = { city = city, with = 'mayor' }
+    end
+  end
+  table.sort(conversations, function(a, b)
+    if a.last.created ~= b.last.created then
+      return a.last.created > b.last.created
+    end
+    if a.city.name ~= b.city.name then
+      return a.city.name < b.city.name
+    end
+    return a.with < b.with
+  end)
+  return vim.list_extend(conversations, bare)
+end
+
+-- One line of the list: ` <unread or blank, 2 wide>  <city>  <with>  <subject>  <age> `
+local function chat_line(row, now)
+  local city = gc_mail.one_line(row.city.name)
+  if row.error then
+    return ('     %s  cannot load the history '):format(city)
+  elseif not row.last then
+    return ('     %s  %s  no messages yet '):format(city, gc_mail.one_line(row.with))
+  end
+  return (' %2s  %s  %s  %s  %s '):format(row.unread > 0 and tostring(row.unread) or '', city, gc_mail.one_line(row.with),
+    gc_mail.one_line(row.last.subject), gc_mail.age(math.max(0, now - row.last.created)))
+end
+
+--- Opens the conversations float: every cached city's conversations, newest
+--- first, with the unread count of each, at once from the history cache, and
+--- one history load per city in the background that fills it in (` loading… `
+--- while nothing is known). <CR> opens the chat of the line; q and <Esc> close.
+function M.open_list()
+  local cached = gc_mail.cached_cities()
+  local view = { cities = cached or {}, loaded = {}, failed = {}, rows = {}, pending = 0 }
+  local picker
+
+  local function render()
+    if not picker or picker.closed() then
+      return
+    end
+    view.rows = chat_rows(view)
+    local lines = {}
+    local now = os.time()
+    for i, row in ipairs(view.rows) do
+      lines[i] = chat_line(row, now)
+    end
+    if #lines == 0 then
+      lines = { view.pending > 0 and CHATS_LOADING or ' no conversations ' }
+    end
+    picker.set(lines)
+  end
+
+  picker = gc_mail.float(CHATS_TITLE, { CHATS_LOADING }, {
+    ['<CR>'] = function(p, row)
+      local entry = view.rows[row]
+      if entry and entry.with then
+        p.close()
+        M.open(entry.city.name, entry.with)
+      end
+    end,
+  }, { ['<CR>'] = 'open the chat' })
+
+  local function load(city)
+    view.pending = view.pending + 1
+    history.load(city, function(_, err)
+      view.pending = view.pending - 1
+      if err then
+        view.failed[city.path] = err
+        if not picker.closed() then
+          vim.notify('gc-mail: ' .. err, vim.log.levels.ERROR)
+        end
+      else
+        view.loaded[city.path] = true
+        view.failed[city.path] = nil
+      end
+      render()
+    end)
+  end
+
+  local function start(cities)
+    view.cities = cities
+    for _, city in ipairs(cities) do
+      load(city)
+    end
+    render()
+  end
+
+  if cached and #cached > 0 then
+    -- What the cache holds shows at once; each city loads once, in the background
+    start(cached)
+  else
+    view.pending = 1
+    gc_mail.refresh(function(cities, err)
+      view.pending = view.pending - 1
+      if picker.closed() then
+        return
+      end
+      if not cities then
+        picker.close()
+        return vim.notify('gc-mail: ' .. tostring(err), vim.log.levels.ERROR)
+      elseif #cities == 0 then
+        picker.close()
+        return vim.notify('gc-mail: no cities are registered with gc', vim.log.levels.WARN)
+      end
+      start(cities)
+    end)
+  end
+  return picker.win
+end
+
 function M.command(fargs)
   fargs = fargs or {}
   if #fargs > 2 then
