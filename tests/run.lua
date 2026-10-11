@@ -74,6 +74,9 @@ local function fresh()
   if package.loaded['gc_mail.panel'] then
     package.loaded['gc_mail.panel'].close_all()
   end
+  if package.loaded['gc_mail.watch'] then
+    pcall(package.loaded['gc_mail.watch'].reset)
+  end
   if package.loaded['gc_mail.events'] then
     pcall(package.loaded['gc_mail.events'].reset)
   end
@@ -85,6 +88,8 @@ local function fresh()
   package.loaded['gc_mail.mailbox'] = nil
   package.loaded['gc_mail.panel'] = nil
   package.loaded['gc_mail.events'] = nil
+  package.loaded['gc_mail.watch'] = nil
+  package.loaded['gc_mail.chat'] = nil
   gc_mail = require('gc_mail')
   run_id = run_id + 1
   queue_dir = ('%s/state-%d/queue'):format(scratch, run_id)
@@ -209,7 +214,7 @@ test('nothing runs at load time and setup maps <Space>mm, <Space>mi, <Space>mp a
   eq(recorded_argv(), nil, 'gc ran at load')
   eq(mail_calls(), {}, 'a mail command ran at load')
   eq(gc_mail.cached_cities(), nil, 'cities loaded at load time')
-  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY })
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, watch = false })
   eq(gc_mail.cached_cities(), nil, 'setup ran gc cities before startup finished')
   eq(vim.fn.maparg('<Space>mm', 'n') ~= '', true, 'default keymap missing')
   eq(vim.fn.exists(':GcMail'), 2, ':GcMail missing')
@@ -1930,10 +1935,10 @@ test('the opt-in new-mail check: no timer by default, one count per city while f
   vim.api.nvim_exec_autocmds('FocusGained', {})
   mailbox().stop_check()
   eq(mailbox().checking(), false, 'stopped')
-  gc_mail.setup({ keymap = false, mailbox_keymap = false, state_dir = vim.fs.dirname(queue_dir), check_ms = 60000 })
+  gc_mail.setup({ keymap = false, mailbox_keymap = false, state_dir = vim.fs.dirname(queue_dir), check_ms = 60000, watch = false })
   wait('started after startup', mailbox().checking)
   -- setup() again with check_ms = false stops it at once.
-  gc_mail.setup({ keymap = false, mailbox_keymap = false, state_dir = vim.fs.dirname(queue_dir), check_ms = false })
+  gc_mail.setup({ keymap = false, mailbox_keymap = false, state_dir = vim.fs.dirname(queue_dir), check_ms = false, watch = false })
   eq(mailbox().checking(), false, 'check_ms = false stops a running check')
   vim.wait(200)
   eq(mailbox().checking(), false, 'and nothing starts it again after startup')
@@ -3248,6 +3253,248 @@ test('a subscriber that raises does not stop a second subscriber (its error said
 
   events.unsubscribe('broken')
   events.unsubscribe('good')
+end)
+
+-- ---- the background watch ----------------------------------------------------
+
+local function count_answer(city, unread)
+  answer('count', { recipient = 'human', recipients = { 'human' }, total = unread + 2, unread = unread }, city)
+end
+
+local function count_calls(path)
+  return #vim.tbl_filter(function(c)
+    return c[4] == 'count' and (path == nil or c[2] == path)
+  end, mail_calls())
+end
+
+-- One mail line of an event log, as gc writes it, for message `id`.
+local function mail_line(kind, id, fields)
+  local line = { seq = 1, type = kind, ts = '2026-10-08T10:00:00Z', actor = 'mayor', subject = id }
+  if fields then
+    line.payload = { message = msg(id, fields) }
+  end
+  return vim.json.encode(line) .. '\n'
+end
+
+-- The two cities with empty event logs, counts of 2 and 1 unread mail, and
+-- the plugin set up with the watch on (or as `opts` say).
+local function watched(opts, unread)
+  unread = unread or { 2, 1 }
+  local cities, log = city_dirs()
+  local log2 = cities[2].path .. '/.gc/events.jsonl'
+  write(log, '')
+  write(log2, '')
+  count_answer('imd-city', unread[1])
+  count_answer('side city', unread[2])
+  gc_mail.setup(vim.tbl_extend('force', { keymap = false, mailbox_keymap = false, panel_keymap = false,
+    state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY }, opts or {}))
+  return cities, log, log2
+end
+
+local function seeded(total)
+  wait('the watch counted every city', function()
+    return gc_mail.status() == ' ' .. total
+  end)
+end
+
+test('the watch is on by default: nothing runs before startup finishes, then one count per city and status() is the total', function()
+  eq(gc_mail.status(), '', 'status before setup')
+  eq(package.loaded['gc_mail.watch'], nil, 'the watch loaded at load time')
+  local cities = watched()
+  eq(count_calls(), 0, 'setup counted mail')
+  eq(package.loaded['gc_mail.watch'], nil, 'setup loaded the watch')
+  seeded(3)
+  vim.wait(200)
+  eq(count_calls(), 2, 'one count call per city')
+  eq(count_calls(cities[1].path), 1, 'the first city once')
+  eq(count_calls(cities[2].path), 1, 'the second city once')
+  eq(has_call(call('count', cities[1].path, 'human', '--json')), true, 'count argv')
+  eq(#notes, 0, 'the first count is no arrival')
+end)
+
+test('watch = false starts nothing after startup and status() stays empty', function()
+  watched({ watch = false })
+  wait('the city list was preloaded', function()
+    return gc_mail.cached_cities() ~= nil
+  end)
+  vim.wait(200)
+  eq(mail_calls(), {}, 'a mail command ran')
+  eq(gc_mail.status(), '', 'status')
+  eq(package.loaded['gc_mail.watch'], nil, 'the watch was loaded')
+  eq(package.loaded['gc_mail.events'], nil, 'events were loaded')
+end)
+
+test('a mail for you raises one notice and adds one; the same id again, other recipients and your own mail change nothing', function()
+  local _, log = watched()
+  seeded(3)
+  append(log, mail_line('mail.sent', 'ic-wisp-a1', { subject = 'Build done', created_at = '2026-10-08T10:00:00Z' }))
+  seeded(4)
+  eq(#notes, 1, 'one notice')
+  eq(notes[1].message, 'gc-mail: mayor in imd-city: Build done', 'the notice')
+  eq(notes[1].level, vim.log.levels.INFO, 'its level')
+  append(log, mail_line('mail.sent', 'ic-wisp-a1', { subject = 'Build done' }))
+  vim.wait(300)
+  eq({ #notes, gc_mail.status() }, { 1, ' 4' }, 'the same id again')
+  append(log, mail_line('mail.marked_read', 'ic-wisp-a1'))
+  seeded(3)
+  append(log, mail_line('mail.marked_unread', 'ic-wisp-a1'))
+  seeded(4)
+  eq(#notes, 1, 'marking it unread says nothing')
+  append(log, mail_line('mail.sent', 'ic-wisp-b2', { to = 'planner' }))
+  append(log, mail_line('mail.sent', 'ic-wisp-c3', { from = 'human', to = 'human' }))
+  append(log, mail_line('mail.sent', 'ic-wisp-d4', { from = 'human', to = 'mayor' }))
+  vim.wait(300)
+  eq({ #notes, gc_mail.status() }, { 1, ' 4' }, 'mail for others and from you')
+  append(log, mail_line('mail.replied', 'ic-wisp-e5', { subject = 'Re: Build done' }))
+  seeded(5)
+  eq(notes[2].message, 'gc-mail: mayor in imd-city: Re: Build done', 'a reply counts too')
+  append(log, mail_line('mail.archived', 'ic-wisp-e5'))
+  seeded(4)
+  append(log, mail_line('mail.deleted', 'ic-wisp-a1'))
+  seeded(3)
+  eq(count_calls(), 2, 'the events moved the count without another call')
+end)
+
+test('a notice is one line and the subject is cut at 72 characters', function()
+  local _, log = watched()
+  seeded(3)
+  append(log, mail_line('mail.sent', 'ic-wisp-a1', { from = 'may\nor', subject = 'first\nsecond ' .. string.rep('x', 100) }))
+  seeded(4)
+  local subject = ('first / second ' .. string.rep('x', 100)):sub(1, 72)
+  eq(notes[1].message, 'gc-mail: may / or in imd-city: ' .. subject, 'one line, 72 characters of subject')
+end)
+
+test('no notice while the chat of that city and sender is open and current; the count still grows', function()
+  local _, log = watched()
+  seeded(3)
+  local asked = {}
+  package.loaded['gc_mail.chat'] = {
+    is_current = function(city, with)
+      asked[#asked + 1] = { city.name, with }
+      return city.name == 'imd-city' and with == 'mayor'
+    end,
+  }
+  append(log, mail_line('mail.sent', 'ic-wisp-a1', { from = 'mayor' }))
+  seeded(4)
+  eq(#notes, 0, 'the chat shows it')
+  eq(asked, { { 'imd-city', 'mayor' } }, 'asked the chat once')
+  append(log, mail_line('mail.sent', 'ic-wisp-b2', { from = 'planner' }))
+  seeded(5)
+  eq(#notes, 1, 'another sender still raises a notice')
+end)
+
+test('a count never goes below zero and an unknown id changes nothing', function()
+  local cities, log = watched(nil, { 0, 0 })
+  wait('counted', function()
+    return count_calls() == 2 and require('gc_mail.watch').unread[cities[2].path] ~= nil
+  end)
+  eq(gc_mail.status(), '', 'nothing unread')
+  append(log, mail_line('mail.read', 'ic-wisp-zz'))
+  append(log, mail_line('mail.marked_read', 'ic-wisp-zz'))
+  append(log, mail_line('mail.archived', 'ic-wisp-zz'))
+  append(log, mail_line('mail.deleted', 'ic-wisp-zz'))
+  vim.wait(300)
+  eq(gc_mail.status(), '', 'still zero')
+  eq(require('gc_mail.watch').unread, { [cities[1].path] = 0, [cities[2].path] = 0 }, 'counts')
+end)
+
+test('an overflow or a recreated log counts that city again; the resync timer counts every city again', function()
+  local cities, log = watched()
+  seeded(3)
+  eq(count_calls(), 2, 'one count per city')
+  append(log, string.rep('x', 1024 * 1024 + 10) .. '\n')
+  wait('counted again after an overflow', function()
+    return count_calls(cities[1].path) == 2
+  end)
+  vim.wait(200)
+  eq(count_calls(cities[2].path), 1, 'the other city was not counted')
+  assert(os.remove(log))
+  vim.wait(50)
+  write(log, '')
+  wait('counted again after a recreated log', function()
+    return count_calls(cities[1].path) == 3
+  end)
+  count_answer('imd-city', 5)
+  append(log, string.rep('x', 1024 * 1024 + 10) .. '\n')
+  seeded(6)
+  require('gc_mail.watch').configure({ resync_ms = 100 })
+  wait('the timer counts every city', function()
+    return count_calls(cities[2].path) >= 3
+  end)
+end)
+
+test('a mail counted by a recount is still taken off when it is read; a repeat of an old arrival counts nothing', function()
+  local cities, log = watched()
+  seeded(3)
+  append(log, mail_line('mail.sent', 'ic-wisp-a1', { subject = 'Build done' }))
+  seeded(4)
+  count_answer('imd-city', 3)
+  append(log, string.rep('x', 1024 * 1024 + 10) .. '\n')
+  wait('counted again after an overflow', function()
+    return count_calls(cities[1].path) == 2
+  end)
+  vim.wait(100)
+  eq(gc_mail.status(), ' 4', 'the recount includes the arrival')
+  append(log, mail_line('mail.read', 'ic-wisp-a1'))
+  seeded(3)
+  -- More arrivals than any bounded memory of ids would keep: the first one
+  -- repeated is still not a new message.
+  local lines = {}
+  for n = 1, 600 do
+    lines[#lines + 1] = mail_line('mail.sent', ('ic-wisp-m%d'):format(n), { subject = 'bulk' })
+  end
+  append(log, table.concat(lines))
+  seeded(603)
+  eq(#notes, 601, 'one notice per message')
+  append(log, mail_line('mail.sent', 'ic-wisp-a1', { subject = 'Build done' }))
+  append(log, mail_line('mail.sent', 'ic-wisp-m1', { subject = 'bulk' }))
+  vim.wait(300)
+  eq({ #notes, gc_mail.status() }, { 601, ' 603' }, 'repeats of old arrivals')
+end)
+
+test('a failed count is said once and the count is kept', function()
+  local cities, log = watched()
+  seeded(3)
+  raw_answer('count', 'exit', '1', 'imd-city')
+  raw_answer('count', 'stderr', 'store unavailable\n', 'imd-city')
+  for n = 2, 3 do
+    append(log, string.rep('x', 1024 * 1024 + 10) .. '\n')
+    wait('counted again', function()
+      return count_calls(cities[1].path) == n
+    end)
+    vim.wait(100)
+  end
+  local errors_said = vim.tbl_filter(function(n)
+    return n.level == vim.log.levels.ERROR
+  end, notes)
+  eq(#errors_said, 1, 'said once')
+  assert(errors_said[1].message:find('store unavailable', 1, true), errors_said[1].message)
+  eq(gc_mail.status(), ' 3', 'the count is kept')
+end)
+
+test('setup({ watch = false }) again stops a running watch', function()
+  local _, log = watched()
+  seeded(3)
+  local events = require('gc_mail.events')
+  eq(events.running(), true, 'events are watched')
+  gc_mail.setup({ keymap = false, mailbox_keymap = false, panel_keymap = false, state_dir = vim.fs.dirname(queue_dir),
+    retry_ms = RETRY, watch = false })
+  eq(require('gc_mail.watch').running(), false, 'stopped')
+  eq(gc_mail.status(), '', 'status')
+  eq(events.running(), false, 'events unsubscribed')
+  append(log, mail_line('mail.sent', 'ic-wisp-a1', { from = 'mayor' }))
+  vim.wait(300)
+  eq({ #notes, gc_mail.status() }, { 0, '' }, 'a mail after the stop')
+end)
+
+test('setup refuses watch that is not true or false and a watch_resync_ms under a minute', function()
+  local ok, err = pcall(gc_mail.setup, { watch = 'yes' })
+  eq(ok, false, 'watch = yes')
+  assert(tostring(err):find('watch must be true or false', 1, true), tostring(err))
+  ok, err = pcall(gc_mail.setup, { watch_resync_ms = 1000 })
+  eq(ok, false, 'watch_resync_ms = 1000')
+  assert(tostring(err):find('watch_resync_ms must be a number of milliseconds of at least 60000', 1, true), tostring(err))
+  eq(gc_mail.status(), '', 'status')
 end)
 
 test('setup({ events_rearm_ms = 1000 }) raises', function()

@@ -32,6 +32,13 @@ local defaults = {
   -- false: no timer. A number of ms (at least 60000): while Neovim has focus,
   -- one `gc mail count` per city that often, and a notice when unread mail grows.
   check_ms = false,
+  -- true: after startup, watch every city's event log: a notice when mail for
+  -- you arrives and an unread count for require('gc_mail').status(). false: no
+  -- watch.
+  watch = true,
+  -- While the watch runs: every city's unread mail counted again this often (ms,
+  -- at least 60000), besides the events that move the count.
+  watch_resync_ms = 300000,
   -- Normal-mode mapping that toggles the mail panel; false sets none (:GcMailPanel works).
   panel_keymap = '<Space>mp',
   -- Rows of the mail panel.
@@ -520,6 +527,12 @@ local function invalid_options(opts)
   if opts.check_ms ~= false and (type(opts.check_ms) ~= 'number' or opts.check_ms < 60000) then
     return 'check_ms must be false or a number of milliseconds of at least 60000'
   end
+  if type(opts.watch) ~= 'boolean' then
+    return 'watch must be true or false'
+  end
+  if type(opts.watch_resync_ms) ~= 'number' or opts.watch_resync_ms < 60000 then
+    return 'watch_resync_ms must be a number of milliseconds of at least 60000'
+  end
   if type(opts.markdown) ~= 'boolean' then
     return 'markdown must be true or false'
   end
@@ -578,11 +591,19 @@ function M.setup(opts)
   if not M.config.check_ms and package.loaded['gc_mail.mailbox'] then
     package.loaded['gc_mail.mailbox'].stop_check()
   end
-  -- After startup, never during it: resume the queue, preload the cities and,
-  -- only when check_ms is set, start the new-mail check.
+  -- watch = false stops a watch an earlier setup() started.
+  if not M.config.watch and package.loaded['gc_mail.watch'] then
+    package.loaded['gc_mail.watch'].stop()
+  end
+  -- After startup, never during it: resume the queue, preload the cities, start
+  -- the watch unless watch = false and, only when check_ms is set, the new-mail
+  -- check.
   local function start()
     queue.resume()
     M.refresh(function() end)
+    if M.config.watch then
+      require('gc_mail.watch').start()
+    end
     if M.config.check_ms then
       require('gc_mail.mailbox').start_check(M.config.check_ms)
     end
@@ -592,6 +613,19 @@ function M.setup(opts)
   else
     vim.api.nvim_create_autocmd('VimEnter', { once = true, callback = vim.schedule_wrap(start) })
   end
+end
+
+--- The statusline text of the background watch: '' when no mail is unread or
+--- the watch is off, else a space and the unread mail across cities. It runs
+--- nothing and is safe before setup(); use it as
+--- %{v:lua.require('gc_mail').status()}.
+function M.status()
+  local watch = package.loaded['gc_mail.watch']
+  if not watch then
+    return ''
+  end
+  local ok, text = pcall(watch.status)
+  return ok and text or ''
 end
 
 -- :GcMail without setup() still queues to the default directory.

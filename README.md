@@ -31,8 +31,9 @@ require('gc_mail').setup()
 `:GcMail`, `:GcMailQueue`, `:GcMailbox` and `:GcMailPanel` exist as soon as the directory is
 on the runtimepath; `setup()` adds the mappings, and once Neovim has finished
 starting it resumes the send queue and preloads the city list with one
-background `gc cities --json`. Nothing runs while the plugin loads, so startup
-time is unchanged; the mailbox lists mail only when you open it.
+background `gc cities --json`. Unless `watch = false`, it also starts the
+background watch below. Nothing runs while the plugin loads, so startup time is
+unchanged; the mailbox lists mail only when you open it.
 
 ## Options
 
@@ -44,7 +45,9 @@ time is unchanged; the mailbox lists mail only when you open it.
 | `mailbox_keymap` | `'<Space>mi'` | normal-mode mapping that opens the mailbox; `false` sets none |
 | `subject_prefix` | `''` | text put before the subject of every message the plugin sends, e.g. `'[Nick] '` |
 | `subject_suffix` | `''` | text put after it, e.g. `' (nvim)'` |
-| `check_ms` | `false` | `false`: no timer. A number of ms, at least `60000`: the new-mail check below |
+| `check_ms` | `false` | `false`: no timer. A number of ms, at least `60000`: the older new-mail check below; use `watch` instead |
+| `watch` | `true` | the background watch below, on without any configuration; `false` turns it off |
+| `watch_resync_ms` | `300000` | while the watch runs, every city's unread mail is counted again this often (ms, at least `60000`) |
 | `panel_keymap` | `'<Space>mp'` | normal-mode mapping that opens or closes the mail panel; `false` sets none |
 | `panel_height` | `10` | rows of the mail panel |
 | `panel_poll_ms` | `60000` | while the panel is open, every city is listed again this often (ms, at least `15000`) |
@@ -54,7 +57,8 @@ time is unchanged; the mailbox lists mail only when you open it.
 
 `setup()` refuses (raises an error) a prefix or suffix with a control
 character, the two together over 40 characters, a `check_ms` that is
-neither `false` nor at least a minute, a `panel_poll_ms` under 15 seconds,
+neither `false` nor at least a minute, a `watch` that is not `true` or
+`false`, a `watch_resync_ms` under a minute, a `panel_poll_ms` under 15 seconds,
 an `events_rearm_ms` under 15 seconds, a `panel_height` that is not a
 whole number of at least 1, a `history_days` that is not a whole number
 of at least 1, and a `markdown` that is not `true` or `false`.
@@ -213,10 +217,13 @@ copy.
 before its buffer is cleared, failed sends are retried, `:GcMailQueue` lists
 it as `<city> <sender>`, and the reply buffer stops being one once queued.
 
-**New-mail check.** Off by default: no timer runs. With `check_ms` set (at
-least 60000), every `check_ms` while Neovim has focus (`FocusGained` and
-`FocusLost`) it runs one `gc --city <path> mail count human --json` per city
-and says `<n> unread mail in <city>` when a city's unread count grows.
+**New-mail check.** The older, polling way, off by default: no timer runs.
+With `check_ms` set (at least 60000), every `check_ms` while Neovim has focus
+(`FocusGained` and `FocusLost`) it runs one
+`gc --city <path> mail count human --json` per city and says
+`<n> unread mail in <city>` when a city's unread count grows. The background
+watch below does this without polling and also keeps the count for a
+statusline: `watch` is the one to use. The two can run together.
 
 ## The mail panel
 
@@ -270,6 +277,43 @@ watch such a file again, and refreshes the city list.
 Nothing runs while the panel is closed: closing the last one (the key, `q`,
 `:close`, or closing its tab page) stops every watcher and timer, and an
 answer that arrives later only updates the mailbox state.
+
+## Background watch
+
+On by default: after Neovim has finished starting, the plugin watches every
+city's event log (the shared watcher above) and needs no timer to see mail.
+`watch = false` in `setup()` turns it off, also while Neovim runs (a second
+`setup()` with `watch = false` stops it).
+
+- **Notice.** When mail for you arrives (a `mail.sent` or `mail.replied` event
+  whose message is addressed to `human` and not from `human`), it says
+  `gc-mail: <from> in <city>: <subject>`, each part on one line and the
+  subject cut at 72 characters, once per message. If the chat window of that
+  city and sender is open and current, there is no notice: the chat shows it.
+- **Unread count.** One `gc --city <path> mail count human --json` per city
+  seeds the count when the watch starts, every `watch_resync_ms` (default five
+  minutes) and after an `overflow` or `rotated` event of that city. Between
+  seeds the events move it: an arrival adds one; `mail.read`,
+  `mail.marked_read`, `mail.archived` and `mail.deleted` of an arrival the
+  watch counted take one off; `mail.marked_unread` of one it no longer counts
+  puts it back. An event without a decodable message, or about a message the
+  watch has not counted, changes nothing, and the count never goes below zero.
+  A failed count is shown once and the last count is kept. A city is watched
+  when the city list first brings it, also later.
+- **Statusline.** `require('gc_mail').status()` is `''` when no mail is
+  unread or the watch is off, else a space and the unread total across cities,
+  taken from what the watch already counted: it runs nothing and is safe to
+  call before `setup()`.
+
+```lua
+-- lualine
+sections = { lualine_x = { function() return 'mail' .. require('gc_mail').status() end } }
+```
+
+```vim
+" the built-in statusline: shows " 3" with three unread mails, else nothing
+set statusline+=%{v:lua.require('gc_mail').status()}
+```
 
 ## The send queue
 
