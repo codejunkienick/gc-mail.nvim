@@ -1,0 +1,67 @@
+# The chat tour: a conversation with the mayor in a window beside the notes,
+# about 80 seconds. Steps: key, type, wait, say, agent (see record.sh).
+
+say gc-mail.nvim: a chat with your Gas City agents, beside the file you work in
+wait 3500
+
+# Open the chat
+say Space m c opens the chat with the mayor on the right: the timeline above, the compose box below
+wait 1500
+key space m c
+wait 3500
+
+say The timeline is the whole conversation, oldest first; opening the chat marks its mail read
+wait 4000
+
+# The first message
+say Type in the compose box: i to start, Esc to stop
+wait 1500
+key i
+wait 600
+type Which of the open questions are blocking Thursday?
+wait 800
+key Escape
+wait 1000
+
+say Space m s sends it. The timeline shows it at once, sending
+wait 1500
+key space m s
+wait 3500
+
+# The answer arrives live
+say Now the mayor answers. No key is pressed on this side
+wait 1500
+agent mayor reply latest Only the staging database refresh. Everything else is ready for the deploy window.
+wait 3500
+
+say The answer appeared from the event log, with no reload, and was marked read
+wait 4000
+
+# A second exchange
+key i
+wait 600
+type Please ask the builder to run it today.
+wait 800
+key Escape
+wait 1000
+key space m s
+wait 4000
+
+agent mayor reply latest Done. The builder starts the refresh now and will mail you when it is finished.
+wait 3500
+
+# Read marks follow
+say Ctrl-w k goes to the timeline; u marks the message under the cursor unread, and the dot comes back
+wait 1500
+key ctrl+w k
+wait 1000
+key u
+wait 3000
+
+say q closes both windows; the draft is kept if there is one
+wait 1500
+key q
+wait 2500
+
+say gc-mail.nvim: ask, read the answer as it lands, and stay in the editor
+wait 4500

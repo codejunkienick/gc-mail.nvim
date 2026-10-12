@@ -14,15 +14,23 @@
 --   agent <name> send human <subject> <text...>  the agent writes to human (or: <subject words> | <text words>)
 -- An agent verb appends the message to the store and one line to the event
 -- log, as gc writes it, so a panel watching the log shows the mail live.
+-- $GC_DEMO_SEND_DELAY_MS (record.sh sets it) makes `mail send|reply` wait
+-- that long first, so the chat's sending… block can be seen; an `agent` verb
+-- started meanwhile waits for it to land.
 -- One difference from gc: `mail inbox` also lists read mail (gc lists only
 -- unread), so the mailbox shows a read message beside the unread ones.
 
 local uv = vim.uv
 
 local lock_held
+-- The marker of a send waiting out its delay (see `mail send` and `agent`)
+local sending_marker
 local function die(code, message)
   if lock_held then
     uv.fs_rmdir(lock_held)
+  end
+  if sending_marker then
+    uv.fs_unlink(sending_marker)
   end
   io.stderr:write('gc (demo): ' .. message .. '\n')
   os.exit(code)
@@ -335,6 +343,15 @@ local function mail(city, list)
       die(2, ('mail %s needs -s <subject> and -m <body>'):format(verb))
     end
     local sent
+    -- The recording sets a delay: a send takes a moment, as with a real gc
+    local delay = tonumber(os.getenv('GC_DEMO_SEND_DELAY_MS') or '')
+    if delay and delay > 0 then
+      -- While it waits the send leaves a marker, so an agent step that starts
+      -- meanwhile waits for it and answers this message, not an older one
+      sending_marker = ('%s/sending.%d'):format(dir, uv.os_getpid())
+      write_file(sending_marker, '')
+      uv.sleep(delay)
+    end
     locked(function()
       local store = load()
       if verb == 'send' then
@@ -347,6 +364,10 @@ local function mail(city, list)
       save(store)
       event(verb == 'send' and 'mail.sent' or 'mail.replied', 'human', sent)
     end)
+    if sending_marker then
+      uv.fs_unlink(sending_marker)
+      sending_marker = nil
+    end
     out({ command = 'mail.' .. verb, id = sent.id, message = wire(sent) })
   else
     die(2, 'unsupported mail command: ' .. tostring(verb))
@@ -387,11 +408,33 @@ end
 
 -- ---- agent -------------------------------------------------------------------
 
+-- Waits (up to 15 s) for the sends that are still waiting out their delay: an
+-- agent answers what the human sent, never an older message because the send
+-- has not landed yet. A marker of a process that is gone is ignored.
+local function wait_for_sends()
+  local waited = 0
+  while waited < 15000 do
+    local pending = false
+    for _, name in ipairs(vim.fn.readdir(dir)) do
+      local pid = tonumber(name:match('^sending%.(%d+)$'))
+      if pid and pid ~= uv.os_getpid() and uv.kill(pid, 0) == 0 then
+        pending = true
+      end
+    end
+    if not pending then
+      return
+    end
+    vim.wait(50)
+    waited = waited + 50
+  end
+end
+
 local function agent(list)
   local name, verb = list[1], list[2]
   if not name or not name:match('^%l[%l%d%-]*$') or name == 'human' then
     die(2, 'agent: usage: agent <name> reply latest|<id> <text> | agent <name> send human <subject> <text>')
   end
+  wait_for_sends()
   local rest = vim.list_slice(list, 4)
   local created
   locked(function()

@@ -4240,6 +4240,135 @@ test('demo gc: an agent reply appends to the store and the event log, and the wa
   eq(#vim.fn.readfile(log), 2, 'and writes nothing')
 end)
 
+test('demo gc: GC_DEMO_SEND_DELAY_MS holds a send back and the event follows it', function()
+  local dir, city = demo_dir()
+  gc_run(dir, { 'seed' })
+  local started = vim.uv.hrtime()
+  local sent = gc_run(dir, { '--city', city, 'mail', 'send', 'mayor', '-s', 'Slow', '-m', 'Takes a moment', '--notify' },
+    { GC_DEMO_SEND_DELAY_MS = '400' })
+  eq(sent.code, 0, 'send: ' .. (sent.stderr or ''))
+  eq((vim.uv.hrtime() - started) / 1e6 >= 380, true, 'the send waited for the delay')
+  local lines = vim.fn.readfile(city .. '/.gc/events.jsonl')
+  eq(#lines, 1, 'one event after it')
+  eq(vim.json.decode(lines[1]).type, 'mail.sent', 'a mail.sent')
+end)
+
+test('demo gc: an agent reply started while a send is still waiting answers that send', function()
+  local dir, city = demo_dir()
+  gc_run(dir, { 'seed' })
+  -- An older exchange the agent has already answered would be the wrong target
+  eq(gc_run(dir, { '--city', city, 'mail', 'send', 'mayor', '-s', 'First', '-m', 'first question', '--notify' }).code, 0, 'first send')
+  eq(gc_run(dir, { 'agent', 'mayor', 'reply', 'latest', 'first', 'answer' }).code, 0, 'first answer')
+  local send = vim.system({ demo_gc, '--city', city, 'mail', 'send', 'mayor', '-s', 'Second', '-m', 'second question', '--notify' },
+    { text = true, env = { GC_DEMO_DIR = dir, GC_DEMO_SEND_DELAY_MS = '1200' } })
+  wait('the send is waiting', function()
+    return #vim.fn.glob(dir .. '/sending.*', false, true) == 1
+  end)
+  local result = gc_run(dir, { 'agent', 'mayor', 'reply', 'latest', 'second', 'answer' })
+  eq(result.code, 0, 'agent reply: ' .. (result.stderr or ''))
+  eq(send:wait(20000).code, 0, 'the send ended')
+  eq(vim.fn.glob(dir .. '/sending.*', false, true), {}, 'and left no marker')
+  local last
+  for _, m in ipairs(inbox_of(dir, city, 'human')) do
+    if m.from == 'mayor' and m.body == 'second answer' then
+      last = m
+    end
+  end
+  assert(last, 'the second answer is stored')
+  eq(last.subject, 'Re: Second', 'it answers the second send, not the first')
+end)
+
+test('demo gc: an agent step ignores the marker of a send that is gone', function()
+  local dir, city = demo_dir()
+  gc_run(dir, { 'seed' })
+  write(dir .. '/sending.99999999', '')
+  local started = vim.uv.hrtime()
+  local result = gc_run(dir, { 'agent', 'mayor', 'reply', 'latest', 'Fine' })
+  eq(result.code, 0, 'agent reply: ' .. (result.stderr or ''))
+  eq((vim.uv.hrtime() - started) / 1e6 < 5000, true, 'it did not wait for the dead marker')
+end)
+
+test('demo tours: every line is a step record.sh accepts, and the chat tour opens, sends and closes the chat', function()
+  local steps = { key = true, type = true, wait = true, say = true, agent = true }
+  for _, name in ipairs({ 'tour-basic.txt', 'tour-chat.txt' }) do
+    for n, line in ipairs(vim.fn.readfile(root .. '/demo/' .. name)) do
+      local text = vim.trim(line)
+      if text ~= '' and text:sub(1, 1) ~= '#' then
+        local step = text:match('^(%S+)')
+        eq(steps[step], true, ('%s line %d: unknown step %s'):format(name, n, step))
+        if step == 'agent' then
+          eq(text:match('^agent%s+%l+%s+reply%s+latest%s+%S') ~= nil or text:match('^agent%s+%l+%s+send%s+human%s+%S') ~= nil,
+            true, ('%s line %d: not a demo gc agent verb'):format(name, n))
+        end
+      end
+    end
+  end
+  local tour = table.concat(vim.fn.readfile(root .. '/demo/tour-chat.txt'), '\n')
+  eq(tour:find('key space m c', 1, true) ~= nil, true, 'opens the chat with its mapping')
+  eq(tour:find('key space m s', 1, true) ~= nil, true, 'sends with the documented key')
+  eq(tour:find('agent mayor reply latest', 1, true) ~= nil, true, 'the mayor answers with no key')
+  eq(tour:find('key q', 1, true) ~= nil, true, 'closes the chat')
+  eq(tour:find('/ho' .. 'me/', 1, true), nil, 'no host path')
+  eq(tour:find('ic%-%l'), nil, 'no bead id')
+end)
+
+test('demo gc: a chat on the demo city shows its history, sends through it, and an agent reply becomes a new row', function()
+  local dir, city = demo_dir()
+  gc_run(dir, { 'seed' })
+  local old_path, old_dir = vim.env.PATH, vim.env.GC_DEMO_DIR
+  vim.env.PATH, vim.env.GC_DEMO_DIR = root .. '/demo/bin:' .. old_path, dir
+  require('gc_mail.history').reset()
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = true, watch = false })
+  local ok, err = pcall(function()
+    preload()
+    vim.cmd('GcMailChat demo-city mayor')
+    local timeline, compose
+    for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      local name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(w))
+      if name:match('/chat/') then
+        timeline = w
+      elseif name:match('/compose/') then
+        compose = w
+      end
+    end
+    assert(timeline and compose, 'the chat opened')
+    local function shown()
+      return table.concat(lines_of(timeline), '\n')
+    end
+    wait('the history of the demo city shows', function()
+      return shown():find('Deploy plan for Thursday', 1, true) ~= nil and shown():find('Weekly summary is ready', 1, true) ~= nil
+    end)
+    eq(shown():find('● ', 1, true), nil, 'nothing is left unread once the chat marks it read: ' .. shown())
+
+    -- A send goes through the demo gc; its own event replaces the sending block
+    vim.api.nvim_buf_set_lines(vim.api.nvim_win_get_buf(compose), 0, -1, false, { 'Which questions block Thursday?' })
+    vim.api.nvim_set_current_win(compose)
+    vim.api.nvim_feedkeys(vim.keycode('<Space>ms'), 'x', false)
+    wait('the send shows once, delivered', function()
+      local text = shown()
+      return select(2, text:gsub('Which questions block Thursday%?', '')) == 1 and text:find('sending', 1, true) == nil
+        and text:find('## you', 1, true) ~= nil
+    end, 8000)
+
+    -- The load after the delivery is over, so only the event can bring the answer
+    wait('the send is delivered', drained, 5000)
+    vim.wait(700)
+    -- The agent answers with no key pressed: the event becomes a new row
+    local before = #lines_of(timeline)
+    local result = gc_run(dir, { 'agent', 'mayor', 'reply', 'latest', 'Only', 'the', 'staging', 'refresh.' })
+    eq(result.code, 0, 'agent reply: ' .. (result.stderr or ''))
+    wait('the answer is a new row of the timeline', function()
+      return shown():find('Only the staging refresh.', 1, true) ~= nil
+    end, 8000)
+    eq(#lines_of(timeline) > before, true, 'the timeline grew')
+    eq(shown():find('## mayor', 1, true) ~= nil, true, 'as a row of the mayor')
+    vim.api.nvim_set_current_win(timeline)
+    vim.api.nvim_feedkeys('q', 'x', false)
+  end)
+  vim.env.PATH, vim.env.GC_DEMO_DIR = old_path, old_dir
+  assert(ok, err)
+end)
+
 local function conversation_fixture()
   local now = os.time()
   local past = now - 86400 * 3

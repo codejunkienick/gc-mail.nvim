@@ -128,23 +128,10 @@ mkdir -p "$(dirname "$out")"
 
 # ---- one temporary directory holds everything ---------------------------------
 
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/gc-mail-demo.XXXXXX")
-mkdir -p "$tmp/home" "$tmp/config" "$tmp/cache" "$tmp/state" "$tmp/data" "$tmp/run" "$tmp/tmp"
-chmod 700 "$tmp/run"
-HOME=$tmp/home
-XDG_CONFIG_HOME=$tmp/config
-XDG_CACHE_HOME=$tmp/cache
-XDG_STATE_HOME=$tmp/state
-XDG_DATA_HOME=$tmp/data
-XDG_RUNTIME_DIR=$tmp/run
-TMPDIR=$tmp/tmp
-GC_DEMO_DIR=$tmp/demo
-NVIM_LOG_FILE=$tmp/nvim.log
-export HOME XDG_CONFIG_HOME XDG_CACHE_HOME XDG_STATE_HOME XDG_DATA_HOME XDG_RUNTIME_DIR TMPDIR GC_DEMO_DIR NVIM_LOG_FILE
-mkdir -p "$GC_DEMO_DIR"
-
+# The cleanup comes first and the traps are set on the line after mktemp -d, so
+# the directory never survives an early exit of `set -e`.
+tmp=
 xvfb_pid= term_pid= nvim_pid= ffmpeg_pid= ffmpeg_status=0
-sock=$tmp/nvim.sock
 
 alive() {
   [ -n "$1" ] && kill -0 "$1" 2>/dev/null
@@ -187,12 +174,30 @@ cleanup() {
   # The children are ours: reap them, no one left behind.
   wait 2>/dev/null || true
   exec 4>&-
-  rm -rf "$tmp"
+  [ -z "$tmp" ] || rm -rf "$tmp"
   exit "$status"
 }
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/gc-mail-demo.XXXXXX")
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+sock=$tmp/nvim.sock
+mkdir -p "$tmp/home" "$tmp/config" "$tmp/cache" "$tmp/state" "$tmp/data" "$tmp/run" "$tmp/tmp"
+chmod 700 "$tmp/run"
+HOME=$tmp/home
+XDG_CONFIG_HOME=$tmp/config
+XDG_CACHE_HOME=$tmp/cache
+XDG_STATE_HOME=$tmp/state
+XDG_DATA_HOME=$tmp/data
+XDG_RUNTIME_DIR=$tmp/run
+TMPDIR=$tmp/tmp
+GC_DEMO_DIR=$tmp/demo
+# A send takes a moment, as with a real gc: the chat's sending… block can be seen.
+GC_DEMO_SEND_DELAY_MS=2500
+NVIM_LOG_FILE=$tmp/nvim.log
+export HOME XDG_CONFIG_HOME XDG_CACHE_HOME XDG_STATE_HOME XDG_DATA_HOME XDG_RUNTIME_DIR TMPDIR GC_DEMO_DIR GC_DEMO_SEND_DELAY_MS NVIM_LOG_FILE
+mkdir -p "$GC_DEMO_DIR"
 
 fail() {
   printf 'record.sh: %s\n' "$*" >&2
@@ -259,7 +264,7 @@ if [ "$terminal" = alacritty ]; then
     -e sh -c "$inner" sh "$tmp/nvim.pid" nvim --clean -u "$here/init.lua" --listen "$sock" \
     >"$tmp/terminal.log" 2>&1 &
 else
-  wezterm --config-file "$tmp/wezterm.lua" start --class "$class" -- \
+  wezterm --config-file "$tmp/wezterm.lua" start --always-new-process --class "$class" -- \
     sh -c "$inner" sh "$tmp/nvim.pid" nvim --clean -u "$here/init.lua" --listen "$sock" \
     >"$tmp/terminal.log" 2>&1 &
 fi

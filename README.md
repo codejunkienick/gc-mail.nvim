@@ -633,8 +633,8 @@ an MP4 (default `./gc-mail-demo.mp4`, 1920x1080). Requires `sh`, `nvim`, `Xvfb`,
   `human` (city `demo-city`). `record.sh` puts it first on `PATH`, unsets every
   `GC_*` variable and refuses to start unless `gc` resolves to it. It answers
   the calls the plugin makes, and two demo-only verbs write a message from an
-  agent and the matching line of the city's event log, so the panel shows the
-  mail live: `gc agent <name> reply latest|<id> <text>` and
+  agent and the matching line of the city's event log, so the panel and an open
+  chat show the mail live: `gc agent <name> reply latest|<id> <text>` and
   `gc agent <name> send human <subject> <text>`.
 - `demo/keys.lua` is the overlay: the last keys at the bottom right (each gone
   after about 1.5 s) and a caption line above them. Captions come through the
@@ -642,7 +642,14 @@ an MP4 (default `./gc-mail-demo.mp4`, 1920x1080). Requires `sh`, `nvim`, `Xvfb`,
 - A tour is a text file, one step per line: `key <xdotool key names>`,
   `type <text>`, `wait <ms>`, `say <caption>`, `agent <args...>` (the demo gc as
   an agent), `# comment`. An unknown step stops the run and names its line.
-  `demo/tour-basic.txt` is the default (about 85 seconds).
+  `demo/tour-basic.txt` is the default (about 85 seconds); `demo/tour-chat.txt`
+  (`--tour demo/tour-chat.txt`, about 70 seconds) records the chat: a notes
+  buffer with the chat with the mayor opened beside it by `<Space>mc`, a message
+  typed and sent with `<Space>ms` (its `sending…` block shows, as `record.sh`
+  makes each send take 2.5 s through `GC_DEMO_SEND_DELAY_MS`; an agent step started
+  meanwhile waits for the send to land), the mayor's
+  answers arriving live from the event log with no key pressed, a second
+  exchange, `u` on a message, and `q`.
 - Everything lives in one temporary directory, removed on exit; Ctrl-C or a
   failure stops ffmpeg, the terminal, Neovim and Xvfb first. Exit status is 0
   only when a non-empty MP4 was written.
