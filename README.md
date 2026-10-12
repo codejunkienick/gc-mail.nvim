@@ -130,12 +130,12 @@ line per message, newest first, across every city of the cached
 `gc cities --json` list:
 
 ```text
- ● imd-city  mayor  Re: mailbox for gc-mail  5m
-   imd-city  mayor  Deploy plan accepted  2h
+  ● imd-city  mayor  Re: mailbox for gc-mail  5m
+x   imd-city  mayor  Deploy plan accepted  2h
 ```
 
-`●` marks unread mail; the columns are city, sender, subject and age. The
-float's title is the key hint. While it is open, the plugin runs one
+The first column is `x` on a marked message (see below); `●` marks unread
+mail; then city, sender, subject and age. The float's title is the key hint. While it is open, the plugin runs one
 
 ```sh
 gc --city <city path> mail inbox human --json
@@ -157,18 +157,21 @@ Two invariants hold every gc answer to what it may change:
   `from`, `to`, `subject`, `body`, `created_at` and `read`; message ids and
   thread ids that match the whole id gc prints (`ab-wisp-1x2y3z`, `ab-1x2y3z`,
   `thread-` and hex); counts that are non-negative integers; an action answer
-  that names its command (`mail.archive`), its action and the message; a
-  thread answer whose `thread_id` is a `thread-` id (the one asked for, when
-  a thread was asked for). The id a call puts in its argument list passes
+  that names its command (`mail.archive`), its action and every message it
+  was asked about (in `ids`); a thread answer whose `thread_id` is a
+  `thread-` id (the one asked for, when a thread was asked for). The id a call puts in its argument list passes
   the same check first, so nothing that could read as an option ever reaches
   gc.
 - **I2, apply.** An answer that changes what the mailbox shows or keeps is
   applied only while it is still current for its message. An action answer
   (read, mark read or unread, archive, delete) is dropped when a later action
-  on the same message started after its call; an inbox answer leaves out
-  every message acted on since its call started. A late answer therefore
+  on the same message started after its call; an inbox answer leaves every
+  message acted on since its call started as the mailbox has it, and in
+  all-mail mode a history load leaves out every message an action answer was
+  applied to since the load started. A late answer therefore
   never brings back a message you archived or deleted, never recreates its
-  kept copy, and never undoes a later mark.
+  kept copy, never undoes a later mark, and never drops a message whose
+  action then fails.
 
 | key | action | gc |
 | --- | --- | --- |
@@ -177,17 +180,47 @@ Two invariants hold every gc answer to what it may change:
 | `t` | the thread, oldest first, in a new window | load from the bead store (`gc bd list`); `mail thread <id>` if no thread id |
 | `c` | open the chat with the message's sender in its city (with the recipient, for a message from you); the float closes first | none (the chat loads its own history) |
 | `s` | search the mail history of every city (asks for the text; see [Search](#search)) | none until a city's history is not cached, then one `bd list` |
-| `m` | mark read | `mail mark-read <id>` |
-| `u` | mark unread | `mail mark-unread <id>` |
-| `a` | archive | `mail archive <id>` |
-| `d` | delete, after a Yes/No question | `mail delete <id>` |
+| `x` | mark or unmark the message under the cursor | |
+| `X` | clear every mark | |
+| `m` | mark read | `mail mark-read <id>`, one call per message |
+| `u` | mark unread | `mail mark-unread <id>`, one call per message |
+| `a` | archive | `mail archive <id> [<id> ...]`, one call per city |
+| `d` | delete, after a Yes/No question | `mail delete <id> [<id> ...]`, one call per city |
+| `H` | all mail on or off | `bd list` (the history), once per city the first time |
 | `p` | show or hide the preview pane for this view | none |
-| `R` | list every city again (ignored while a listing is still running) | `mail inbox human`, once per city |
+| `R` | list every city again (ignored while a listing is still running); in all-mail mode the history too | `mail inbox human`, once per city |
 | `q`, `<Esc>` | close | |
 
-Each action names only the message under the cursor and is shown as an error
-when gc refuses it. The opened message has the same keys (`r`, `t`, `c`, `u`, `a`,
-`d`, and `q` to close the window); `c` opens the chat beside the view and keeps it.
+`m`, `u`, `a` and `d` act on the lines of a visual selection (`V`, then the
+key), else on every marked message, else on the message under the cursor.
+Each refusal from gc is shown as an error once and never retried. The opened
+message has the same keys (`r`, `t`, `c`, `u`, `a`, `d`, and `q` to close the
+window); `c` opens the chat beside the view and keeps it.
+
+**All mail and bulk actions.** `H` switches the mailbox (both the float and
+the panel: one switch) to all mail: besides the unread inbox and the kept
+copies, every message to you in the mail history (`gc bd list`, the last
+`history_days` days, read and closed mail included). The first `H` loads the
+history of every known city in the background, and a city the city list adds
+later (or that arrives after an early `H`) loads it when it is first listed;
+a city whose load fails is said once and the list shows what the mailbox has. The title starts with
+` all mail ` while it is on, and a closed message shows `×` where an unread
+one shows `●`. `H` again lists the usual set.
+
+`x` marks the message under the cursor and `X` clears every mark; the marks
+belong to the mailbox, so both views show them, and a mark goes away when its
+message leaves the list. With several messages picked (a selection or marks),
+`a` and `d` run one `gc mail archive|delete <id> <id> ...` per city (`d` asks
+once, `Delete N messages?`); the answer must name every id asked for (I1),
+or nothing changes and the city's ids are said once. On success each message
+leaves the list on its own (I2: a later action on one of them drops only
+that one). `m` and `u` run one `gc mail mark-read|mark-unread <id>` per
+message, in list order, one at a time, each with its own I2 clock; a
+message whose action applied loses its mark. A message listed only from the
+history is archived or deleted through gc the same way; gc refusing it (a
+closed message) is said and the line stays. A message archived or deleted
+here leaves all mail until the history is loaded again (`R`), which then
+lists it closed.
 
 **Markdown views.** With `markdown = true` (the default) the opened message
 and the thread are scratch buffers with `filetype=markdown`, so a markdown
@@ -255,18 +288,19 @@ filetype `gcmail-panel` and the key hint in its status line.
 the buffer you are editing
 ~
 notes.md
- ● imd-city  mayor  Re: mail panel  2m
-   imd-city  mayor  Deploy plan accepted  1h
+  ● imd-city  mayor  Re: mail panel  2m
+    imd-city  mayor  Deploy plan accepted  1h
 
- gc mail: <CR> open  r reply  t thread  c chat  s search  m read  u unread  a archive  d delete  p preview  R refresh  q close
+ gc mail: <CR> open  r reply  t thread  c chat  s search  x mark  m read  u unread  a archive  d delete  H all  p preview  R refresh  q close
 ```
 
 It is a second view of the mailbox, not a copy: the same `gc mail inbox`
 listing, I1 and I2, kept copies and actions, so an action taken in the panel
-or in the float shows in both. The keys are the mailbox's (`p` shows or hides
-its preview pane); `<CR>`, `r` and `t` open their window above the panel,
-never inside it; `c` opens the chat beside the window the panel is docked under, and
-the panel stays; `q` closes the panel. The panel's cursor stays on the message it was on when the list
+or in the float shows in both, marks and all-mail mode too. The keys are the
+mailbox's (`p` shows or hides its preview pane); `<CR>`, `r` and `t` open
+their window above the panel, never inside it; `c` opens the chat beside the
+window the panel is docked under, and the panel stays; `q` closes the panel.
+The panel's cursor stays on the message it was on when the list
 changes.
 
 **Live updates without polling.** A shared event-log watcher

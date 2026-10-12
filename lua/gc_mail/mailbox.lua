@@ -11,6 +11,14 @@
 -- after it was read, across restarts and compactions. The mail panel
 -- (gc_mail.panel) is a second view of this same state (M.subscribe).
 --
+-- All-mail mode (H, one flag for both views) also lists every message to
+-- `human` in the mail history (gc_mail.history: read and closed mail, from
+-- `gc bd list`). Marks (x) live here too, by message, so both views show
+-- them; a, d, m and u act on a visual selection, else the marked set, else
+-- the message under the cursor. A bulk archive or delete is one gc call per
+-- city naming every id; mark read and unread run one call per id (gc takes
+-- one).
+--
 -- Two invariants hold every gc answer to what it can change:
 --
 -- I1 DECODE: every `gc mail <verb> --json` answer passes the one decoder of
@@ -18,7 +26,8 @@
 --    field the code reads, with its type (`gc --json-schema=result mail
 --    <verb>`): message and thread ids match the whole id gc prints
 --    (queue.mail_id, queue.thread_id), counts are non-negative integers, an
---    action answer names its command, action and the message. Anything else
+--    action answer names its command, action and every message asked about
+--    (a bulk archive or delete asks about several). Anything else
 --    is nil and a reason; the caller says it and keeps what is on screen.
 --    The argument a call puts in argv passes the same id check first, so
 --    nothing that could parse as an option ever reaches gc.
@@ -27,9 +36,10 @@
 --    read, unread, archive or delete started here and of the last one
 --    started or applied. An action answer applies (apply()) only when no
 --    later action on its message started after its call; an inbox answer
---    lists a message only when nothing was started or applied on it since
---    its call started. So a late answer never brings back, or keeps a copy
---    of, a message archived, deleted or changed since.
+--    takes a message only when nothing was started or applied on it since
+--    its call started, and otherwise leaves it as the mailbox has it. So a
+--    late answer never brings back, or keeps a copy of, a message archived,
+--    deleted or changed since, and never drops one whose action then fails.
 local queue = require('gc_mail.queue')
 
 local M = {}
@@ -55,7 +65,8 @@ M.dir = dir
 
 local first_lines = queue.first_lines
 local RECIPIENT = 'human'
-local TITLE = ' gc mail: <CR> open  r reply  t thread  c chat  s search  m read  u unread  a archive  d delete  R refresh '
+local TITLE = ' gc mail: <CR> open  r reply  t thread  c chat  s search  x mark  m read  u unread  a archive  d delete  H all  R refresh '
+local TITLE_ALL = ' all mail  <CR> open  r reply  t thread  c chat  s search  x mark  m read  u unread  a archive  d delete  H all  R refresh '
 local LOADING = ' loading… '
 local EMPTY = ' no mail '
 local KEYS_HINT = 'r reply  t thread  c chat  u unread  a archive  d delete  q close'
@@ -203,17 +214,24 @@ function M.answer(result, what)
   return record
 end
 
--- An action answer (mail_action): the command and action of `verb`, the
--- message asked about among `ids`, and a count; mark-read and mark-unread
--- also name it as `id` and count at least one.
+-- An action answer (mail_action): the command and action of `verb`, every
+-- message asked about (one id, or the list of a bulk archive or delete)
+-- among `ids`, and a count; mark-read and mark-unread also name it as `id`
+-- and count at least one.
 local function action_of(verb)
   local marks = verb == 'mark-read' or verb == 'mark-unread'
-  return function(record, id)
+  return function(record, arg)
     if record.command ~= 'mail.' .. verb or record.action ~= verb then
       return nil, 'it is not a ' .. verb .. ' answer'
     end
-    if not strings(record.ids) or not vim.tbl_contains(record.ids, id) or (marks and record.id ~= id) then
+    if not strings(record.ids) or (marks and record.id ~= arg) then
       return nil, 'it did not name the message'
+    end
+    local asked = type(arg) == 'table' and arg or { arg }
+    for _, id in ipairs(asked) do
+      if not vim.tbl_contains(record.ids, id) then
+        return nil, #asked == 1 and 'it did not name the message' or ('it did not name ' .. id)
+      end
     end
     if not whole(record.count) or (marks and record.count < 1) then
       return nil, 'no count'
@@ -273,21 +291,41 @@ end
 local function thread_arg(arg)
   return queue.thread_id(arg) or queue.mail_id(arg)
 end
+-- One message id, or a list of distinct ones (a bulk archive or delete).
+local function mail_ids(arg)
+  if type(arg) ~= 'table' then
+    return queue.mail_id(arg)
+  end
+  if not vim.islist(arg) or #arg == 0 then
+    return false
+  end
+  local seen = {}
+  for _, id in ipairs(arg) do
+    if not queue.mail_id(id) or seen[id] then
+      return false
+    end
+    seen[id] = true
+  end
+  return true
+end
 local ARGS = {
   inbox = recipient, count = recipient, thread = thread_arg, read = queue.mail_id, ['mark-read'] = queue.mail_id,
-  ['mark-unread'] = queue.mail_id, archive = queue.mail_id, delete = queue.mail_id,
+  ['mark-unread'] = queue.mail_id, archive = mail_ids, delete = mail_ids,
 }
 
 -- Runs `gc --city <path> mail <verb> <arg> --json` in the background, never
 -- through a shell; on_done(value, err) runs on the main loop with the
--- decoded answer (DECODE) or the reason it failed. An argument that is not
--- what `verb` takes runs nothing.
+-- decoded answer (DECODE) or the reason it failed. A list argument (archive
+-- and delete) puts every id in argv, in order. An argument that is not what
+-- `verb` takes runs nothing.
 local function run(city, verb, arg, on_done)
   local what = ('gc mail %s in %s'):format(verb, city.name)
   if not (ARGS[verb] and DECODE[verb] and ARGS[verb](arg)) then
     return on_done(nil, ('%s was not run: %s is not what it takes'):format(what, vim.inspect(arg)))
   end
-  local argv = { 'gc', '--city', city.path, 'mail', verb, arg, '--json' }
+  local argv = { 'gc', '--city', city.path, 'mail', verb }
+  vim.list_extend(argv, type(arg) == 'table' and arg or { arg })
+  argv[#argv + 1] = '--json'
   local ok, err = pcall(vim.system, argv, { text = true, timeout = config.timeout_ms }, function(result)
     vim.schedule(function()
       local record, why = M.answer(result, what)
@@ -432,9 +470,17 @@ end
 -- latest: city path -> clock of its last inbox call; an earlier call's answer
 --         is outdated. started: key -> clock of the last read, unread,
 --         archive or delete of that message started here; changed: of the
---         last one started or applied (I2).
+--         last one started or applied (I2). touched: key -> vim.uv.hrtime()
+--         of the last action answer applied to it, held against a history
+--         message's loaded_since (history.load stamps it in hrtime, not this
+--         clock); an action refused or still running hides nothing.
+-- all:   all-mail mode (H) is on; history: city path -> true once its
+--        history load was started (in the mode, on the first H or when the
+--        city is first listed; R again); loading: history loads still running.
+-- marks: key -> true, the messages marked with x.
 local function empty_box()
-  return { inbox = {}, kept = {}, said = {}, clock = 0, latest = {}, started = {}, changed = {} }
+  return { inbox = {}, kept = {}, said = {}, clock = 0, latest = {}, started = {}, changed = {}, touched = {},
+    all = false, history = {}, loading = 0, marks = {} }
 end
 local box = empty_box()
 local render_hook = function() end
@@ -474,7 +520,7 @@ local function apply(entry, at, change)
   if not current(key, at, true) then
     return false
   end
-  box.changed[key] = tick()
+  box.changed[key], box.touched[key] = tick(), uv.hrtime()
   change()
   render_hook()
   return true
@@ -487,8 +533,30 @@ local function say_once(source, message)
   end
 end
 
+-- The history copy of message `id` of `city` that all-mail mode may list: a
+-- cached message to `human`, unless a read, unread, archive or delete of it
+-- was applied here since the load that listed it started (I2), so an older
+-- load never brings back a message archived, deleted or changed since. nil
+-- otherwise.
+local function history_copy(city, id)
+  local history = package.loaded['gc_mail.history']
+  local cached = history and history.cache[city.path]
+  local m = cached and cached.by_id and cached.by_id[id]
+  if not m or m.to ~= RECIPIENT then
+    return nil
+  end
+  local touched = box.touched[key_of(city, id)]
+  if touched and touched >= (m.loaded_since or 0) then
+    return nil
+  end
+  return m
+end
+
 --- Every listed entry, newest first: { city, message, read, kept }. A message
---- gc lists as unread is unread, whatever its kept copy says.
+--- gc lists as unread is unread, whatever its kept copy says. In all-mail
+--- mode the history's messages to `human` (history_copy) join them, after
+--- the inbox and the kept copies, which win for the same message. A mark
+--- whose message is no longer listed is dropped.
 function M.entries()
   local seen, list = {}, {}
   for _, entries in pairs(box.inbox) do
@@ -500,7 +568,32 @@ function M.entries()
   end
   for key, entry in pairs(box.kept) do
     if not seen[key] then
+      seen[key] = true
       list[#list + 1] = entry
+    end
+  end
+  if box.all then
+    local history = package.loaded['gc_mail.history']
+    for _, city in ipairs(require('gc_mail').cached_cities() or {}) do
+      local cached = history and history.cache[city.path]
+      for id in pairs(cached and cached.by_id or {}) do
+        local key = key_of(city, id)
+        local m = not seen[key] and history_copy(city, id)
+        if m then
+          seen[key] = true
+          -- A copy: the history cache is the chat's too, and actions change the entry.
+          local message = {}
+          for k, v in pairs(m) do
+            message[k] = v
+          end
+          list[#list + 1] = { city = { name = city.name, path = city.path }, message = message, read = m.read }
+        end
+      end
+    end
+  end
+  for key in pairs(box.marks) do
+    if not seen[key] then
+      box.marks[key] = nil
     end
   end
   table.sort(list, function(a, b)
@@ -515,20 +608,39 @@ function M.entries()
   return list
 end
 
---- The mailbox lines for `entries`: one sanitized line each.
+-- The state column of `entry`: × for a message the history shows closed
+-- (all-mail mode, not in the inbox), else ● unread, blank read.
+local function state(entry)
+  local inbox = box.inbox[entry.city.path]
+  if box.all and not (inbox and inbox[entry.message.id]) then
+    local m = history_copy(entry.city, entry.message.id)
+    if m and m.closed then
+      return '×'
+    end
+  end
+  return entry.read and ' ' or '●'
+end
+
+--- The mailbox lines for `entries`: one sanitized line each, its first
+--- column `x` for a marked message.
 function M.lines(entries, now, pending)
   if #entries == 0 then
-    return { pending and LOADING or EMPTY }
+    return { (pending or box.loading > 0) and LOADING or EMPTY }
   end
   local gc_mail = require('gc_mail')
   local one_line = gc_mail.one_line
   local lines = {}
   for i, entry in ipairs(entries) do
     local m = entry.message
-    lines[i] = (' %s %s  %s  %s  %s '):format(entry.read and ' ' or '●', one_line(entry.city.name), one_line(m.from),
-      one_line(m.subject), gc_mail.age(math.max(0, now - m.created)))
+    lines[i] = ('%s %s %s  %s  %s  %s '):format(box.marks[key_of(entry.city, m.id)] and 'x' or ' ', state(entry),
+      one_line(entry.city.name), one_line(m.from), one_line(m.subject), gc_mail.age(math.max(0, now - m.created)))
   end
   return lines
+end
+
+--- Whether all-mail mode is on.
+function M.all()
+  return box.all
 end
 
 -- Marks `entry` read in the model and keeps its copy. The copy failing is
@@ -575,10 +687,26 @@ function M.subscribe(name, fn)
   views[name] = fn
 end
 
+-- Shows `title` on the float `picker`, widened (and centred again) when the
+-- float is narrower than it.
+local function show_title(picker, title)
+  local config_now = vim.api.nvim_win_get_config(picker.win)
+  local width = vim.fn.strdisplaywidth(title) + 2
+  local update = { title = title, title_pos = 'center' }
+  if config_now.width < width then
+    local l = require('gc_mail').layout(vim.api.nvim_buf_line_count(picker.buf), width, vim.o.lines, vim.o.columns,
+      vim.o.cmdheight)
+    update = vim.tbl_extend('force', update, { relative = 'editor', row = l.row, col = l.col, width = l.width,
+      height = l.height })
+  end
+  vim.api.nvim_win_set_config(picker.win, update)
+end
+
 local function render()
   if view and not view.picker.closed() then
     view.entries = M.entries()
     view.picker.set(M.lines(view.entries, os.time(), view.pending > 0))
+    show_title(view.picker, box.all and TITLE_ALL or TITLE)
     if view.preview then
       view.preview.update()
     end
@@ -589,14 +717,21 @@ local function render()
 end
 render_hook = render
 
+local load_history
+
 -- Lists `city` for the mailbox `owner`: one inbox call. A good answer
 -- replaces what the city showed; a failed one changes nothing on screen and
 -- is said once. The answer to a call a later call to the same city replaced
 -- is dropped (a mailbox closed and reopened while its first call still ran),
--- and an answer leaves out every message it is no longer current for (I2):
--- it would bring them back as they were. on_done(), when given, runs once
--- the answer is handled, applied or not.
+-- and a message the answer is no longer current for (I2) stays as the
+-- mailbox has it, listed or not: the answer would bring it back as it was,
+-- or drop it while an action on it may still fail. In all-mail mode a city
+-- listed for the first time loads its history too. on_done(), when given,
+-- runs once the answer is handled, applied or not.
 local function list(city, owner, on_done)
+  if box.all then
+    load_history({ city })
+  end
   owner.pending = owner.pending + 1
   local at = tick()
   box.latest[city.path] = at
@@ -617,6 +752,11 @@ local function list(city, owner, on_done)
       for _, message in ipairs(messages) do
         if current(key_of(city, message.id), at) then
           entries[message.id] = { city = { name = city.name, path = city.path }, message = message, read = message.read }
+        end
+      end
+      for id, entry in pairs(box.inbox[city.path] or {}) do
+        if not current(key_of(city, id), at) then
+          entries[id] = entry
         end
       end
       box.inbox[city.path] = entries
@@ -810,7 +950,9 @@ function actions.read(entry, on_done)
 end
 
 -- Unread again in gc; the kept copy stays (gc may already have closed the
--- message) and says unread.
+-- message) and says unread. A message with no kept copy (one all-mail mode
+-- listed from the history) is listed as the inbox lists it now, until the
+-- next inbox answer.
 function actions.unread(entry, on_done)
   local at = started(entry)
   run(entry.city, 'mark-unread', entry.message.id, function(ok, err)
@@ -828,6 +970,9 @@ function actions.unread(entry, on_done)
         if not kept then
           notify(('cannot update the kept copy of "%s": %s'):format(entry.message.subject, kerr), vim.log.levels.ERROR)
         end
+      else
+        box.inbox[entry.city.path] = box.inbox[entry.city.path] or {}
+        box.inbox[entry.city.path][entry.message.id] = entry
       end
     end)
     if type(on_done) == 'function' then
@@ -935,6 +1080,222 @@ function actions.reply(entry, split)
 end
 M.actions = actions
 
+-- ---- marks, selections and bulk actions ------------------------------------
+
+local function unmark(entry)
+  box.marks[key_of(entry.city, entry.message.id)] = nil
+end
+
+--- Marks `entry` (x), or unmarks it when it is marked.
+function M.toggle_mark(entry)
+  local key = key_of(entry.city, entry.message.id)
+  box.marks[key] = not box.marks[key] or nil
+  render_hook()
+end
+
+--- Clears every mark (X).
+function M.clear_marks()
+  box.marks = {}
+  render_hook()
+end
+
+--- The entries an action key acts on, in list order: the rows of the visual
+--- selection in `buf` when the key was pressed in visual mode (which it
+--- leaves), else every marked entry, else the one on `row`.
+function M.targets(entries, row, buf)
+  local mode = vim.fn.mode()
+  local list = {}
+  if mode == 'v' or mode == 'V' or mode == '\22' then
+    vim.cmd('normal! ' .. vim.keycode('<Esc>'))
+    local first, last = vim.api.nvim_buf_get_mark(buf, '<')[1], vim.api.nvim_buf_get_mark(buf, '>')[1]
+    for i = math.min(first, last), math.max(first, last) do
+      list[#list + 1] = entries[i]
+    end
+    return list
+  end
+  for _, entry in ipairs(entries) do
+    if box.marks[key_of(entry.city, entry.message.id)] then
+      list[#list + 1] = entry
+    end
+  end
+  if #list == 0 then
+    list[1] = entries[row]
+  end
+  return list
+end
+
+-- m and u on `list`: one gc call per message, in list order, the next once
+-- the last answered (gc marks one id per call). Each is actions.read or
+-- actions.unread, with its own clock and apply (I2); a refused one is said
+-- there and the next still runs, nothing is retried. An applied one loses
+-- its mark.
+local function one_by_one(action, list)
+  local i = 0
+  local function step()
+    i = i + 1
+    local entry = list[i]
+    if not entry then
+      return
+    end
+    action(entry, function(ok, _, applied)
+      if ok and applied then
+        unmark(entry)
+        render_hook()
+      end
+      step()
+    end)
+  end
+  step()
+end
+
+-- a and d on several messages: one `gc mail archive|delete <id> <id> ...`
+-- per city, every id checked before any clock starts and each message's
+-- clock started before the call (I2). The answer must name every id (I1);
+-- then each message is applied on its own (a later action on one drops only
+-- that one). A refused or failed call says the city's ids once and changes
+-- nothing.
+local function remove_many(verb, list)
+  local order, groups = {}, {}
+  for _, entry in ipairs(list) do
+    local path = entry.city.path
+    if not groups[path] then
+      groups[path] = { city = entry.city, entries = {} }
+      order[#order + 1] = path
+    end
+    table.insert(groups[path].entries, entry)
+  end
+  for _, path in ipairs(order) do
+    local group = groups[path]
+    local ids = vim.tbl_map(function(entry)
+      return entry.message.id
+    end, group.entries)
+    local function refused(err)
+      notify(('cannot %s %d messages in %s (%s): %s'):format(verb, #ids, group.city.name, table.concat(ids, ' '), err),
+        vim.log.levels.ERROR)
+    end
+    if not mail_ids(ids) then
+      refused('not a list of distinct gc mail ids')
+    else
+      local ats = vim.tbl_map(started, group.entries)
+      run(group.city, verb, ids, function(ok, err)
+        if not ok then
+          return refused(err)
+        end
+        local done = 0
+        for i, entry in ipairs(group.entries) do
+          if apply(entry, ats[i], function() gone(entry) end) then
+            done = done + 1
+          end
+        end
+        if done > 0 then
+          notify(('%s %d messages in %s'):format(verb == 'archive' and 'archived' or 'deleted', done, group.city.name))
+        end
+      end)
+    end
+  end
+end
+
+--- Runs `verb` (read, unread, archive or delete) on `list` (M.targets). One
+--- message is today's single action; several are a bulk action, and delete
+--- asks once for all of them.
+function M.act(verb, list)
+  if #list == 0 then
+    return
+  end
+  if verb == 'read' or verb == 'unread' then
+    return one_by_one(actions[verb], list)
+  end
+  if #list == 1 then
+    return actions[verb](list[1])
+  end
+  if verb == 'delete' and vim.fn.confirm(('Delete %d messages?'):format(#list), '&Yes\n&No', 2) ~= 1 then
+    return
+  end
+  remove_many(verb, list)
+end
+
+-- ---- all-mail mode -------------------------------------------------------------
+
+-- Loads the history of every city in `cities` for all-mail mode (gc bd list,
+-- gc_mail.history; a load already running is joined): a city whose load was
+-- already started only `again` (R). A failed load is said once; the mode
+-- shows what it has.
+function load_history(cities, again)
+  if not cities then
+    return
+  end
+  local history = require('gc_mail.history')
+  local this = box
+  for _, city in ipairs(cities) do
+    if again or not this.history[city.path] then
+      this.history[city.path] = true
+      local c = { name = city.name, path = city.path }
+      this.loading = this.loading + 1
+      history.load(c, function(messages, err)
+        if this ~= box then
+          return
+        end
+        this.loading = this.loading - 1
+        if messages then
+          this.said['history ' .. c.path] = nil
+        else
+          say_once('history ' .. c.path, err)
+        end
+        render_hook()
+      end)
+    end
+  end
+end
+
+--- Turns all-mail mode on or off (H) for both views. Turning it on loads the
+--- history of every cached city not loaded yet; a city the city list adds
+--- later loads it when it is first listed (list()).
+function M.toggle_all()
+  box.all = not box.all
+  if box.all then
+    load_history(require('gc_mail').cached_cities())
+  end
+  render_hook()
+end
+
+--- R in all-mail mode loads the history again too.
+function M.reload_history()
+  if box.all then
+    load_history(require('gc_mail').cached_cities(), true)
+  end
+end
+
+--- Maps the keys both views share on their buffer `buf`: x and X (marks), H
+--- (all-mail mode), and m, u, a and d in normal and visual mode (M.targets).
+--- `at()` gives the entries as shown and the cursor row, or nothing once the
+--- view is gone.
+function M.map_keys(buf, at)
+  local function set(modes, lhs, fn, desc)
+    vim.keymap.set(modes, lhs, fn, { buffer = buf, nowait = true, silent = true, desc = 'gc-mail: ' .. desc })
+  end
+  local function act(verb)
+    return function()
+      local entries, row = at()
+      if entries then
+        M.act(verb, M.targets(entries, row, buf))
+      end
+    end
+  end
+  set({ 'n', 'x' }, 'm', act('read'), 'mark the selected, marked or current mail read')
+  set({ 'n', 'x' }, 'u', act('unread'), 'mark the selected, marked or current mail unread')
+  set({ 'n', 'x' }, 'a', act('archive'), 'archive the selected, marked or current mail')
+  set({ 'n', 'x' }, 'd', act('delete'), 'delete the selected, marked or current mail')
+  set('n', 'x', function()
+    local entries, row = at()
+    local entry = entries and entries[row]
+    if entry then
+      M.toggle_mark(entry)
+    end
+  end, 'mark or unmark the mail under the cursor')
+  set('n', 'X', M.clear_marks, 'clear every mark')
+  set('n', 'H', M.toggle_all, 'all mail or unread and kept mail')
+end
+
 --- Opens the mailbox: the kept copies and the last answers at once, then one
 --- inbox call per listed city (a city the refreshed city list adds is listed
 --- once it arrives).
@@ -950,7 +1311,7 @@ function M.open()
     end
   end
   local entries = M.entries()
-  local picker = gc_mail.float(TITLE, M.lines(entries, os.time(), true), {
+  local picker = gc_mail.float(box.all and TITLE_ALL or TITLE, M.lines(entries, os.time(), true), {
     ['<CR>'] = on(function(entry, picker)
       picker.close()
       actions.open(entry)
@@ -970,10 +1331,6 @@ function M.open()
     s = function()
       require('gc_mail.search').prompt()
     end,
-    m = on(actions.read),
-    u = on(actions.unread),
-    a = on(actions.archive),
-    d = on(actions.delete),
     p = function()
       if view and view.preview then
         view.preview.toggle()
@@ -986,6 +1343,7 @@ function M.open()
           view.listed[city.path] = true
           list(city, view)
         end
+        M.reload_history()
         render()
       end
     end,
@@ -995,6 +1353,11 @@ function M.open()
   this.preview = require('gc_mail.preview').attach({
     kind = 'float', win = picker.win, buf = picker.buf, entry_at = function(row) return this.entries[row] end,
   })
+  M.map_keys(picker.buf, function()
+    if view == this and not picker.closed() then
+      return this.entries, vim.api.nvim_win_get_cursor(picker.win)[1]
+    end
+  end)
   local function list_new(cities)
     for _, city in ipairs(cities or {}) do
       if not this.listed[city.path] then

@@ -22,7 +22,8 @@ local M = {}
 
 local uv = vim.uv
 
-local TITLE = ' gc mail: <CR> open  r reply  t thread  c chat  s search  m read  u unread  a archive  d delete  p preview  R refresh  q close '
+local TITLE = ' gc mail: <CR> open  r reply  t thread  c chat  s search  x mark  m read  u unread  a archive  d delete  H all  p preview  R refresh  q close '
+local TITLE_ALL = ' all mail  <CR> open  r reply  t thread  c chat  s search  x mark  m read  u unread  a archive  d delete  H all  p preview  R refresh  q close '
 
 local config = {
   poll_ms = nil, -- default: gc_mail.config.panel_poll_ms
@@ -255,6 +256,7 @@ local function draw(panel)
   vim.api.nvim_buf_set_lines(panel.buf, 0, -1, false, lines)
   vim.bo[panel.buf].modifiable = false
   panel.entries = entries
+  vim.wo[panel.win].statusline = mailbox.all() and TITLE_ALL or TITLE
   -- The cursor stays on the message it was on; the current window is untouched.
   row = math.min(row, #lines)
   if was then
@@ -344,10 +346,6 @@ local function keys(panel)
     s = function()
       require('gc_mail.search').prompt()
     end,
-    m = on(actions.read),
-    u = on(actions.unread),
-    a = on(actions.archive),
-    d = on(actions.delete),
     p = function()
       if panel.preview then
         panel.preview.toggle()
@@ -356,6 +354,7 @@ local function keys(panel)
     R = function()
       if live then
         refresh_all(live)
+        mailbox.reload_history()
         render()
       end
     end,
@@ -365,6 +364,12 @@ local function keys(panel)
     vim.keymap.set('n', lhs, fn, { buffer = panel.buf, nowait = true, silent = true,
       desc = 'gc-mail: ' .. (mailbox.KEY_DESC[lhs] or lhs) })
   end
+  -- x, X, H, and m, u, a, d on the selection, the marks or the cursor.
+  mailbox.map_keys(panel.buf, function()
+    if valid(panel) then
+      return panel.entries, vim.api.nvim_win_get_cursor(panel.win)[1]
+    end
+  end)
 end
 
 --- Opens the panel below the current window of this tab page, without

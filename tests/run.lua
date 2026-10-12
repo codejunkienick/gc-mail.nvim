@@ -94,6 +94,7 @@ local function fresh()
   package.loaded['gc_mail.chat'] = nil
   package.loaded['gc_mail.events'] = nil
   package.loaded['gc_mail.watch'] = nil
+  package.loaded['gc_mail.history'] = nil
   gc_mail = require('gc_mail')
   -- The preview pane has its own tests; the others count windows and floats.
   gc_mail.config.preview = false
@@ -1554,9 +1555,9 @@ test('the mailbox lists the human mail of every city, newest first, with one inb
   eq(#floats(), 1, 'mailbox window')
   settled(win, 3)
   eq(rows(win), {
-    ' ● imd-city  mayor  at noon',
-    ' ● side-city  mayor  Re: side / with a break',
-    ' ● imd-city  builder-1  at eleven',
+    '  ● imd-city  mayor  at noon',
+    '  ● side-city  mayor  Re: side / with a break',
+    '  ● imd-city  builder-1  at eleven',
   }, 'newest first across cities (13:00+02:00 is 11:00Z), one sanitized line each')
   wait('the city refresh', function()
     return gc_mail.cached_cities() ~= nil and #mail_calls() >= 2
@@ -1580,7 +1581,7 @@ test('opening a message shows it at once, marks it read once, and keeps it liste
   answer('read', { message = msg('ic-wisp-a1', { subject = 'Mailbox plan', read = true }) })
   local win = mailbox().open()
   settled(win, 1)
-  eq(rows(win), { ' ● imd-city  mayor  Mailbox plan' }, 'unread')
+  eq(rows(win), { '  ● imd-city  mayor  Mailbox plan' }, 'unread')
   vim.api.nvim_feedkeys(vim.keycode('<CR>'), 'x', false)
   eq(#floats(), 0, 'the mailbox closes on open')
   local shown = vim.api.nvim_buf_get_lines(0, 0, -1, false)
@@ -1599,7 +1600,7 @@ test('opening a message shows it at once, marks it read once, and keeps it liste
     return #mail_calls() == before + 2
   end)
   vim.wait(100)
-  eq(rows(win), { '   imd-city  mayor  Mailbox plan' }, 'read and still listed')
+  eq(rows(win), { '    imd-city  mayor  Mailbox plan' }, 'read and still listed')
   vim.api.nvim_feedkeys(vim.keycode('<CR>'), 'x', false)
   vim.wait(200)
   eq(#vim.tbl_filter(function(c)
@@ -1612,7 +1613,7 @@ test('opening a message shows it at once, marks it read once, and keeps it liste
   win = mailbox().open()
   settled(win, 1)
   vim.wait(100)
-  eq(rows(win), { '   imd-city  mayor  Mailbox plan' }, 'kept across a restart')
+  eq(rows(win), { '    imd-city  mayor  Mailbox plan' }, 'kept across a restart')
   vim.api.nvim_feedkeys('q', 'x', false)
 end)
 
@@ -1628,14 +1629,14 @@ test('mark read, mark unread, archive, delete and thread call gc with the exact 
   acted('mark-read', 'ic-wisp-a1')
   vim.api.nvim_feedkeys('m', 'x', false)
   wait('marked read', function()
-    return rows(win)[1] == '   imd-city  mayor  first'
+    return rows(win)[1] == '    imd-city  mayor  first'
   end)
   eq(has_call(call('mark-read', '/srv/imd-city', 'ic-wisp-a1', '--json')), true, 'mark-read argv')
   eq(#kept_files(), 1, 'kept once read')
   acted('mark-unread', 'ic-wisp-a1')
   vim.api.nvim_feedkeys('u', 'x', false)
   wait('unread again', function()
-    return rows(win)[1] == ' ● imd-city  mayor  first'
+    return rows(win)[1] == '  ● imd-city  mayor  first'
   end)
   eq(has_call(call('mark-unread', '/srv/imd-city', 'ic-wisp-a1', '--json')), true, 'mark-unread argv')
   eq(vim.json.decode(read_file(mailbox_dir .. '/' .. kept_files()[1])).read, false, 'the kept copy says unread')
@@ -1646,7 +1647,7 @@ test('mark read, mark unread, archive, delete and thread call gc with the exact 
   end)
   eq(has_call(call('archive', '/srv/imd-city', 'ic-wisp-a1', '--json')), true, 'archive argv')
   eq(kept_files(), {}, 'the kept copy goes with it')
-  eq(rows(win), { ' ● imd-city  mayor  second' }, 'the other message stays')
+  eq(rows(win), { '  ● imd-city  mayor  second' }, 'the other message stays')
   -- Delete asks first; No deletes nothing.
   local confirm = vim.fn.confirm
   local asked
@@ -1856,7 +1857,7 @@ test('a malformed, failed or hung gc answer is said once and leaves the mailbox 
         return #notes > 0 or (round == 2 and vim.wait(600) == false)
       end, 5000)
       vim.wait(100)
-      eq(rows(win), { ' ● imd-city  mayor  kept on screen' }, name .. ': the list on screen')
+      eq(rows(win), { '  ● imd-city  mayor  kept on screen' }, name .. ': the list on screen')
       local errors = vim.tbl_filter(function(note)
         return note.level == vim.log.levels.ERROR
       end, notes)
@@ -2001,15 +2002,15 @@ test('an outdated inbox answer never brings back what a later call, a read or an
   acted('archive', 'ic-wisp-a2')
   vim.api.nvim_feedkeys('a', 'x', false)
   wait('archived', function()
-    return rows(win)[1] == ' ● imd-city  mayor  to read'
+    return rows(win)[1] == '  ● imd-city  mayor  to read'
   end)
   acted('mark-read', 'ic-wisp-a3')
   vim.api.nvim_feedkeys('m', 'x', false)
   wait('marked read', function()
-    return rows(win)[1] == '   imd-city  mayor  to read'
+    return rows(win)[1] == '    imd-city  mayor  to read'
   end)
   vim.wait(1500) -- the refresh answers 1 s after it was made
-  eq(rows(win), { '   imd-city  mayor  to read', ' ● imd-city  mayor  untouched' },
+  eq(rows(win), { '    imd-city  mayor  to read', '  ● imd-city  mayor  untouched' },
     'the refresh answer brings back neither the archived nor the unread copy of the read message')
 end)
 
@@ -2123,7 +2124,7 @@ test('r2a1: a count or action answer missing a field is said and changes nothing
     return #errors() == 2
   end)
   vim.wait(100)
-  eq(rows(win), { ' ● imd-city  mayor  stays' }, 'still listed, still unread')
+  eq(rows(win), { '  ● imd-city  mayor  stays' }, 'still listed, still unread')
   eq(kept_files(), {}, 'no kept copy')
   local said = errors()
   table.sort(said)
@@ -2149,7 +2150,7 @@ test('r2a2: a thread id that is not one gc prints is refused, never passed to gc
   end)
   eq(errors(), { 'gc-mail: gc mail inbox in imd-city printed something unexpected (a message thread_id is not a gc thread id)' },
     'said')
-  eq(rows(win), { ' ● imd-city  mayor  kept on screen' }, 'the list on screen stays')
+  eq(rows(win), { '  ● imd-city  mayor  kept on screen' }, 'the list on screen stays')
   vim.api.nvim_feedkeys('t', 'x', false)
   vim.wait(200)
   for _, c in ipairs(mail_calls()) do
@@ -2251,7 +2252,7 @@ test('I2: action answers apply in the order their calls started, whatever order 
   acted('mark-unread', 'ic-wisp-a1')
   vim.api.nvim_feedkeys('u', 'x', false)
   vim.wait(1500)
-  eq(rows(win)[1], ' ● imd-city  mayor  late read', 'unread, as the later call left it')
+  eq(rows(win)[1], '  ● imd-city  mayor  late read', 'unread, as the later call left it')
   eq(kept_files(), {}, 'and no copy kept by the dropped read')
   vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/mark-read.delay')
   -- A mark-read that answers first does not hold back a later archive.
@@ -2264,7 +2265,7 @@ test('I2: action answers apply in the order their calls started, whatever order 
   wait('archived', function()
     return #rows(win) == 1
   end, 3000)
-  eq(rows(win), { ' ● imd-city  mayor  late read' }, 'the archive applied after the read')
+  eq(rows(win), { '  ● imd-city  mayor  late read' }, 'the archive applied after the read')
   eq(kept_files(), {}, 'its kept copy went with it')
   vim.api.nvim_feedkeys('q', 'x', false)
 end)
@@ -2380,7 +2381,7 @@ test('preview: updates make no gc call and mark nothing read', function()
   eq(#vim.tbl_filter(function(c)
     return c[4] == 'read' or c[4] == 'mark-read'
   end, mail_calls()), 0, 'no read or mark-read')
-  eq(rows(win), { ' ● imd-city  mayor  newer subject', ' ● imd-city  mayor  older subject' }, 'both still unread')
+  eq(rows(win), { '  ● imd-city  mayor  newer subject', '  ● imd-city  mayor  older subject' }, 'both still unread')
   eq(#kept_files(), 0, 'and no kept copy')
   vim.api.nvim_feedkeys('q', 'x', false)
 end)
@@ -2527,7 +2528,7 @@ test('preview: a body that cannot be rendered is said once and clears the pane, 
     return n.message:find('cannot show the preview', 1, true)
   end, notes)
   eq(#said, 1, 'said once')
-  eq(rows(win), { ' ● imd-city  mayor  newer subject', ' ● imd-city  mayor  older subject' }, 'the list is as it was')
+  eq(rows(win), { '  ● imd-city  mayor  newer subject', '  ● imd-city  mayor  older subject' }, 'the list is as it was')
   vim.api.nvim_feedkeys('q', 'x', false)
 end)
 
@@ -2630,7 +2631,7 @@ test('the panel opens below the current window without moving focus or the curso
     'its own unlisted nofile buffer')
   eq(vim.api.nvim_win_get_height(origin) < origin_height, true, 'the split took rows from the current window')
   settled(win, 1)
-  eq(rows(win), { ' ● imd-city  mayor  first' }, 'the mailbox lines')
+  eq(rows(win), { '  ● imd-city  mayor  first' }, 'the mailbox lines')
   -- A mail arriving changes the panel, not the focus.
   inbox('imd-city', { msg('ic-wisp-a2', { subject = 'second', created_at = '2026-10-07T13:00:00Z' }),
     msg('ic-wisp-a1', { subject = 'first' }) })
@@ -2638,7 +2639,7 @@ test('the panel opens below the current window without moving focus or the curso
   wait('the new mail is shown', function()
     return #rows(win) == 2
   end)
-  eq(rows(win), { ' ● imd-city  mayor  second', ' ● imd-city  mayor  first' }, 'newest first')
+  eq(rows(win), { '  ● imd-city  mayor  second', '  ● imd-city  mayor  first' }, 'newest first')
   eq(vim.api.nvim_win_get_cursor(win)[1], 2, 'the panel cursor stays on the message it was on')
   eq(vim.api.nvim_get_current_win(), origin, 'still the same window')
   eq(vim.api.nvim_win_get_cursor(origin), { 2, 3 }, 'still the same cursor')
@@ -2678,7 +2679,7 @@ test('the panel lines equal the float\'s, and its keys act on the message under 
   local fwin = mailbox().open()
   settled(fwin, 3)
   eq(rows(pwin), rows(fwin), 'the same lines')
-  eq(rows(pwin), { ' ● imd-city  mayor  at noon', ' ● side-city  mayor  side', ' ● imd-city  builder-1  at eleven' }, 'lines')
+  eq(rows(pwin), { '  ● imd-city  mayor  at noon', '  ● side-city  mayor  side', '  ● imd-city  builder-1  at eleven' }, 'lines')
   vim.api.nvim_feedkeys('q', 'x', false)
   -- <CR> in the panel opens the message in a window above it, never inside it.
   vim.api.nvim_win_set_cursor(pwin, { 1, 0 })
@@ -2691,7 +2692,7 @@ test('the panel lines equal the float\'s, and its keys act on the message under 
   eq(vim.bo[vim.api.nvim_win_get_buf(pwin)].filetype, 'gcmail-panel', 'the panel still shows the panel')
   eq(vim.api.nvim_win_get_height(pwin), 10, 'at its height')
   wait('marked read in both views', function()
-    return rows(pwin)[1] == '   imd-city  mayor  at noon'
+    return rows(pwin)[1] == '    imd-city  mayor  at noon'
   end)
   eq(has_call(call('read', cities[1].path, 'ic-wisp-a1', '--json')), true, 'gc mail read')
   -- m and u from the panel without entering it.
@@ -2699,7 +2700,7 @@ test('the panel lines equal the float\'s, and its keys act on the message under 
   acted('mark-read', 'sc-wisp-b1')
   panel_key(pwin, 'm')()
   wait('marked read', function()
-    return rows(pwin)[2] == '   side-city  mayor  side'
+    return rows(pwin)[2] == '    side-city  mayor  side'
   end)
   eq(has_call(call('mark-read', cities[2].path, 'sc-wisp-b1', '--json')), true, 'gc mail mark-read in its city')
   -- q in the panel closes it.
@@ -2909,11 +2910,11 @@ test('an archive from the panel also leaves the open float and survives a late i
     return #rows(pwin) == 1 and #rows(fwin) == 1
   end)
   eq(has_call(call('archive', cities[1].path, 'ic-wisp-a1', '--json')), true, 'gc mail archive')
-  eq(rows(pwin), { ' ● imd-city  mayor  stays' }, 'panel')
-  eq(rows(fwin), { ' ● imd-city  mayor  stays' }, 'float')
+  eq(rows(pwin), { '  ● imd-city  mayor  stays' }, 'panel')
+  eq(rows(fwin), { '  ● imd-city  mayor  stays' }, 'float')
   vim.wait(1500) -- the refresh answers 1 s after it was made
-  eq(rows(pwin), { ' ● imd-city  mayor  stays' }, 'the late answer does not bring it back to the panel')
-  eq(rows(fwin), { ' ● imd-city  mayor  stays' }, 'nor to the float')
+  eq(rows(pwin), { '  ● imd-city  mayor  stays' }, 'the late answer does not bring it back to the panel')
+  eq(rows(fwin), { '  ● imd-city  mayor  stays' }, 'nor to the float')
   eq(#floats(), 1, 'the float stayed open')
   vim.api.nvim_feedkeys('q', 'x', false)
 end)
@@ -6436,7 +6437,7 @@ end)
 test('every mapping of the search results and of the s key carries a gc-mail: desc', function()
   search_fixture()
   inbox('imd-city', { msg('ic-wisp-a1', { subject = 'first' }) })
-  inbox('side city', {})
+  inbox('side city', { msg('sc-wisp-b1', { subject = 'second' }) })
   local win = search_open('markdown')
   for _, lhs in ipairs({ '<CR>', 'c', 'q', '<Esc>' }) do
     local desc
@@ -6449,7 +6450,11 @@ test('every mapping of the search results and of the s key carries a gc-mail: de
   end
   vim.api.nvim_feedkeys('q', 'x', false)
   local mwin = mailbox().open()
-  settled(mwin, 1)
+  -- A row from each city: both inbox calls have answered. preload joins the
+  -- float's gc cities refresh, so its callback has run too: no call of this
+  -- test answers into the next one.
+  settled(mwin, 2)
+  preload()
   local desc
   for _, map in ipairs(vim.api.nvim_buf_get_keymap(vim.api.nvim_win_get_buf(mwin), 'n')) do
     if map.lhs == 's' then
@@ -6457,6 +6462,508 @@ test('every mapping of the search results and of the s key carries a gc-mail: de
     end
   end
   eq(type(desc) == 'string' and desc:sub(1, 9) == 'gc-mail: ', true, 'the s key of the mailbox float: ' .. tostring(desc))
+  vim.api.nvim_feedkeys('q', 'x', false)
+end)
+
+-- ---- all mail, marks and bulk actions ------------------------------------------
+
+-- A message as `gc bd list` prints it (history.load reads it): open, to `human`.
+local function bead(id, fields)
+  return vim.tbl_extend('force', {
+    id = id, title = 'subject ' .. id, sender = 'mayor', assignee = 'human', status = 'open',
+    created_at = '2026-10-07T12:00:00Z', description = 'body of ' .. id,
+  }, fields or {})
+end
+
+local function bd_list(city, beads)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.' .. city .. '.json', vim.json.encode(beads) .. '\n')
+end
+
+local function calls_of(verb)
+  return vim.tbl_filter(function(c)
+    return c[4] == verb
+  end, mail_calls())
+end
+
+-- gc's answer to an archive or delete of every id in `ids`.
+local function acted_many(cmd, ids, city)
+  answer(cmd, { command = 'mail.' .. cmd, action = cmd, ids = ids, count = #ids }, city)
+end
+
+local function title_of(win)
+  local title = vim.api.nvim_win_get_config(win).title
+  return table.concat(vim.tbl_map(function(chunk)
+    return chunk[1]
+  end, title or {}))
+end
+
+local function press(keys)
+  vim.api.nvim_feedkeys(keys, 'x', false)
+end
+
+-- Marks the rows `list` of the window `win` with x, from that window.
+local function mark_rows(win, list)
+  for _, row in ipairs(list) do
+    vim.api.nvim_win_set_cursor(win, { row, 0 })
+    press('x')
+  end
+end
+
+-- imd-city's inbox: one unread message. Its history: that one, a read one,
+-- a closed one, and one Nick sent; side city's history: a read one.
+local function all_mail_fixture()
+  local cities, log = city_dirs()
+  write(log, '')
+  inbox('imd-city', { msg('ic-wisp-u1', { subject = 'unread', created_at = '2026-10-07T13:00:00Z' }) })
+  inbox('side city', {})
+  bd_list('imd-city', {
+    bead('ic-wisp-u1', { title = 'unread', created_at = '2026-10-07T13:00:00Z' }),
+    bead('ic-wisp-r1', { title = 'was read', created_at = '2026-10-07T12:00:00Z', labels = { 'read' } }),
+    bead('ic-wisp-c1', { title = 'closed', created_at = '2026-10-07T11:00:00Z', status = 'closed' }),
+    bead('ic-wisp-o1', { title = 'to the mayor', sender = 'human', assignee = 'mayor',
+      created_at = '2026-10-07T10:00:00Z' }),
+  })
+  bd_list('side city', { bead('sc-wisp-r2', { title = 'side read', created_at = '2026-10-07T11:30:00Z',
+    labels = { 'read' } }) })
+  return cities
+end
+
+local ALL_MAIL = {
+  '  ● imd-city  mayor  unread',
+  '    imd-city  mayor  was read',
+  '    side-city  mayor  side read',
+  '  × imd-city  mayor  closed',
+}
+
+test('H lists read and closed mail to human from the history in both views, one bd list per city; H again lists today\'s set', function()
+  local cities = all_mail_fixture()
+  local pwin = panel().open()
+  settled(pwin, 1)
+  listed(cities)
+  local fwin = mailbox().open()
+  settled(fwin, 1)
+  eq(rows(fwin), { '  ● imd-city  mayor  unread' }, 'today\'s set: the unread inbox')
+  eq(title_of(fwin):find('all mail', 1, true), nil, 'the title does not say all mail')
+  press('H')
+  wait('all mail in the float', function()
+    return #rows(fwin) == 4
+  end)
+  eq(rows(fwin), ALL_MAIL, 'unread ●, read blank, closed ×, newest first; mail Nick sent is not listed')
+  wait('all mail in the panel', function()
+    return vim.deep_equal(rows(pwin), ALL_MAIL)
+  end)
+  eq(title_of(fwin):sub(1, 10), ' all mail ', 'the float title says all mail')
+  eq(vim.wo[pwin].statusline:sub(1, 10), ' all mail ', 'the panel status line says all mail')
+  eq({ bd_list_calls(cities[1].path), bd_list_calls(cities[2].path) }, { 1, 1 }, 'one bd list call per city')
+  -- H in the panel turns it off for both views.
+  panel_key(pwin, 'H')()
+  eq(rows(fwin), { '  ● imd-city  mayor  unread' }, 'the float lists today\'s set again')
+  eq(rows(pwin), { '  ● imd-city  mayor  unread' }, 'and the panel')
+  eq(title_of(fwin):find('all mail', 1, true), nil, 'the title too')
+  -- On again: the history already loaded, no second load; R in the mode loads it again.
+  press('H')
+  eq(rows(fwin), ALL_MAIL, 'all mail again at once')
+  vim.wait(200)
+  eq({ bd_list_calls(cities[1].path), bd_list_calls(cities[2].path) }, { 1, 1 }, 'no second load for a second H')
+  press('R')
+  wait('R loads the history again', function()
+    return bd_list_calls(cities[1].path) == 2 and bd_list_calls(cities[2].path) == 2
+  end)
+  vim.wait(200)
+  eq(errors(), {}, 'nothing said')
+  press('q')
+end)
+
+test('a failed history load is said once and all mail shows what the mailbox has', function()
+  local cities = all_mail_fixture()
+  raw_answer('bd-list', 'exit', '1', 'side city')
+  raw_answer('bd-list', 'stderr', 'store unavailable\n', 'side city')
+  preload()
+  local fwin = mailbox().open()
+  settled(fwin, 1)
+  vim.wait(100)
+  press('H')
+  wait('imd-city history listed', function()
+    return #rows(fwin) == 3
+  end)
+  wait('the failure said', function()
+    return #errors() == 1
+  end)
+  eq(rows(fwin), { ALL_MAIL[1], ALL_MAIL[2], ALL_MAIL[4] }, 'the city that answered')
+  assert(errors()[1]:find('store unavailable', 1, true), errors()[1])
+  press('R')
+  wait('loaded again', function()
+    return bd_list_calls(cities[2].path) == 2
+  end)
+  vim.wait(200)
+  eq(#errors(), 1, 'the same failure is not said again')
+  press('q')
+end)
+
+test('x marks lines in both views; a archives exactly the marked ones in one call; a late inbox answer does not bring them back', function()
+  local cities, log = city_dirs()
+  write(log, '')
+  inbox('imd-city', {
+    msg('ic-wisp-a1', { subject = 'first', created_at = '2026-10-07T13:00:00Z' }),
+    msg('ic-wisp-a2', { subject = 'second', created_at = '2026-10-07T12:00:00Z' }),
+    msg('ic-wisp-a3', { subject = 'third', created_at = '2026-10-07T11:00:00Z' }),
+  })
+  inbox('side city', {})
+  local pwin = panel().open()
+  settled(pwin, 3)
+  listed(cities)
+  local fwin = mailbox().open()
+  settled(fwin, 3)
+  vim.wait(200)
+  mark_rows(fwin, { 1, 3 })
+  local marked = { 'x ● imd-city  mayor  first', '  ● imd-city  mayor  second', 'x ● imd-city  mayor  third' }
+  eq(rows(fwin), marked, 'x in the first column of the marked lines')
+  eq(rows(pwin), marked, 'the panel shows the same marks')
+  -- A refresh that answers late, with both messages still in it.
+  raw_answer('inbox', 'delay', '1', 'imd-city')
+  local n = inbox_calls(cities[1].path)
+  press('R')
+  wait('the refresh started', function()
+    return inbox_calls(cities[1].path) == n + 1
+  end)
+  acted_many('archive', { 'ic-wisp-a1', 'ic-wisp-a3' })
+  vim.api.nvim_win_set_cursor(fwin, { 2, 0 })
+  press('a')
+  wait('archived in both views', function()
+    return #rows(fwin) == 1 and #rows(pwin) == 1
+  end)
+  eq(calls_of('archive'), { call('archive', cities[1].path, 'ic-wisp-a1', 'ic-wisp-a3', '--json') },
+    'one archive call with exactly the marked ids, in list order')
+  eq(rows(fwin), { '  ● imd-city  mayor  second' }, 'the float')
+  eq(rows(pwin), { '  ● imd-city  mayor  second' }, 'the panel')
+  vim.wait(1500) -- the refresh answers 1 s after it was made
+  eq(rows(fwin), { '  ● imd-city  mayor  second' }, 'the late answer does not bring them back to the float')
+  eq(rows(pwin), { '  ● imd-city  mayor  second' }, 'nor to the panel')
+  -- The marks went with their messages: a now acts on the line under the cursor.
+  acted('archive', 'ic-wisp-a2')
+  press('a')
+  wait('the cursor message archived', function()
+    return rows(fwin)[1] == ' no mail '
+  end)
+  eq(calls_of('archive')[2], call('archive', cities[1].path, 'ic-wisp-a2', '--json'), 'one id')
+  eq(errors(), {}, 'nothing said')
+  press('q')
+end)
+
+test('V over three lines then m marks each read with its own call, in order, one at a time; u likewise', function()
+  preload()
+  inbox('imd-city', {
+    msg('ic-wisp-a1', { subject = 'one', created_at = '2026-10-07T13:00:00Z' }),
+    msg('ic-wisp-a2', { subject = 'two', created_at = '2026-10-07T12:00:00Z' }),
+    msg('ic-wisp-a3', { subject = 'three', created_at = '2026-10-07T11:00:00Z' }),
+    msg('ic-wisp-a4', { subject = 'four', created_at = '2026-10-07T10:00:00Z' }),
+  })
+  inbox('side city', {})
+  local win = mailbox().open()
+  settled(win, 4)
+  vim.wait(200)
+  local ids = { 'ic-wisp-a1', 'ic-wisp-a2', 'ic-wisp-a3' }
+  -- Each call answers 0.3 s after it started; the next answer is put in place
+  -- once a call has read its own.
+  local function through(verb, key)
+    raw_answer(verb, 'delay', '0.3')
+    acted(verb, ids[1])
+    vim.api.nvim_win_set_cursor(win, { 1, 0 })
+    press('Vjj' .. key)
+    eq(vim.api.nvim_get_mode().mode, 'n', key .. ' leaves visual mode')
+    for i = 1, #ids do
+      wait(('%s call %d'):format(verb, i), function()
+        return #calls_of(verb) == i
+      end)
+      vim.wait(100)
+      eq(#calls_of(verb), i, verb .. ': one call at a time')
+      if ids[i + 1] then
+        acted(verb, ids[i + 1])
+      end
+    end
+    eq(vim.tbl_map(function(c)
+      return c[5]
+    end, calls_of(verb)), ids, verb .. ': one call per selected message, in list order')
+  end
+  through('mark-read', 'm')
+  wait('all three read', function()
+    return rows(win)[3] == '    imd-city  mayor  three'
+  end)
+  eq(rows(win), { '    imd-city  mayor  one', '    imd-city  mayor  two', '    imd-city  mayor  three',
+    '  ● imd-city  mayor  four' }, 'the selected three are read, the fourth is not')
+  eq(#kept_files(), 3, 'each read one is kept')
+  through('mark-unread', 'u')
+  wait('all three unread', function()
+    return rows(win)[3] == '  ● imd-city  mayor  three'
+  end)
+  eq(rows(win)[1], '  ● imd-city  mayor  one', 'unread again')
+  vim.wait(400)
+  eq(#calls_of('mark-unread'), 3, 'nothing more ran')
+  eq(errors(), {}, 'nothing said')
+  press('q')
+end)
+
+test('d with marks asks once and deletes them in one call; No deletes nothing', function()
+  preload()
+  inbox('imd-city', {
+    msg('ic-wisp-a1', { subject = 'one', created_at = '2026-10-07T13:00:00Z' }),
+    msg('ic-wisp-a2', { subject = 'two', created_at = '2026-10-07T12:00:00Z' }),
+    msg('ic-wisp-a3', { subject = 'three', created_at = '2026-10-07T11:00:00Z' }),
+  })
+  inbox('side city', {})
+  local win = mailbox().open()
+  settled(win, 3)
+  vim.wait(200)
+  mark_rows(win, { 1, 2 })
+  acted_many('delete', { 'ic-wisp-a1', 'ic-wisp-a2' })
+  local confirm = vim.fn.confirm
+  local asked = {}
+  vim.fn.confirm = function(question)
+    asked[#asked + 1] = question
+    return 2
+  end
+  press('d')
+  vim.wait(300)
+  eq(asked, { 'Delete 2 messages?' }, 'asks once for all of them')
+  eq(calls_of('delete'), {}, 'No deletes nothing')
+  eq(rows(win)[1], 'x ● imd-city  mayor  one', 'the marks stay')
+  vim.fn.confirm = function(question)
+    asked[#asked + 1] = question
+    return 1
+  end
+  press('d')
+  vim.fn.confirm = confirm
+  wait('deleted', function()
+    return #rows(win) == 1
+  end)
+  eq(#asked, 2, 'asked once more, for the second d')
+  eq(calls_of('delete'), { call('delete', '/srv/imd-city', 'ic-wisp-a1', 'ic-wisp-a2', '--json') }, 'one delete call')
+  eq(rows(win), { '  ● imd-city  mayor  three' }, 'the unmarked one stays')
+  press('q')
+end)
+
+test('an archive answer that names only one of two ids is refused, said once, and nothing changes', function()
+  preload()
+  inbox('imd-city', {
+    msg('ic-wisp-a1', { subject = 'one', created_at = '2026-10-07T13:00:00Z' }),
+    msg('ic-wisp-a2', { subject = 'two', created_at = '2026-10-07T12:00:00Z' }),
+  })
+  inbox('side city', {})
+  local win = mailbox().open()
+  settled(win, 2)
+  vim.wait(200)
+  mark_rows(win, { 1, 2 })
+  answer('archive', { command = 'mail.archive', action = 'archive', ids = { 'ic-wisp-a1' }, count = 1 })
+  press('a')
+  wait('refused', function()
+    return #errors() == 1
+  end)
+  vim.wait(200)
+  local said = errors()
+  eq(#said, 1, 'said once')
+  assert(said[1]:find('ic-wisp-a1 ic-wisp-a2', 1, true) and said[1]:find('did not name ic-wisp-a2', 1, true), said[1])
+  eq(rows(win), { 'x ● imd-city  mayor  one', 'x ● imd-city  mayor  two' }, 'both lines and marks stay')
+  eq(#calls_of('archive'), 1, 'one call, never retried')
+  press('q')
+end)
+
+test('a failed archive of one city\'s set leaves every line of it; the other city\'s set is archived in its own call', function()
+  preload()
+  inbox('imd-city', {
+    msg('ic-wisp-a1', { subject = 'one', created_at = '2026-10-07T13:00:00Z' }),
+    msg('ic-wisp-a2', { subject = 'two', created_at = '2026-10-07T12:00:00Z' }),
+  })
+  inbox('side city', {
+    msg('sc-wisp-b1', { subject = 'side one', created_at = '2026-10-07T12:30:00Z' }),
+    msg('sc-wisp-b2', { subject = 'side two', created_at = '2026-10-07T11:30:00Z' }),
+  })
+  raw_answer('archive', 'exit', '1', 'imd-city')
+  raw_answer('archive', 'stderr', 'gc mail archive: message is closed\n', 'imd-city')
+  acted_many('archive', { 'sc-wisp-b1', 'sc-wisp-b2' })
+  local win = mailbox().open()
+  settled(win, 4)
+  vim.wait(200)
+  mark_rows(win, { 1, 2, 3, 4 })
+  press('a')
+  wait('the side city set archived', function()
+    return #rows(win) == 2
+  end)
+  vim.wait(200)
+  local archives = calls_of('archive')
+  table.sort(archives, function(a, b)
+    return a[2] < b[2]
+  end)
+  eq(archives, {
+    call('archive', '/srv/imd-city', 'ic-wisp-a1', 'ic-wisp-a2', '--json'),
+    call('archive', '/srv/side city', 'sc-wisp-b1', 'sc-wisp-b2', '--json'),
+  }, 'one call per city')
+  eq(rows(win), { 'x ● imd-city  mayor  one', 'x ● imd-city  mayor  two' }, 'every line of the failed city stays')
+  local said = errors()
+  eq(#said, 1, 'said once')
+  assert(said[1]:find('ic-wisp-a1 ic-wisp-a2', 1, true) and said[1]:find('message is closed', 1, true), said[1])
+  press('q')
+end)
+
+test('a bulk archive that fails while a refresh runs leaves every line: the refresh answer does not drop them (I2)', function()
+  preload()
+  inbox('imd-city', {
+    msg('ic-wisp-a1', { subject = 'one', created_at = '2026-10-07T13:00:00Z' }),
+    msg('ic-wisp-a2', { subject = 'two', created_at = '2026-10-07T12:00:00Z' }),
+  })
+  inbox('side city', {})
+  local win = mailbox().open()
+  settled(win, 2)
+  vim.wait(200)
+  mark_rows(win, { 1, 2 })
+  -- The refresh answers after 0.5 s, while the archive (1 s) still runs; then the archive fails.
+  raw_answer('inbox', 'delay', '0.5', 'imd-city')
+  local n = inbox_calls('/srv/imd-city')
+  press('R')
+  wait('the refresh started', function()
+    return inbox_calls('/srv/imd-city') == n + 1
+  end)
+  raw_answer('archive', 'delay', '1', 'imd-city')
+  raw_answer('archive', 'exit', '1', 'imd-city')
+  raw_answer('archive', 'stderr', 'gc mail archive: store unavailable\n', 'imd-city')
+  press('a')
+  wait('the archive failure said', function()
+    return #errors_matching('cannot archive 2 messages') == 1
+  end)
+  vim.wait(200)
+  eq(#calls_of('archive'), 1, 'one archive call')
+  eq(rows(win), { 'x ● imd-city  mayor  one', 'x ● imd-city  mayor  two' }, 'both lines and their marks stay')
+  eq(#errors_matching('cannot archive'), 1, 'said once')
+  press('q')
+end)
+
+test('H before the first city list arrives loads the history of every city once the list comes', function()
+  local cities = all_mail_fixture()
+  -- A new session: no cached city list, and gc cities answers after 0.5 s.
+  fresh()
+  vim.env.FAKE_GC_CITIES_DELAY = '0.5'
+  eq(gc_mail.cached_cities(), nil, 'no cached city list')
+  local fwin = mailbox().open()
+  press('H')
+  wait('all mail once the cities arrived', function()
+    return vim.deep_equal(rows(fwin), ALL_MAIL)
+  end)
+  eq({ bd_list_calls(cities[1].path), bd_list_calls(cities[2].path) }, { 1, 1 }, 'one bd list call per city')
+  vim.wait(200)
+  eq({ bd_list_calls(cities[1].path), bd_list_calls(cities[2].path) }, { 1, 1 }, 'and no more')
+  eq(errors(), {}, 'nothing said')
+  press('q')
+end)
+
+test('X clears every mark; a mark on a message that leaves the list is dropped', function()
+  preload()
+  inbox('imd-city', {
+    msg('ic-wisp-a1', { subject = 'one', created_at = '2026-10-07T13:00:00Z' }),
+    msg('ic-wisp-a2', { subject = 'two', created_at = '2026-10-07T12:00:00Z' }),
+  })
+  inbox('side city', {})
+  local win = mailbox().open()
+  settled(win, 2)
+  vim.wait(200)
+  mark_rows(win, { 1, 2 })
+  eq(rows(win), { 'x ● imd-city  mayor  one', 'x ● imd-city  mayor  two' }, 'marked')
+  press('X')
+  eq(rows(win), { '  ● imd-city  mayor  one', '  ● imd-city  mayor  two' }, 'X clears them')
+  mark_rows(win, { 2, 1, 1 })
+  eq(rows(win), { '  ● imd-city  mayor  one', 'x ● imd-city  mayor  two' }, 'x again unmarks')
+  -- two leaves the inbox (read elsewhere and closed), then comes back unread.
+  inbox('imd-city', { msg('ic-wisp-a1', { subject = 'one', created_at = '2026-10-07T13:00:00Z' }) })
+  press('R')
+  wait('two left', function()
+    return #rows(win) == 1
+  end)
+  inbox('imd-city', {
+    msg('ic-wisp-a1', { subject = 'one', created_at = '2026-10-07T13:00:00Z' }),
+    msg('ic-wisp-a2', { subject = 'two', created_at = '2026-10-07T12:00:00Z' }),
+  })
+  vim.wait(200)
+  press('R')
+  wait('two is back', function()
+    return #rows(win) == 2
+  end)
+  eq(rows(win), { '  ● imd-city  mayor  one', '  ● imd-city  mayor  two' }, 'without its old mark')
+  press('q')
+end)
+
+test('all mail: history-only messages are archived like any other and come back closed only from a later load', function()
+  local cities = all_mail_fixture()
+  local fwin = mailbox().open()
+  settled(fwin, 1)
+  vim.wait(200)
+  press('H')
+  wait('all mail', function()
+    return #rows(fwin) == 4
+  end)
+  mark_rows(fwin, { 2, 3 })
+  acted_many('archive', { 'ic-wisp-r1' }, 'imd-city')
+  acted_many('archive', { 'sc-wisp-r2' }, 'side city')
+  press('a')
+  wait('archived', function()
+    return #rows(fwin) == 2
+  end)
+  eq(rows(fwin), { ALL_MAIL[1], ALL_MAIL[4] }, 'the two read ones left')
+  local archives = calls_of('archive')
+  table.sort(archives, function(a, b)
+    return a[2] < b[2]
+  end)
+  eq(archives, { call('archive', cities[1].path, 'ic-wisp-r1', '--json'),
+    call('archive', cities[2].path, 'sc-wisp-r2', '--json') }, 'one call per city, both through gc')
+  -- gc closed them; the next history load lists them closed.
+  bd_list('imd-city', {
+    bead('ic-wisp-u1', { title = 'unread', created_at = '2026-10-07T13:00:00Z' }),
+    bead('ic-wisp-r1', { title = 'was read', created_at = '2026-10-07T12:00:00Z', status = 'closed' }),
+    bead('ic-wisp-c1', { title = 'closed', created_at = '2026-10-07T11:00:00Z', status = 'closed' }),
+  })
+  bd_list('side city', { bead('sc-wisp-r2', { title = 'side read', created_at = '2026-10-07T11:30:00Z',
+    status = 'closed' }) })
+  local closed_now = { ALL_MAIL[1], '  × imd-city  mayor  was read', '  × side-city  mayor  side read', ALL_MAIL[4] }
+  press('R')
+  wait('listed closed', function()
+    return vim.deep_equal(rows(fwin), closed_now)
+  end)
+  -- A closed message gc refuses to archive stays, said once. Only the
+  -- refusal is counted: R's inbox calls may still be running.
+  raw_answer('archive', 'exit', '1', 'imd-city')
+  raw_answer('archive', 'stderr', 'message is closed\n', 'imd-city')
+  vim.api.nvim_win_set_cursor(fwin, { 2, 0 })
+  press('a')
+  local refusal = 'cannot archive "was read": gc mail archive in imd-city failed: message is closed'
+  wait('refused', function()
+    return #errors_matching(refusal) == 1
+  end)
+  vim.wait(200)
+  eq(rows(fwin), closed_now, 'the line stays')
+  eq(#errors_matching(refusal), 1, 'said once')
+  press('q')
+end)
+
+test('every mailbox mapping this view adds carries a gc-mail: desc, in normal and visual mode', function()
+  local cities, log = city_dirs()
+  write(log, '')
+  inbox('imd-city', { msg('ic-wisp-a1') })
+  inbox('side city', {})
+  local pwin = panel().open()
+  settled(pwin, 1)
+  listed(cities)
+  local fwin = mailbox().open()
+  settled(fwin, 1)
+  for _, win in ipairs({ fwin, pwin }) do
+    local buf = vim.api.nvim_win_get_buf(win)
+    local found = {}
+    for _, mode in ipairs({ 'n', 'x' }) do
+      for _, map in ipairs(vim.api.nvim_buf_get_keymap(buf, mode)) do
+        found[mode .. map.lhs] = map.desc
+      end
+    end
+    for _, key in ipairs({ 'nx', 'nX', 'nH', 'nm', 'nu', 'na', 'nd', 'xm', 'xu', 'xa', 'xd' }) do
+      assert(type(found[key]) == 'string' and found[key]:find('^gc%-mail: '), key .. ': ' .. tostring(found[key]))
+    end
+  end
+  press('q')
 end)
 
 local failed = 0
