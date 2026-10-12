@@ -571,6 +571,9 @@ local function on_event(this, city, event)
     if not (cached and cached.by_id and cached.by_id[m.id]) then
       history.put(city, m)
       live_changes[city.path] = live_changes[city.path] or {}
+      -- `message` is the event's own table, cached as it is: later read and
+      -- archive events mutate this same table and apply_live puts it back, so
+      -- a copy here would lose what they changed while a load is in flight
       live_changes[city.path][m.id] = { at = vim.uv.hrtime(), target = m, message = m }
     end
     render_city(city, m)
@@ -807,6 +810,7 @@ local function on_unread_message(chat)
     if row >= block.start_line and row <= block.end_line and block.message then
       local m = block.message
       local id, seq = m.id, next_seq()
+      local was_read = m.read
       -- Held out of the automatic pass (RS3) until the chat is left (RS4)
       reads[id] = { phase = 'unreading', seq = seq, owner = chat }
       set_read(chat, m, false)
@@ -818,9 +822,21 @@ local function on_unread_message(chat)
         end
         rec.answered = vim.uv.hrtime()
         if not ok then
-          rec.phase = 'read'
-          rec.owner = nil
-          set_read(chat, m, true)
+          if rec.release then
+            -- Refused after the chat was left: no record outlives it
+            reads[id] = nil
+            set_read(chat, m, was_read)
+          elseif not was_read then
+            -- Refused on a message that was unread: it stays unread, and the
+            -- record stays 'unreading' so the automatic pass (RS3) does not
+            -- mark it read while this chat is open; leaving the chat (RS4)
+            -- drops it
+            set_read(chat, m, false)
+          else
+            rec.phase = 'read'
+            rec.owner = nil
+            set_read(chat, m, true)
+          end
         elseif rec.release then
           -- RS4: the chat was left while this was pending
           reads[id] = nil

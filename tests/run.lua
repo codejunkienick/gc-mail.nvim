@@ -4842,6 +4842,182 @@ test('RS4 and RS2: a stale mark-unread answer after the chat was left drops the 
   vim.api.nvim_set_current_win(chat.origin)
 end)
 
+-- The fake gc refuses every mark-unread
+local function refuse_unread()
+  raw_answer('mark-unread', 'exit', '1\n')
+  raw_answer('mark-unread', 'stderr', 'fake mark-unread error\n')
+end
+
+local function unread_calls(id)
+  local n = 0
+  for _, c in ipairs(mail_calls()) do
+    if c[4] == 'mark-unread' and c[5] == id then
+      n = n + 1
+    end
+  end
+  return n
+end
+
+test('RS6: a refused u on a message that was unread keeps its dot, with chat_mark_read false', function()
+  local fix, _, t1 = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  refuse_unread()
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
+  preload()
+
+  local chat = require('gc_mail.chat').open('imd-city', 'mayor')
+  local win = chat.timeline_win
+  local stamp = os.date('%H:%M', t1)
+  local function dot()
+    return table.concat(lines_of(win), '\n'):find('## mayor · ' .. stamp .. ' ●', 1, true) ~= nil
+  end
+  wait('history rendered with the dot', function()
+    return header_row(win, stamp) ~= nil and dot()
+  end)
+  vim.api.nvim_set_current_win(win)
+  vim.api.nvim_win_set_cursor(win, { header_row(win, stamp), 0 })
+  vim.api.nvim_feedkeys('u', 'x', false)
+  wait('mark-unread refused', function()
+    return unread_calls('tc-wisp-m2') == 1
+  end)
+  vim.wait(300)
+  eq(dot(), true, 'the dot stays: ' .. table.concat(lines_of(win), '|'))
+  eq(read_calls('tc-wisp-m2'), 0, 'no mark-read call')
+  -- A load that lists it read takes gc's state
+  local read_fix = vim.json.decode(fix)
+  for _, m in ipairs(read_fix) do
+    if m.id == 'tc-wisp-m2' then
+      table.insert(m.labels, 'read')
+    end
+  end
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', vim.json.encode(read_fix))
+  vim.api.nvim_feedkeys('R', 'x', false)
+  wait('the load decides again', function()
+    return not dot()
+  end)
+  eq(read_calls('tc-wisp-m2'), 0, 'still no mark-read call')
+  vim.api.nvim_set_current_win(chat.origin)
+end)
+
+test('RS6: a refused u on a message that was read shows it read with no extra mark-read call', function()
+  local fix, _, _, t2 = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  acted('mark-read', 'tc-wisp-m2')
+  refuse_unread()
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = true })
+  preload()
+
+  local chat = require('gc_mail.chat').open('imd-city', 'mayor')
+  local win = chat.timeline_win
+  local stamp = os.date('%H:%M', t2)
+  wait('history rendered and tc-wisp-m2 marked read', function()
+    return header_row(win, stamp) ~= nil and read_calls('tc-wisp-m2') == 1
+  end)
+  vim.api.nvim_set_current_win(win)
+  vim.api.nvim_win_set_cursor(win, { header_row(win, stamp), 0 })
+  vim.api.nvim_feedkeys('u', 'x', false)
+  wait('mark-unread refused', function()
+    return unread_calls('tc-wisp-m3') == 1
+  end)
+  vim.wait(300)
+  local text = table.concat(lines_of(win), '\n')
+  eq(text:find('## mayor · ' .. stamp, 1, true) ~= nil, true, 'the message is shown')
+  eq(text:find('## mayor · ' .. stamp .. ' ●', 1, true), nil, 'it shows read')
+  eq(read_calls('tc-wisp-m3'), 0, 'no mark-read call for it')
+  eq(read_calls('tc-wisp-m2'), 1, 'and none again for the other')
+  vim.api.nvim_set_current_win(chat.origin)
+end)
+
+test('RS6: with chat_mark_read true a refused u on a message that was unread keeps its dot and is not marked read', function()
+  local fix, _, _, t2 = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  acted('mark-read', 'tc-wisp-m2')
+  acted('mark-unread', 'tc-wisp-m3')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = true })
+  preload()
+
+  local chat = require('gc_mail.chat').open('imd-city', 'mayor')
+  local win = chat.timeline_win
+  local stamp = os.date('%H:%M', t2)
+  local function dot()
+    return table.concat(lines_of(win), '\n'):find('## mayor · ' .. stamp .. ' ●', 1, true) ~= nil
+  end
+  wait('history rendered and the unread message marked read', function()
+    return header_row(win, stamp) ~= nil and read_calls('tc-wisp-m2') == 1
+  end)
+  vim.api.nvim_set_current_win(win)
+  vim.api.nvim_win_set_cursor(win, { header_row(win, stamp), 0 })
+  -- The first u is accepted: unread, held out of the automatic pass
+  vim.api.nvim_feedkeys('u', 'x', false)
+  wait('the first mark-unread answered', function()
+    return unread_calls('tc-wisp-m3') == 1 and dot()
+  end)
+  vim.wait(200)
+  -- The second u is refused: the message was unread, so it stays unread and
+  -- the automatic pass does not mark it read while the chat is open
+  refuse_unread()
+  vim.api.nvim_win_set_cursor(win, { header_row(win, stamp), 0 })
+  vim.api.nvim_feedkeys('u', 'x', false)
+  wait('the second mark-unread refused', function()
+    return unread_calls('tc-wisp-m3') == 2
+  end)
+  vim.wait(500)
+  eq(dot(), true, 'the dot stays: ' .. table.concat(lines_of(win), '|'))
+  eq(read_calls('tc-wisp-m3'), 0, 'no mark-read call for it')
+  -- Leaving the chat releases it (RS4): entering again marks it read
+  vim.api.nvim_set_current_win(chat.origin)
+  vim.wait(100)
+  vim.api.nvim_set_current_win(win)
+  wait('entering the chat again marks it read', function()
+    return read_calls('tc-wisp-m3') == 1
+  end)
+  vim.api.nvim_set_current_win(chat.origin)
+end)
+
+test('RS4 and RS6: a refusal that arrives after the chat was left leaves no record', function()
+  local fix, _, _, t2 = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  refuse_unread()
+  raw_answer('mark-unread', 'delay', '0.6\n')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
+  preload()
+
+  local chat = require('gc_mail.chat').open('imd-city', 'mayor')
+  local win = chat.timeline_win
+  local stamp = os.date('%H:%M', t2)
+  local function dot()
+    return table.concat(lines_of(win), '\n'):find('## mayor · ' .. stamp .. ' ●', 1, true) ~= nil
+  end
+  wait('history rendered', function()
+    return header_row(win, stamp) ~= nil
+  end)
+  vim.api.nvim_set_current_win(win)
+  vim.api.nvim_win_set_cursor(win, { header_row(win, stamp), 0 })
+  vim.api.nvim_feedkeys('u', 'x', false)
+  eq(dot(), true, 'unread while the u is pending')
+  -- The chat is left while the u is pending
+  vim.api.nvim_set_current_win(chat.origin)
+  vim.wait(100)
+  -- A load that began before the refusal lists the message unread and ends
+  -- after it: with no record kept, gc's list decides
+  local unread = vim.json.decode(fix)
+  for _, m in ipairs(unread) do
+    if m.id == 'tc-wisp-m3' then
+      m.labels = {}
+    end
+  end
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', vim.json.encode(unread))
+  raw_answer('bd-list', 'delay', '1\n', 'imd-city')
+  vim.api.nvim_set_current_win(win)
+  vim.api.nvim_feedkeys('R', 'x', false)
+  vim.api.nvim_set_current_win(chat.origin)
+  wait('mark-unread refused', function()
+    return unread_calls('tc-wisp-m3') == 1
+  end)
+  vim.wait(1500)
+  eq(dot(), true, 'the list decides: ' .. table.concat(lines_of(win), '|'))
+end)
+
 test('RS5: the load after a send keeps a pending mark-read from bringing the dot back', function()
   local fix, _, t1 = conversation_fixture()
   write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
@@ -5559,6 +5735,50 @@ test('chat live: a load that began before an event never takes back what the eve
     return lines_of(chat.timeline_win)[7] == m2 .. ' ●'
   end)
 end)
+
+-- A new message an event brought in while a slow load is in flight, then the
+-- events that changed it: the heading shows the same dot and closed mark while
+-- the load runs and after it ends, with no other load. The chat keeps the
+-- event's own table for it; a copy would lose what the later events changed.
+for _, case in ipairs({
+  { 'no later event', '', ' ●' },
+  { 'mark-read', id_line('mail.marked_read', 'tc-wisp-live1'), '' },
+  { 'read', id_line('mail.read', 'tc-wisp-live1'), '' },
+  { 'archived', id_line('mail.archived', 'tc-wisp-live1'), ' (closed) ●' },
+  { 'read and deleted', id_line('mail.read', 'tc-wisp-live1') .. id_line('mail.deleted', 'tc-wisp-live1'), ' (closed)' },
+}) do
+  local name, later, suffix = case[1], case[2], case[3]
+  test('chat live: a new message then ' .. name .. ' during a slow load keeps its dot and closed mark', function()
+    local chat = live_chat()
+    local path = chat.cities[1].path
+    local when = os.time()
+    local heading = '## mayor · ' .. os.date('%H:%M', when) .. suffix
+    local function live_heading()
+      local lines = lines_of(chat.timeline_win)
+      for i, l in ipairs(lines) do
+        if l == 'live body' then
+          return lines[i - 4]
+        end
+      end
+    end
+    write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.delay', '1\n')
+    vim.api.nvim_set_current_win(chat.timeline_win)
+    vim.api.nvim_feedkeys('R', 'x', false)
+    wait('the slow load started', function()
+      return bd_list_calls(path) == 2
+    end)
+    vim.wait(200)
+    append(chat.log, message_line('mail.replied', { id = 'tc-wisp-live1', subject = 'live',
+      body = 'live body', created_at = os.date('!%Y-%m-%dT%H:%M:%SZ', when) }) .. later)
+    wait('the events show while the load runs', function()
+      return live_heading() == heading
+    end, 1000)
+    eq(bd_list_calls(path), 2, 'the load is still the only one')
+    vim.wait(1500)
+    eq(bd_list_calls(path), 2, 'the slow load ended with no other load')
+    eq(live_heading(), heading, 'the same heading after the load ends: ' .. table.concat(lines_of(chat.timeline_win), '|'))
+  end)
+end
 
 test('chat live: a read event moves the dot of a message the chat marked read itself', function()
   acted('mark-read', 'tc-wisp-m2')
