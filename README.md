@@ -176,6 +176,7 @@ Two invariants hold every gc answer to what it may change:
 | `r` | reply: a new buffer with `Re: <subject>`; `<Space>mm` (or `:GcMail`) in it queues the reply | `mail reply <id> -s <subject> -m <body> --notify`, from the send queue |
 | `t` | the thread, oldest first, in a new window | load from the bead store (`gc bd list`); `mail thread <id>` if no thread id |
 | `c` | open the chat with the message's sender in its city (with the recipient, for a message from you); the float closes first | none (the chat loads its own history) |
+| `s` | search the mail history of every city (asks for the text; see [Search](#search)) | none until a city's history is not cached, then one `bd list` |
 | `m` | mark read | `mail mark-read <id>` |
 | `u` | mark unread | `mail mark-unread <id>` |
 | `a` | archive | `mail archive <id>` |
@@ -257,7 +258,7 @@ notes.md
  ● imd-city  mayor  Re: mail panel  2m
    imd-city  mayor  Deploy plan accepted  1h
 
- gc mail: <CR> open  r reply  t thread  c chat  m read  u unread  a archive  d delete  p preview  R refresh  q close
+ gc mail: <CR> open  r reply  t thread  c chat  s search  m read  u unread  a archive  d delete  p preview  R refresh  q close
 ```
 
 It is a second view of the mailbox, not a copy: the same `gc mail inbox`
@@ -455,6 +456,31 @@ placing the cursor in the compose box in normal mode.
   `<CR>` closes it and opens that chat; `q` and `<Esc>` close it. `c` in the mailbox
   float, the message view and the panel opens the chat with the message's sender
   (or, for a message from you, its recipient) in the message's city.
+
+## Search
+
+`:GcMailSearch <text>` (the whole argument, trimmed; no text is refused with a
+notice), or `s` in the mailbox float and the panel (which ask for the text with
+`vim.ui.input`; an empty answer cancels), searches the mail history of every
+city: the text is found case-insensitively, as plain text (no regular
+expressions), in the subject, body, sender and recipient of every message in the
+history cache. A city whose history is not cached is loaded once first (one
+`gc bd list`, see [History](#history)) and searched when its answer arrives; the
+cache holds the last `history_days` days. Nothing runs at load time: the search
+module loads when the command or the key runs.
+
+The results float opens at once with ` searching… ` and fills in, titled
+` gc mail search "<text>": <CR> open  c chat  q close `: one line per hit, newest
+first, ` <city>  <from>→<to>  <subject>  <age> ` (`you` for human, every part one
+sanitized line, the subject cut at 60 characters), or ` no mail matches `. A city
+that fails to load is said once as an error and listed as `cannot load the
+history`; the other cities' hits still show.
+
+| key | action | gc |
+| --- | --- | --- |
+| `<CR>` | close the results and show the hit in the message view: the same layout and keys as an opened message, but nothing is marked read, as the message may be closed | none |
+| `c` | open the chat with the hit's correspondent (its sender, or its recipient for a message from you); says so when the chat is not installed | none |
+| `q`, `<Esc>` | close | |
 
 ## The send queue
 

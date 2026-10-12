@@ -55,7 +55,7 @@ M.dir = dir
 
 local first_lines = queue.first_lines
 local RECIPIENT = 'human'
-local TITLE = ' gc mail: <CR> open  r reply  t thread  c chat  m read  u unread  a archive  d delete  R refresh '
+local TITLE = ' gc mail: <CR> open  r reply  t thread  c chat  s search  m read  u unread  a archive  d delete  R refresh '
 local LOADING = ' loading… '
 local EMPTY = ' no mail '
 local KEYS_HINT = 'r reply  t thread  c chat  u unread  a archive  d delete  q close'
@@ -66,6 +66,7 @@ local READ_NOTE = 'Read mail stays in this mailbox until you archive or delete i
 M.KEY_DESC = {
   ['<CR>'] = 'open message', r = 'reply', t = 'open thread', c = 'open chat with the sender', m = 'mark read',
   u = 'mark unread', a = 'archive', d = 'delete', p = 'toggle preview', R = 'refresh', q = 'close',
+  s = 'search the mail history',
 }
 
 local function notify(message, level)
@@ -740,11 +741,9 @@ end
 
 local actions = {}
 
--- Opens `entry` in a scratch buffer at once, from what the mailbox already
--- holds, and marks it read in gc in the background (one `gc mail read`; a
--- message already read here runs nothing). `split`, here and in thread and
--- reply, opens the window (new_window).
-function actions.open(entry, split)
+-- `entry` in a scratch buffer at once, from what the mailbox already holds;
+-- `split`, here and in thread and reply, opens the window (new_window).
+local function message_view(entry, split)
   local lines
   if markdown() then
     lines = message_markdown(entry.message, entry.city)
@@ -763,6 +762,20 @@ function actions.open(entry, split)
     a = function() actions.archive(entry) end,
     d = function() actions.delete(entry) end,
   }, split, markdown() and 'markdown' or nil)
+  return buf
+end
+
+--- Shows `entry` (a hit of the search or any { city, message, read }) in the
+--- message view and calls no gc: nothing is marked read, as the message may be
+--- closed. The keys are the view's.
+function M.show(entry, split)
+  return message_view(entry, split)
+end
+
+-- Opens `entry` in the message view at once and marks it read in gc in the
+-- background (one `gc mail read`; a message already read here runs nothing).
+function actions.open(entry, split)
+  local buf = message_view(entry, split)
   if not entry.read then
     local at = started(entry)
     run(entry.city, 'read', entry.message.id, function(message, err)
@@ -954,6 +967,9 @@ function M.open()
       picker.close()
       actions.chat(entry)
     end),
+    s = function()
+      require('gc_mail.search').prompt()
+    end,
     m = on(actions.read),
     u = on(actions.unread),
     a = on(actions.archive),

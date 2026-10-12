@@ -231,6 +231,7 @@ test('nothing runs at load time and setup maps <Space>mm, <Space>mi, <Space>mp a
   eq(vim.fn.maparg('<Space>mp', 'n') ~= '', true, 'default panel keymap missing')
   eq(vim.fn.exists(':GcMailChat'), 2, ':GcMailChat missing')
   eq(vim.fn.exists(':GcMailChats'), 2, ':GcMailChats missing')
+  eq(vim.fn.exists(':GcMailSearch'), 2, ':GcMailSearch missing')
   eq(vim.fn.maparg('<Space>ml', 'n') ~= '', true, 'default chats keymap missing')
   eq(vim.fn.maparg('<Space>mc', 'n') ~= '', true, 'default chat keymap missing')
   -- After startup the list is preloaded in the background.
@@ -255,6 +256,7 @@ test('nothing runs at load time and setup maps <Space>mm, <Space>mi, <Space>mp a
   eq(package.loaded['gc_mail.events'], nil, 'setup loaded events')
   eq(package.loaded['gc_mail.history'], nil, 'history loaded at load time')
   eq(package.loaded['gc_mail.chat'], nil, 'chat loaded at load time')
+  eq(package.loaded['gc_mail.search'], nil, 'search loaded at load time')
   local bad_zero = pcall(gc_mail.setup, { history_days = 0 })
   eq(bad_zero, false, 'setup refuses history_days = 0')
   local bad_str = pcall(gc_mail.setup, { history_days = 'x' })
@@ -6058,6 +6060,274 @@ test('setup({ chats_keymap = false }) maps nothing, a bad value is refused, and 
   local ok, err = pcall(gc_mail.setup, { chats_keymap = '' })
   eq(ok, false, 'an empty chats_keymap is refused')
   eq(tostring(err):find('chats_keymap', 1, true) ~= nil, true, 'the refusal names it')
+end)
+
+-- ---- the mail search ----------------------------------------------------------
+
+-- A bd list record of a mail message, `ago` seconds old, with a body of its own.
+local function found_mail(id, sender, assignee, title, body, ago)
+  return { id = id, title = title, sender = sender, assignee = assignee, status = 'open', description = body,
+    created_at = os.date('!%Y-%m-%dT%H:%M:%SZ', os.time() - ago), labels = {}, issue_type = 'message' }
+end
+
+-- Hits for "markdown": side-city by subject (upper case), imd-city by subject,
+-- by sender and by body; one more sent by human, to the reviewer.
+local function search_fixture()
+  local cities = city_dirs()
+  local imd = {
+    found_mail('ic-wisp-s1', 'mayor', 'human', 'Markdown renderer ready', 'it is done', 3600),
+    found_mail('ic-wisp-s3', 'markdown-bot', 'human', 'Nightly', 'all green', 2 * 3600),
+    found_mail('ic-wisp-s2', 'builder', 'human', 'Weekly build', 'the changelog is in markdown', 3 * 3600),
+    found_mail('ic-wisp-s4', 'mayor', 'human', 'Deploy plan', 'freeze at ten', 4 * 3600),
+  }
+  local side = {
+    found_mail('ic-wisp-s5', 'planner', 'human', 'MARKDOWN spec', 'draft', 1800),
+    found_mail('ic-wisp-s6', 'human', 'reviewer', 'A question', 'is the Markdown table fine?', 5 * 3600),
+  }
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', vim.json.encode(imd))
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.side city.json', vim.json.encode(side))
+  return cities, imd
+end
+
+local SEARCH_LINES = {
+  ' side-city  planner→you  MARKDOWN spec  30m ',
+  ' imd-city  mayor→you  Markdown renderer ready  1h ',
+  ' imd-city  markdown-bot→you  Nightly  2h ',
+  ' imd-city  builder→you  Weekly build  3h ',
+  ' side-city  you→reviewer  A question  5h ',
+}
+
+-- The results float for `text`, once it shows `count` lines (the hits arrive city by city).
+local function search_open(text, count)
+  vim.cmd('GcMailSearch ' .. text)
+  local win = vim.api.nvim_get_current_win()
+  wait('the hits arrive', function()
+    return #lines_of(win) == (count or 5) and lines_of(win)[1] ~= ' searching… '
+  end)
+  return win
+end
+
+test(':GcMailSearch lists the hits across cities newest first, one bd list per city, case-insensitive', function()
+  local cities = search_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.delay', '0.4\n')
+  vim.cmd('GcMailSearch markdown')
+  local win = vim.api.nvim_get_current_win()
+  eq(#floats(), 1, 'the float is open')
+  eq(vim.api.nvim_win_get_config(win).title[1][1], ' gc mail search "markdown": <CR> open  c chat  q close ', 'its title')
+  eq(lines_of(win), { ' searching… ' }, 'searching… at once')
+  wait('the hits arrive', function()
+    return #lines_of(win) == 5
+  end)
+  eq(lines_of(win), SEARCH_LINES, 'one line per hit: a subject, a sender, a body, both cases')
+  vim.wait(200)
+  eq({ bd_list_calls(cities[1].path), bd_list_calls(cities[2].path) }, { 1, 1 }, 'one bd list call per city')
+  vim.api.nvim_feedkeys('q', 'x', false)
+  eq(#floats(), 0, 'q closes')
+
+  -- Searched again from the cache: the same lines, no more calls
+  win = search_open('MARKDOWN')
+  eq(lines_of(win), SEARCH_LINES, 'the same hits from the cache')
+  vim.api.nvim_feedkeys(vim.keycode('<Esc>'), 'x', false)
+  win = search_open('no-such-word-anywhere', 1)
+  eq(lines_of(win), { ' no mail matches ' }, 'a word in no message')
+  vim.api.nvim_feedkeys('q', 'x', false)
+  vim.wait(200)
+  eq({ bd_list_calls(cities[1].path), bd_list_calls(cities[2].path) }, { 1, 1 }, 'still one load each')
+
+  -- Sender and recipient are searched too
+  win = search_open('reviewer', 1)
+  eq(lines_of(win), { SEARCH_LINES[5] }, 'a recipient')
+  vim.api.nvim_feedkeys('q', 'x', false)
+end)
+
+test(':GcMailSearch without text is refused', function()
+  search_fixture()
+  eq(pcall(vim.cmd, 'GcMailSearch'), false, 'the command needs an argument')
+  eq(require('gc_mail.search').run('   '), nil, 'a blank text opens nothing')
+  eq(#floats(), 0, 'no float')
+  eq(notes[#notes].level, vim.log.levels.WARN, 'a notice says so')
+  eq(notes[#notes].message:find('nothing to search', 1, true) ~= nil, true, notes[#notes].message)
+  eq(#mail_calls(), 0, 'and nothing ran')
+end)
+
+test('<CR> on a hit shows the message in the render-only view, with no gc mail read', function()
+  local _, imd = search_fixture()
+  local win = search_open('markdown')
+  vim.api.nvim_win_set_cursor(win, { 2, 0 })
+  vim.api.nvim_feedkeys(vim.keycode('<CR>'), 'x', false)
+  eq(#floats(), 0, 'the float is closed')
+  local buf = vim.api.nvim_get_current_buf()
+  eq(vim.api.nvim_buf_get_name(buf):match('gc%-mail://imd%-city/ic%-wisp%-s1') ~= nil, true, 'the message view')
+  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  eq(lines[1], '# Markdown renderer ready', 'the title')
+  eq(lines[3], '**From** mayor · **To** human · **City** imd-city · ' .. imd[1].created_at, 'the sender line')
+  eq(lines[#lines], 'it is done', 'the body verbatim')
+  eq(vim.bo[buf].filetype, 'markdown', 'a markdown view')
+  vim.wait(300)
+  eq(vim.tbl_filter(function(c)
+    return c[4] == 'read' or c[4] == 'mark-read'
+  end, mail_calls()), {}, 'no gc mail read call')
+  -- The view's keys
+  local keys = {}
+  for _, map in ipairs(vim.api.nvim_buf_get_keymap(buf, 'n')) do
+    -- The markdown ftplugin adds its own outline keys
+    if not vim.tbl_contains({ '[[', ']]', 'gO' }, map.lhs) then
+      keys[#keys + 1] = map.lhs
+    end
+  end
+  table.sort(keys)
+  eq(keys, { 'a', 'c', 'd', 'q', 'r', 't', 'u' }, 'the keys of the message view')
+end)
+
+test('c on a hit opens the chat with its correspondent, the recipient for a message from you', function()
+  search_fixture()
+  local win = search_open('markdown')
+  vim.api.nvim_win_set_cursor(win, { 2, 0 })
+  vim.api.nvim_feedkeys('c', 'x', false)
+  eq(#floats(), 0, 'the float is closed')
+  eq(chat_timeline_names(), { 'imd-city/chat/mayor' }, 'the chat with the sender')
+  vim.cmd('silent! only')
+  win = search_open('markdown')
+  vim.api.nvim_win_set_cursor(win, { 5, 0 })
+  vim.api.nvim_feedkeys('c', 'x', false)
+  eq(vim.tbl_contains(chat_timeline_names(), 'side-city/chat/reviewer'), true, 'the recipient of a message from you')
+  vim.cmd('silent! only')
+  -- Without the chat module: said, and the float stays
+  package.loaded['gc_mail.chat'] = nil
+  package.preload['gc_mail.chat'] = function()
+    error('not installed')
+  end
+  win = search_open('markdown')
+  vim.api.nvim_feedkeys('c', 'x', false)
+  package.preload['gc_mail.chat'] = nil
+  package.loaded['gc_mail.chat'] = nil
+  eq(notes[#notes].message, 'gc-mail: the chat is not installed', 'said')
+  eq(vim.api.nvim_win_is_valid(win), true, 'the float stays')
+  vim.api.nvim_feedkeys('q', 'x', false)
+  require('gc_mail.chat')
+end)
+
+test('s in the mailbox float and in the panel asks for the text and opens the same results', function()
+  local cities = search_fixture()
+  inbox('imd-city', { msg('ic-wisp-a1', { subject = 'first' }) })
+  inbox('side city', {})
+  local asked = {}
+  local answer
+  local real_input = vim.ui.input
+  vim.ui.input = function(opts, on_confirm)
+    asked[#asked + 1] = opts.prompt
+    on_confirm(answer)
+  end
+  local ok, err = pcall(function()
+    local win = mailbox().open()
+    settled(win, 1)
+    -- An empty answer cancels
+    answer = ''
+    vim.api.nvim_feedkeys('s', 'x', false)
+    eq(#floats(), 1, 'cancelled: only the mailbox float')
+    answer = 'markdown'
+    vim.api.nvim_feedkeys('s', 'x', false)
+    local results = vim.api.nvim_get_current_win()
+    wait('the results arrive', function()
+      return #lines_of(results) == 5
+    end)
+    eq(lines_of(results), SEARCH_LINES, 'the results of the search')
+    eq(#asked, 2, 'asked each time')
+    vim.api.nvim_feedkeys('q', 'x', false)
+    vim.cmd('silent! only')
+
+    local pwin = panel().open()
+    listed(cities)
+    settled(pwin, 1)
+    vim.api.nvim_set_current_win(pwin)
+    answer = 'markdown'
+    vim.api.nvim_feedkeys('s', 'x', false)
+    results = vim.api.nvim_get_current_win()
+    wait('the panel results arrive', function()
+      return #lines_of(results) == 5
+    end)
+    eq(lines_of(results), SEARCH_LINES, 'the same results from the panel')
+    eq(vim.api.nvim_win_is_valid(pwin), true, 'the panel stays')
+  end)
+  vim.ui.input = real_input
+  assert(ok, err)
+end)
+
+test('a failed load for one city is said once and the other city\'s hits still list', function()
+  local cities = search_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.side city.exit', '1\n')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.side city.stderr', 'store unavailable\n')
+  vim.cmd('GcMailSearch markdown')
+  local win = vim.api.nvim_get_current_win()
+  wait('both answered', function()
+    return bd_list_calls(cities[1].path) == 1 and bd_list_calls(cities[2].path) == 1 and #lines_of(win) == 4
+  end)
+  vim.wait(300)
+  eq(lines_of(win), { SEARCH_LINES[2], SEARCH_LINES[3], SEARCH_LINES[4], ' side-city  cannot load the history ' },
+    'the other city lists, the failed one says so')
+  local errors = vim.tbl_filter(function(note)
+    return note.level == vim.log.levels.ERROR
+  end, notes)
+  eq(#errors, 1, 'said once')
+  eq(errors[1].message:find('store unavailable', 1, true) ~= nil, true, errors[1].message)
+  vim.api.nvim_feedkeys('q', 'x', false)
+end)
+
+test('a city registered after the list was cached is searched too, and a failed refresh keeps the cached cities', function()
+  local cities = search_fixture()
+  local gc_mail = require('gc_mail')
+  eq(#gc_mail.cached_cities(), 2, 'the cached list has two cities')
+  local late_path = vim.fn.fnamemodify(cities[1].path, ':h') .. '/late-city'
+  vim.fn.mkdir(late_path .. '/.gc', 'p')
+  local all = vim.list_extend(vim.deepcopy(cities), { { name = 'late-city', path = late_path } })
+  write(vim.env.FAKE_GC_CITIES, cities_record(all))
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.late-city.json',
+    vim.json.encode({ found_mail('ic-wisp-s7', 'mayor', 'human', 'Markdown late', 'x', 60) }))
+  local win = search_open('markdown', 6)
+  eq(lines_of(win)[1], ' late-city  mayor→you  Markdown late  1m ', 'the newly registered city is searched')
+  eq(#gc_mail.cached_cities(), 3, 'the refresh replaced the cached list')
+  eq(bd_list_calls(late_path), 1, 'one bd list for the new city')
+  vim.api.nvim_feedkeys('q', 'x', false)
+
+  -- gc cities failing leaves the cached list searched, said once as a warning
+  notes = {}
+  vim.env.FAKE_GC_CITIES_EXIT = '1'
+  win = search_open('markdown', 6)
+  vim.wait(200)
+  local warns = vim.tbl_filter(function(note)
+    return note.level == vim.log.levels.WARN
+  end, notes)
+  eq(#warns, 1, 'the failed refresh is said once')
+  eq(warns[1].message:find('not refreshed', 1, true) ~= nil, true, warns[1].message)
+  eq(#lines_of(win), 6, 'the cached cities are still searched')
+  vim.api.nvim_feedkeys('q', 'x', false)
+  vim.env.FAKE_GC_CITIES_EXIT = nil
+end)
+
+test('every mapping of the search results and of the s key carries a gc-mail: desc', function()
+  search_fixture()
+  inbox('imd-city', { msg('ic-wisp-a1', { subject = 'first' }) })
+  inbox('side city', {})
+  local win = search_open('markdown')
+  for _, lhs in ipairs({ '<CR>', 'c', 'q', '<Esc>' }) do
+    local desc
+    for _, map in ipairs(vim.api.nvim_buf_get_keymap(vim.api.nvim_win_get_buf(win), 'n')) do
+      if map.lhs == lhs then
+        desc = map.desc
+      end
+    end
+    eq(type(desc) == 'string' and desc:sub(1, 9) == 'gc-mail: ', true, ('mapping %s has a gc-mail: desc, got %s'):format(lhs, tostring(desc)))
+  end
+  vim.api.nvim_feedkeys('q', 'x', false)
+  local mwin = mailbox().open()
+  settled(mwin, 1)
+  local desc
+  for _, map in ipairs(vim.api.nvim_buf_get_keymap(vim.api.nvim_win_get_buf(mwin), 'n')) do
+    if map.lhs == 's' then
+      desc = map.desc
+    end
+  end
+  eq(type(desc) == 'string' and desc:sub(1, 9) == 'gc-mail: ', true, 'the s key of the mailbox float: ' .. tostring(desc))
 end)
 
 local failed = 0

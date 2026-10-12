@@ -22,7 +22,7 @@ local M = {}
 
 local uv = vim.uv
 
-local TITLE = ' gc mail: <CR> open  r reply  t thread  c chat  m read  u unread  a archive  d delete  p preview  R refresh  q close '
+local TITLE = ' gc mail: <CR> open  r reply  t thread  c chat  s search  m read  u unread  a archive  d delete  p preview  R refresh  q close '
 
 local config = {
   poll_ms = nil, -- default: gc_mail.config.panel_poll_ms
@@ -341,6 +341,9 @@ local function keys(panel)
     r = on(function(entry) actions.reply(entry, split_above(panel)) end),
     t = on(function(entry) actions.thread(entry, split_above(panel)) end),
     c = on(function(entry) actions.chat(entry, beside(panel)) end),
+    s = function()
+      require('gc_mail.search').prompt()
+    end,
     m = on(actions.read),
     u = on(actions.unread),
     a = on(actions.archive),

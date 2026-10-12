@@ -1,5 +1,5 @@
--- :GcMail, :GcMailQueue, :GcMailbox, :GcMailPanel, :GcMailChat and
--- :GcMailChats work without setup(); the module loads only when one runs.
+-- :GcMail, :GcMailQueue, :GcMailbox, :GcMailPanel, :GcMailChat, :GcMailChats
+-- and :GcMailSearch work without setup(); the module loads only when one runs.
 -- setup() adds the <Space>mm, <Space>mi, <Space>mp, <Space>mc and <Space>ml
 -- mappings, resumes the send queue and preloads the city list after startup.
 vim.api.nvim_create_user_command('GcMail', function(opts)
@@ -21,3 +21,6 @@ end, { desc = 'Open the gc chat window', nargs = '*' })
 vim.api.nvim_create_user_command('GcMailChats', function()
   require('gc_mail.chat').open_list()
 end, { desc = 'List the gc conversations with their unread counts' })
+vim.api.nvim_create_user_command('GcMailSearch', function(opts)
+  require('gc_mail.search').run(opts.args)
+end, { desc = 'Search the mail history of every city', nargs = '+' })
