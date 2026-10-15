@@ -124,11 +124,6 @@ function M.run(text)
       if not hit then
         return
       end
-      -- Required here, on the key, never at load
-      local ok, chat = pcall(require, 'gc_mail.chat')
-      if not ok or type(chat) ~= 'table' then
-        return notify('the chat is not installed', vim.log.levels.WARN)
-      end
       p.close()
       mailbox.actions.chat(hit)
     end,

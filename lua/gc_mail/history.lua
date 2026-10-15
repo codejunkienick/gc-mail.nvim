@@ -76,14 +76,13 @@ function M.load(city, opts, on_done)
   if opts.thread then
     argv = { 'gc', '--city', city.path, 'bd', 'list', '--type', 'message', '--all', '--json', '--limit', '0', '-l', 'thread:' .. opts.thread }
   else
-    local gc_mail = package.loaded['gc_mail']
-    local days = config.days or (gc_mail and gc_mail.config and gc_mail.config.history_days) or 14
+    local days = config.days or require('gc_mail').config.history_days
     local cutoff = os.time() - days * 86400
     local t_stamp = os.date('!%Y-%m-%dT%H:%M:%SZ', cutoff)
     argv = { 'gc', '--city', city.path, 'bd', 'list', '--type', 'message', '--all', '--json', '--limit', '0', '--created-after', t_stamp }
   end
 
-  local timeout_ms = config.timeout_ms or 10000
+  local timeout_ms = config.timeout_ms
   local what = ('gc bd list in %s'):format(city.name)
 
   local function finish(list, err, skipped)
@@ -213,7 +212,7 @@ function M.load(city, opts, on_done)
       if opts.thread then
         local cache_entry = M.cache[city.path]
         if not cache_entry then
-          cache_entry = { by_id = {}, loaded_at = os.time() }
+          cache_entry = { by_id = {} }
           M.cache[city.path] = cache_entry
         end
         for _, msg in ipairs(list) do
@@ -224,7 +223,7 @@ function M.load(city, opts, on_done)
         for _, msg in ipairs(list) do
           by_id[msg.id] = msg
         end
-        M.cache[city.path] = { by_id = by_id, loaded_at = os.time(), loaded_since = started }
+        M.cache[city.path] = { by_id = by_id, loaded_since = started }
       end
 
       if skipped > 0 and not said_skipped[city.path] then
@@ -245,7 +244,7 @@ end
 function M.put(city, message)
   local entry = M.cache[city.path]
   if not entry then
-    entry = { by_id = {}, loaded_at = os.time() }
+    entry = { by_id = {} }
     M.cache[city.path] = entry
   end
   entry.by_id[message.id] = message

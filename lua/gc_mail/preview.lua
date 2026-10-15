@@ -71,7 +71,7 @@ function M.attach(opts)
   local shown = require('gc_mail').config.preview ~= false
   local closed = false
   local pane_win, pane_buf
-  local last, said
+  local last
   local timer = uv.new_timer()
   local group = vim.api.nvim_create_augroup('gc_mail_preview_' .. list_buf, { clear = true })
 
@@ -185,16 +185,7 @@ function M.attach(opts)
     if not entry then
       return show({ '' })
     end
-    local ok, lines = pcall(function()
-      return require('gc_mail.mailbox').body_lines(entry.message.body)
-    end)
-    if not ok then
-      if not said then
-        said = true
-        vim.notify('gc-mail: cannot show the preview: ' .. tostring(lines), vim.log.levels.ERROR)
-      end
-      return show({ '' })
-    end
+    local lines = require('gc_mail.mailbox').body_lines(entry.message.body)
     if vim.trim(entry.message.body) == '' then
       return show({ EMPTY }, true)
     end

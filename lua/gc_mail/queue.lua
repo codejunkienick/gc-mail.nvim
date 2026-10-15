@@ -121,10 +121,6 @@ function M.configure(opts)
   worker.stopped = false
 end
 
-function M.dir()
-  return config.dir
-end
-
 local function first_lines(text, count)
   local lines = {}
   for line in (text or ''):gmatch('[^\n]+') do

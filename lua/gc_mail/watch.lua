@@ -107,11 +107,10 @@ end
 -- message itself. The chat is not required here.
 local function in_chat(city, from)
   local chat = package.loaded['gc_mail.chat']
-  if type(chat) ~= 'table' or type(chat.is_current) ~= 'function' then
+  if not chat then
     return false
   end
-  local ok, current = pcall(chat.is_current, city, from)
-  return ok and current == true
+  return chat.is_current(city, from) == true
 end
 
 local function bump(w, by)

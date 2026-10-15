@@ -734,11 +734,9 @@ end
 local function send_keycodes()
   local codes = {}
   local cfg = gc_mail.config.chat_send_keys
-  if cfg ~= false and type(cfg) == 'table' then
+  if cfg ~= false then
     for _, key in ipairs(cfg) do
-      if type(key) == 'string' and key ~= '' then
-        codes[#codes + 1] = vim.keycode(key)
-      end
+      codes[#codes + 1] = vim.keycode(key)
     end
   end
   return codes
@@ -849,7 +847,7 @@ function M.render(chat)
     }
   else
     for _, q in ipairs(queue_entries) do
-      if not q.record or q.error then
+      if not q.record then
         relevant_queue[#relevant_queue + 1] = {
           unreadable = true,
           record = {
@@ -860,7 +858,7 @@ function M.render(chat)
         }
       else
         local rec = q.record
-        if type(rec) == 'table' and type(rec.city) == 'table' and rec.city.path == chat.city.path then
+        if rec.city.path == chat.city.path then
           local to = rec.to or 'mayor'
           local is_match = false
           if rec.reply_to == nil and to == chat.with then
@@ -871,15 +869,6 @@ function M.render(chat)
           if is_match and not is_queue_hidden(rec, history_messages) then
             relevant_queue[#relevant_queue + 1] = q
           end
-        elseif type(rec) ~= 'table' or type(rec.city) ~= 'table' then
-          relevant_queue[#relevant_queue + 1] = {
-            unreadable = true,
-            record = {
-              failed = true,
-              last_error = 'malformed queue record: ' .. tostring(q.name),
-              body = q.name or '',
-            },
-          }
         end
       end
     end
@@ -1222,7 +1211,7 @@ end
 
 -- The fallback: `entry`'s city loaded every poll period while it is watched.
 local function start_timer(this, entry)
-  local ms = poll_override or gc_mail.config.chat_poll_ms or 60000
+  local ms = poll_override or gc_mail.config.chat_poll_ms
   entry.timer = vim.uv.new_timer()
   entry.timer:start(ms, ms, function()
     vim.schedule(function()
@@ -1666,20 +1655,6 @@ local function goto_message(chat, direction)
   end
 end
 
--- Jump the timeline to the latest message: the cursor lands on the last line
--- and the view follows the end again under the autoscroll rules (the waiting
--- anchor is off, the newer-below count clears through update_below).
-local function jump_latest(chat)
-  if not valid_chat(chat) then
-    return
-  end
-  chat.pending_place, chat.place_wait, chat.place_view = nil, nil, nil
-  local last = vim.api.nvim_buf_line_count(chat.timeline_buf)
-  last = math.max(last, 1)
-  vim.api.nvim_win_set_cursor(chat.timeline_win, { last, 0 })
-  update_below(chat)
-end
-
 function M.open(city_arg, with_arg)
   local cached = gc_mail.cached_cities()
   if not cached or #cached == 0 then
@@ -1745,8 +1720,8 @@ function M.open(city_arg, with_arg)
   vim.bo[timeline_buf].filetype = 'markdown'
   set_buf_name_unique(timeline_buf, ('gc-mail://%s/chat/%s'):format(city.name, with), tab)
 
-  local chat_width = gc_mail.config.chat_width or 60
-  local compose_height = gc_mail.config.chat_compose_height or 3
+  local chat_width = gc_mail.config.chat_width
+  local compose_height = gc_mail.config.chat_compose_height
   -- The session memory of this chat, else the configured defaults. A
   -- full-size chat takes no width from it and leaves it untouched.
   local remembered = saved_size[compose_key] or {}
@@ -1846,7 +1821,7 @@ function M.open(city_arg, with_arg)
   update_keys(chat)
 
   local send_keys = gc_mail.config.chat_send_keys
-  if send_keys ~= false and type(send_keys) == 'table' then
+  if send_keys ~= false then
     for _, key in ipairs(send_keys) do
       vim.keymap.set('n', key, function() send_chat(chat) end, {
         buffer = compose_buf,

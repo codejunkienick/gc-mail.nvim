@@ -74,14 +74,6 @@ local function dispatch(this, city, event)
   end)
 end
 
---- Whether one line of the event log is a mail event: a JSON object whose
---- type is a string starting with `mail.`. Anything else is false, never an
---- error.
-function M.mail_event(line)
-  local ok, event = pcall(vim.json.decode, line)
-  return ok and type(event) == 'table' and type(event.type) == 'string' and event.type:sub(1, 5) == 'mail.'
-end
-
 local on_change
 
 local function arm(this, w)
@@ -125,7 +117,7 @@ local function rotated(this, w)
     return dispatch(this, w.city, { type = 'rotated' })
   end
   watching_changed(this, w)
-  w.rearm:start(config.rearm_ms or 1000, 0, function()
+  w.rearm:start(config.rearm_ms, 0, function()
     vim.schedule(function()
       if live == this and not w.stopped and arm(this, w) then
         dispatch(this, w.city, { type = 'rotated' })
@@ -144,10 +136,6 @@ local function process_line(this, w, line)
   if type(raw.subject) == 'string' and queue.mail_id(raw.subject) then
     id = raw.subject
   end
-  local actor = nil
-  if type(raw.actor) == 'string' then
-    actor = raw.actor
-  end
   local message = nil
   if type(raw.payload) == 'table' and type(raw.payload.message) == 'table' then
     message = mailbox.message(raw.payload.message)
@@ -155,7 +143,6 @@ local function process_line(this, w, line)
   local event = {
     type = raw.type,
     id = id,
-    actor = actor,
     message = message,
   }
   dispatch(this, w.city, event)
@@ -274,7 +261,7 @@ local function reconcile(this)
   end
 
   if not this.timer or this.timer:is_closing() then
-    local poll = config.events_rearm_ms or 60000
+    local poll = config.events_rearm_ms
     this.timer = handle(this, uv.new_timer())
     this.timer:start(poll, poll, function()
       vim.schedule(function()

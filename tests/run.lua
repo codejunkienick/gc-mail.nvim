@@ -279,7 +279,7 @@ test('nothing runs at load time and setup maps <Space>mm, <Space>mi, <Space>mp a
   package.loaded['gc_mail'] = nil
   package.loaded['gc_mail.queue'] = nil
   local defaults = require('gc_mail')
-  eq(defaults.queue.dir(), vim.env.XDG_STATE_HOME .. '/nvim/gc-mail/queue', 'default queue dir')
+  eq(defaults.config.state_dir .. '/queue', vim.env.XDG_STATE_HOME .. '/nvim/gc-mail/queue', 'default queue dir')
   gc_mail = defaults
   gc_mail.queue.configure({ dir = queue_dir, retry_ms = RETRY })
 end)
@@ -2513,25 +2513,6 @@ test('preview: a refresh that removes the message under the cursor shows the nex
   vim.api.nvim_feedkeys('q', 'x', false)
 end)
 
-test('preview: a body that cannot be rendered is said once and clears the pane, the list works on', function()
-  two_messages()
-  mailbox().body_lines = function()
-    error('no body for you')
-  end
-  local win = mailbox().open()
-  settled(win, 2)
-  pane_shows({ '' }, 'a cleared pane')
-  move('j')
-  move('k')
-  vim.wait(150)
-  local said = vim.tbl_filter(function(n)
-    return n.message:find('cannot show the preview', 1, true)
-  end, notes)
-  eq(#said, 1, 'said once')
-  eq(rows(win), { '  ● demo-city  mayor  newer subject', '  ● demo-city  mayor  older subject' }, 'the list is as it was')
-  vim.api.nvim_feedkeys('q', 'x', false)
-end)
-
 test('preview: nothing exists before a list opens and nothing is left when it closes', function()
   local function groups()
     local found = {}
@@ -3443,7 +3424,6 @@ test('events subscriber receives decoded mail.sent with payload.message, nil mes
   local ev1 = received[1].event
   eq(ev1.type, 'mail.sent')
   eq(ev1.id, 'ic-wisp-a1')
-  eq(ev1.actor, 'human')
   eq(ev1.message.id, 'ic-wisp-a1')
   eq(ev1.message.from, 'human')
   eq(ev1.message.to, 'mayor')
@@ -4220,7 +4200,7 @@ test('demo gc: an agent reply appends to the store and the event log, and the wa
   end)
   local ev = seen[1]
   eq(ev.type, 'mail.replied', 'event type')
-  eq({ ev.actor, ev.message.from, ev.message.to }, { 'mayor', 'mayor', 'human' }, 'actor, from and to')
+  eq({ ev.message.from, ev.message.to }, { 'mayor', 'human' }, 'from and to')
   eq(ev.message.subject, 'Re: ' .. mayor_last.subject:gsub('^Re: ', ''), 'subject of the answered message')
   eq(ev.message.body, 'Looks good, shipping it', 'the text')
   eq(ev.id, ev.message.id, 'the event subject is the message id')
@@ -8034,19 +8014,6 @@ test('c on a hit opens the chat with its correspondent, the recipient for a mess
   vim.api.nvim_feedkeys('c', 'x', false)
   eq(vim.tbl_contains(chat_timeline_names(), 'other-city/chat/reviewer'), true, 'the recipient of a message from you')
   vim.cmd('silent! only')
-  -- Without the chat module: said, and the float stays
-  package.loaded['gc_mail.chat'] = nil
-  package.preload['gc_mail.chat'] = function()
-    error('not installed')
-  end
-  win = search_open('markdown')
-  vim.api.nvim_feedkeys('c', 'x', false)
-  package.preload['gc_mail.chat'] = nil
-  package.loaded['gc_mail.chat'] = nil
-  eq(notes[#notes].message, 'gc-mail: the chat is not installed', 'said')
-  eq(vim.api.nvim_win_is_valid(win), true, 'the float stays')
-  vim.api.nvim_feedkeys('q', 'x', false)
-  require('gc_mail.chat')
 end)
 
 test('s in the mailbox float and in the panel asks for the text and opens the same results', function()

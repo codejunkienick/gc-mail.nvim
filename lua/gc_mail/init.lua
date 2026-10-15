@@ -253,9 +253,9 @@ function M.send(buf, city, opts)
   end
   local is_reply = false
   if opts then
-    if opts.id or opts.reply_to then
+    if opts.id then
       is_reply = true
-      message.reply_to, message.to = opts.id or opts.reply_to, opts.to
+      message.reply_to, message.to = opts.id, opts.to
     elseif opts.to ~= nil then
       message.to = opts.to
     end
@@ -398,8 +398,6 @@ function M.open(opts)
   local to
   if type(opts) == 'string' and opts ~= '' then
     to = opts
-  elseif type(opts) == 'table' then
-    to = opts.to
   end
   local target = vim.api.nvim_get_current_buf()
   local _, reason = M.message(target)

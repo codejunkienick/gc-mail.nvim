@@ -75,11 +75,6 @@ local function close_handle(h)
   end
 end
 
---- Whether one line of the event log is a mail event: delegates to gc_mail.events.
-function M.mail_event(line)
-  return require('gc_mail.events').mail_event(line)
-end
-
 -- Lists w's city, unless an inbox call of the panel is already in flight
 -- for it: then once more when that one ends.
 local function refresh(this, w)
@@ -139,10 +134,7 @@ end
 -- copies are read again; a log not watched yet is tried once more.
 local function refresh_all(this)
   mailbox.reload_kept()
-  local ok, events = pcall(require, 'gc_mail.events')
-  if ok and events.rearm then
-    events.rearm()
-  end
+  require('gc_mail.events').rearm()
   for _, w in pairs(this.cities) do
     refresh(this, w)
   end
@@ -210,9 +202,7 @@ local function stop()
   end
   live = nil
   mailbox.subscribe('panel', nil)
-  pcall(function()
-    require('gc_mail.events').unsubscribe('panel')
-  end)
+  require('gc_mail.events').unsubscribe('panel')
   for _, w in pairs(this.cities) do
     w.stopped = true
   end
@@ -463,11 +453,7 @@ end
 --- is closing).
 function M.handles()
   local panel_handles = last and last.handles or {}
-  local ok, events = pcall(require, 'gc_mail.events')
-  if ok and events.handles then
-    return vim.list_extend(vim.list_slice(panel_handles), events.handles())
-  end
-  return panel_handles
+  return vim.list_extend(vim.list_slice(panel_handles), require('gc_mail.events').handles())
 end
 
 return M
