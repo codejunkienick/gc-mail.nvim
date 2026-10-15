@@ -6,6 +6,9 @@
 local here = vim.fs.dirname(vim.fs.normalize(debug.getinfo(1, 'S').source:sub(2)))
 local root = vim.fs.dirname(here)
 vim.opt.runtimepath:prepend(root)
+-- Load plugin/ as startup would: it defines the seven commands, and
+-- setup() no longer repeats them.
+vim.cmd('runtime! plugin/gc_mail.lua')
 package.path = root .. '/?.lua;' .. package.path
 
 local scratch = vim.fn.tempname()
@@ -282,6 +285,20 @@ test('nothing runs at load time and setup maps <Space>mm, <Space>mi, <Space>mp a
   eq(defaults.config.state_dir .. '/queue', vim.env.XDG_STATE_HOME .. '/nvim/gc-mail/queue', 'default queue dir')
   gc_mail = defaults
   gc_mail.queue.configure({ dir = queue_dir, retry_ms = RETRY })
+end)
+
+test('the seven commands exist in a child nvim that has not run setup()', function()
+  -- fresh() keeps the commands setup() used to define, so only a child that
+  -- has never run setup() can prove plugin/ defines them on its own.
+  local check = "local ok, err = pcall(function() "
+    .. "for _, name in ipairs({ 'GcMail', 'GcMailQueue', 'GcMailbox', 'GcMailPanel', 'GcMailChat', 'GcMailChats', 'GcMailSearch' }) do "
+    .. "assert(vim.fn.exists(':' .. name) == 2, name .. ' missing') end "
+    .. "assert(package.loaded['gc_mail'] == nil, 'the module loaded') end) "
+    .. "if not ok then io.stderr:write(tostring(err) .. '\\n'); vim.cmd('cquit 1') end"
+  local result = vim.system({ vim.v.progpath, '--headless', '--clean', '-n',
+    '--cmd', ('lua vim.opt.runtimepath:prepend(%q)'):format(root),
+    '-c', 'lua ' .. check, '-c', 'qa!' }, { text = true }):wait(20000)
+  eq(result.code, 0, 'child nvim: ' .. (result.stderr or '') .. (result.stdout or ''))
 end)
 
 test('the picker lists one line per city mayor, even for a single city', function()

@@ -504,6 +504,30 @@ function M.open_queue()
   }).win
 end
 
+-- One rule per checked option, in the order refusals are reported:
+-- { key, 'bool' }, { key, 'ms', min [, false is allowed] },
+-- { key, 'whole', min [, unit] } and { key, 'keymap' }. The three keymap
+-- options keymap, mailbox_keymap and panel_keymap are not listed, so they
+-- stay unchecked. chat_send_keys and the subject label have their own rules.
+local option_rules = {
+  { 'check_ms', 'ms', 60000, true },
+  { 'watch', 'bool' },
+  { 'watch_resync_ms', 'ms', 60000 },
+  { 'markdown', 'bool' },
+  { 'preview', 'bool' },
+  { 'panel_poll_ms', 'ms', 15000 },
+  { 'events_rearm_ms', 'ms', 15000 },
+  { 'panel_height', 'whole', 1, 'rows' },
+  { 'history_days', 'whole', 1 },
+  { 'chat_width', 'whole', 20, 'columns' },
+  { 'chat_compose_height', 'whole', 1, 'rows' },
+  { 'chat_send_keys', 'send_keys' },
+  { 'chat_mark_read', 'bool' },
+  { 'chat_poll_ms', 'ms', 15000 },
+  { 'chat_keymap', 'keymap' },
+  { 'chats_keymap', 'keymap' },
+}
+
 -- Why `opts` cannot be used, or nil. A label with a control character could
 -- not be one subject line; one longer than LABEL_MAX would leave no subject.
 local function invalid_options(opts)
@@ -515,60 +539,43 @@ local function invalid_options(opts)
   if vim.fn.strchars(opts.subject_prefix) + vim.fn.strchars(opts.subject_suffix) > LABEL_MAX then
     return ('subject_prefix and subject_suffix together are over %d characters'):format(LABEL_MAX)
   end
-  if opts.check_ms ~= false and (type(opts.check_ms) ~= 'number' or opts.check_ms < 60000) then
-    return 'check_ms must be false or a number of milliseconds of at least 60000'
-  end
-  if type(opts.watch) ~= 'boolean' then
-    return 'watch must be true or false'
-  end
-  if type(opts.watch_resync_ms) ~= 'number' or opts.watch_resync_ms < 60000 then
-    return 'watch_resync_ms must be a number of milliseconds of at least 60000'
-  end
-  if type(opts.markdown) ~= 'boolean' then
-    return 'markdown must be true or false'
-  end
-  if type(opts.preview) ~= 'boolean' then
-    return 'preview must be true or false'
-  end
-  if type(opts.panel_poll_ms) ~= 'number' or opts.panel_poll_ms < 15000 then
-    return 'panel_poll_ms must be a number of milliseconds of at least 15000'
-  end
-  if type(opts.events_rearm_ms) ~= 'number' or opts.events_rearm_ms < 15000 then
-    return 'events_rearm_ms must be a number of milliseconds of at least 15000'
-  end
-  if type(opts.panel_height) ~= 'number' or opts.panel_height < 1 or opts.panel_height ~= math.floor(opts.panel_height) then
-    return 'panel_height must be a whole number of rows of at least 1'
-  end
-  if type(opts.history_days) ~= 'number' or opts.history_days < 1 or opts.history_days ~= math.floor(opts.history_days) then
-    return 'history_days must be a whole number of at least 1'
-  end
-  if type(opts.chat_width) ~= 'number' or opts.chat_width < 20 or opts.chat_width ~= math.floor(opts.chat_width) then
-    return 'chat_width must be a whole number of columns of at least 20'
-  end
-  if type(opts.chat_compose_height) ~= 'number' or opts.chat_compose_height < 1 or opts.chat_compose_height ~= math.floor(opts.chat_compose_height) then
-    return 'chat_compose_height must be a whole number of rows of at least 1'
-  end
-  if opts.chat_send_keys ~= false then
-    if type(opts.chat_send_keys) ~= 'table' or not vim.islist(opts.chat_send_keys) then
-      return 'chat_send_keys must be false or a list of key mappings'
-    end
-    for _, key in ipairs(opts.chat_send_keys) do
-      if type(key) ~= 'string' or key == '' then
-        return 'chat_send_keys must be false or a list of key mappings'
+  for _, rule in ipairs(option_rules) do
+    local key, kind, min, extra = rule[1], rule[2], rule[3], rule[4]
+    local value = opts[key]
+    if kind == 'bool' then
+      if type(value) ~= 'boolean' then
+        return key .. ' must be true or false'
+      end
+    elseif kind == 'ms' then
+      if not (extra and value == false) and (type(value) ~= 'number' or value < min) then
+        if extra then
+          return ('%s must be false or a number of milliseconds of at least %d'):format(key, min)
+        end
+        return ('%s must be a number of milliseconds of at least %d'):format(key, min)
+      end
+    elseif kind == 'whole' then
+      if type(value) ~= 'number' or value < min or value ~= math.floor(value) then
+        if extra then
+          return ('%s must be a whole number of %s of at least %d'):format(key, extra, min)
+        end
+        return ('%s must be a whole number of at least %d'):format(key, min)
+      end
+    elseif kind == 'keymap' then
+      if value ~= false and (type(value) ~= 'string' or value == '') then
+        return key .. ' must be false or a non-empty string'
+      end
+    elseif kind == 'send_keys' then
+      if value ~= false then
+        if type(value) ~= 'table' or not vim.islist(value) then
+          return key .. ' must be false or a list of key mappings'
+        end
+        for _, send_key in ipairs(value) do
+          if type(send_key) ~= 'string' or send_key == '' then
+            return key .. ' must be false or a list of key mappings'
+          end
+        end
       end
     end
-  end
-  if type(opts.chat_mark_read) ~= 'boolean' then
-    return 'chat_mark_read must be true or false'
-  end
-  if type(opts.chat_poll_ms) ~= 'number' or opts.chat_poll_ms < 15000 then
-    return 'chat_poll_ms must be a number of milliseconds of at least 15000'
-  end
-  if opts.chat_keymap ~= false and (type(opts.chat_keymap) ~= 'string' or opts.chat_keymap == '') then
-    return 'chat_keymap must be false or a non-empty string'
-  end
-  if opts.chats_keymap ~= false and (type(opts.chats_keymap) ~= 'string' or opts.chats_keymap == '') then
-    return 'chats_keymap must be false or a non-empty string'
   end
 end
 
@@ -582,51 +589,21 @@ function M.setup(opts)
   queue.configure({ dir = M.config.state_dir .. '/queue', retry_ms = M.config.retry_ms })
   -- The mailbox loads when it is first opened; its copies live in
   -- <state_dir>/mailbox/.
-  if M.config.keymap then
-    vim.keymap.set('n', M.config.keymap, M.open, { desc = 'Mail the buffer to a gc city mayor' })
+  -- One { option, rhs, desc } row per mapping; plugin/gc_mail.lua is the
+  -- only place the commands are defined, so setup() does not repeat them.
+  local keymaps = {
+    { 'keymap', M.open, 'Mail the buffer to a gc city mayor' },
+    { 'mailbox_keymap', function() require('gc_mail.mailbox').open() end, 'Open the gc mailbox' },
+    { 'panel_keymap', function() require('gc_mail.panel').toggle() end, 'Toggle the gc mail panel' },
+    { 'chat_keymap', function() require('gc_mail.chat').open_last() end, 'Open the gc chat' },
+    { 'chats_keymap', function() require('gc_mail.chat').open_list() end, 'gc-mail: open the conversations list' },
+  }
+  for _, mapping in ipairs(keymaps) do
+    local lhs = M.config[mapping[1]]
+    if lhs then
+      vim.keymap.set('n', lhs, mapping[2], { desc = mapping[3] })
+    end
   end
-  if M.config.mailbox_keymap then
-    vim.keymap.set('n', M.config.mailbox_keymap, function()
-      require('gc_mail.mailbox').open()
-    end, { desc = 'Open the gc mailbox' })
-  end
-  if M.config.panel_keymap then
-    vim.keymap.set('n', M.config.panel_keymap, function()
-      require('gc_mail.panel').toggle()
-    end, { desc = 'Toggle the gc mail panel' })
-  end
-  if M.config.chat_keymap then
-    vim.keymap.set('n', M.config.chat_keymap, function()
-      require('gc_mail.chat').open_last()
-    end, { desc = 'Open the gc chat' })
-  end
-  if M.config.chats_keymap then
-    vim.keymap.set('n', M.config.chats_keymap, function()
-      require('gc_mail.chat').open_list()
-    end, { desc = 'gc-mail: open the conversations list' })
-  end
-  vim.api.nvim_create_user_command('GcMail', function(cmd_opts)
-    local to = vim.trim(cmd_opts.args or '') ~= '' and vim.trim(cmd_opts.args) or nil
-    require('gc_mail').open(to)
-  end, { desc = 'Mail the buffer to a gc city mayor or recipient', force = true, nargs = '?' })
-  vim.api.nvim_create_user_command('GcMailQueue', function()
-    require('gc_mail').open_queue()
-  end, { desc = 'List the gc-mail send queue', force = true })
-  vim.api.nvim_create_user_command('GcMailbox', function()
-    require('gc_mail.mailbox').open()
-  end, { desc = 'Open the gc mailbox', force = true })
-  vim.api.nvim_create_user_command('GcMailPanel', function()
-    require('gc_mail.panel').toggle()
-  end, { desc = 'Toggle the gc mail panel', force = true })
-  vim.api.nvim_create_user_command('GcMailChat', function(cmd_opts)
-    require('gc_mail.chat').command(cmd_opts.fargs)
-  end, { desc = 'Open the gc chat window', force = true, nargs = '*' })
-  vim.api.nvim_create_user_command('GcMailSearch', function(cmd_opts)
-    require('gc_mail.search').run(cmd_opts.args)
-  end, { desc = 'Search the mail history of every city', force = true, nargs = '+' })
-  vim.api.nvim_create_user_command('GcMailChats', function()
-    require('gc_mail.chat').open_list()
-  end, { desc = 'List the gc conversations with their unread counts', force = true })
   -- check_ms = false stops a check an earlier setup() started (only then is
   -- the mailbox loaded already).
   if not M.config.check_ms and package.loaded['gc_mail.mailbox'] then
