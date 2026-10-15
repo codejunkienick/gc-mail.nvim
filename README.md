@@ -59,7 +59,7 @@ unchanged; the mailbox lists mail only when you open it.
 | `chats_keymap` | `'<Space>ml'` | normal-mode mapping that opens the conversations list; `false` sets none |
 | `chat_width` | `60` | columns of the chat window (whole number of at least 20) |
 | `chat_compose_height` | `3` | rows of the chat compose box (whole number of at least 1) |
-| `chat_send_keys` | `{ '<Space>ms' }` | keys mapped in normal mode of the compose box that send the message; `false` maps none |
+| `chat_send_keys` | `{ '<Space>ms' }` | keys mapped in normal mode of the compose box that send the message; a send key never loses to a close or focus key on the same key (`false` maps none) |
 | `chat_mark_read` | `true` | `true`: unread mail to human in the rendered conversation is marked read when viewed; `false` marks nothing |
 | `chat_poll_ms` | `60000` | while a chat is open, its city's history is loaded again this often (ms, at least `15000`) |
 
@@ -406,7 +406,7 @@ placing the cursor in the compose box in normal mode. When the current window
 is the tab's only window, a normal window holding the session's only listed
 buffer, and that buffer is empty (unnamed, unmodified, no text), the chat
 instead takes over that window full-size — timeline in it, compose box split
-below — and `q` in the timeline
+below — and `q` in either window
 closes both chat windows and returns to the empty buffer. Closing the timeline
 window itself (`:q`, `<C-w>c`) in a full-size chat likewise leaves a single
 window holding the empty buffer, keeping any compose draft.
@@ -418,8 +418,10 @@ window holding the empty buffer, keeping any compose draft.
 | `t` | timeline | open thread of message under cursor |
 | `u` | timeline | mark message under cursor unread (`mailbox.actions.unread`) |
 | `R` | timeline | reload history (`history.load`) and re-render |
-| `G` | timeline | jump to the latest message and follow the end again (with a count, `G`'s own line) |
-| `q` | timeline | close both chat windows (non-empty draft preserved) |
+| `G` | timeline | jump the timeline to the latest message and follow the end again (with a count, `G`'s own line; the compose box keeps Vim's own `G` motion) |
+| `q` | timeline, compose box | close both chat windows (non-empty draft preserved, focus returns to the origin window) |
+| `<C-j>` / `<C-k>` | timeline, compose box | move focus to the compose box / to the timeline (staying inside the chat never releases a `u`-held unread id) |
+| `]m` / `[m` | timeline | next / previous message: land on the heading line of the adjacent message, stopping at the last / first message |
 
 - **Timeline rendering.** Rendered oldest first from `history.conversation(city, with)`
   and pending send queue records for `(city.path, with)` that are not replies or
@@ -464,8 +466,12 @@ window holding the empty buffer, keeping any compose draft.
   it shows changed (a render, a load, a send, the view, a new width, the city's
   log starting or ending being watched), and never re-renders the timeline or
   moves a cursor. The compose window's statusline holds
-  the keys, ` <send key> send · above: q close  <CR> open  t thread  u unread  R refresh  G latest `,
-  cut the same way.
+  the keys, ` <send key> send · q close · <C-j>/<C-k> focus · above: <CR> open  t thread  u unread  R refresh  G latest  ]m next  [m prev `,
+  cut the same way, leaving out any close or focus key a configured send key
+  uses or starts with, so it only advertises keys that are actually mapped.
+  All chat keys are buffer-local normal-mode mappings with a
+  `gc-mail: ` desc; nothing but the configured `chat_send_keys` sends mail, and
+  insert-mode typing in the compose box is unaffected.
 - **Sending.** Sends through `gc_mail.send(compose_buf, city, { to = with })`.
   The compose box clears in one undo step (`u` restores the text). The timeline
   shows `sending…` immediately, and refreshes via `history.load` upon queue delivery.

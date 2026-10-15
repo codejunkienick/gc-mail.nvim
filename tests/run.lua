@@ -5657,6 +5657,15 @@ test('all chat compose and timeline buffer mappings have desc', function()
   end
   assert(has_send_desc, 'compose has <Space>ms mapping with desc')
 
+  local cp_descs = {}
+  for _, m in ipairs(cp_maps) do
+    cp_descs[m.lhs] = m.desc
+  end
+  eq(cp_descs['q'], 'gc-mail: close chat')
+  eq(cp_descs['<C-J>'] or cp_descs['<C-j>'], 'gc-mail: focus compose')
+  eq(cp_descs['<C-K>'] or cp_descs['<C-k>'], 'gc-mail: focus timeline')
+  eq(cp_descs['G'], nil, 'the compose box keeps Vim its own G: no buffer mapping')
+
   local tl_maps = vim.api.nvim_buf_get_keymap(timeline_buf, 'n')
   local descs = {}
   for _, m in ipairs(tl_maps) do
@@ -5667,6 +5676,22 @@ test('all chat compose and timeline buffer mappings have desc', function()
   eq(descs['u'], 'gc-mail: mark unread')
   eq(descs['R'], 'gc-mail: reload history')
   eq(descs['q'], 'gc-mail: close chat')
+  eq(descs['G'], 'gc-mail: jump to the latest message')
+  eq(descs['<C-J>'] or descs['<C-j>'], 'gc-mail: focus compose')
+  eq(descs['<C-K>'] or descs['<C-k>'], 'gc-mail: focus timeline')
+  eq(descs[']m'], 'gc-mail: next message')
+  eq(descs['[m'], 'gc-mail: previous message')
+  -- Every chat mapping carries a gc-mail: desc.
+  for _, m in ipairs(cp_maps) do
+    if m.lhs ~= '[[' and m.lhs ~= ']]' and m.lhs ~= 'gO' then
+      assert(type(m.desc) == 'string' and m.desc:sub(1, 9) == 'gc-mail: ', 'compose mapping ' .. m.lhs .. ' has a gc-mail: desc')
+    end
+  end
+  for _, m in ipairs(tl_maps) do
+    if m.lhs ~= '[[' and m.lhs ~= ']]' and m.lhs ~= 'gO' then
+      assert(type(m.desc) == 'string' and m.desc:sub(1, 9) == 'gc-mail: ', 'timeline mapping ' .. m.lhs .. ' has a gc-mail: desc')
+    end
+  end
 end)
 
 test('RS3: with chat_mark_read true the unread message is marked read once when current, not twice; with false, no call', function()
@@ -5774,6 +5799,305 @@ test('q closes both windows and keeps non-empty compose text for next open; <Spa
   vim.api.nvim_set_current_win(new_timeline_win)
   vim.api.nvim_feedkeys('q', 'x', false)
   eq(vim.api.nvim_buf_is_valid(new_compose_buf), false, 'empty compose buffer was wiped')
+end)
+
+test('chat focus: q from the compose box closes both windows like q in the timeline and keeps the draft', function()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY })
+  preload()
+
+  local origin_win = vim.api.nvim_get_current_win()
+  vim.cmd('GcMailChat imd-city')
+  local compose_win = vim.api.nvim_get_current_win()
+  local compose_buf = vim.api.nvim_win_get_buf(compose_win)
+  local timeline_win = nil
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local b = vim.api.nvim_win_get_buf(w)
+    if vim.api.nvim_buf_get_name(b):match('/chat/') then
+      timeline_win = w
+    end
+  end
+  assert(timeline_win and compose_win and timeline_win ~= compose_win, 'both chat windows open')
+  eq(vim.api.nvim_get_current_win(), compose_win, 'the cursor starts in the compose box')
+
+  vim.api.nvim_buf_set_lines(compose_buf, 0, -1, false, { 'draft from compose', 'line 2' })
+  vim.api.nvim_set_current_win(compose_win)
+  vim.api.nvim_feedkeys('q', 'x', false)
+  eq(vim.api.nvim_win_is_valid(timeline_win), false, 'timeline window closed from compose q')
+  eq(vim.api.nvim_win_is_valid(compose_win), false, 'compose window closed from compose q')
+  eq(vim.api.nvim_get_current_win(), origin_win, 'focus back in the origin window')
+
+  vim.cmd('GcMailChat imd-city')
+  local new_compose_buf = vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win())
+  eq(vim.api.nvim_buf_get_lines(new_compose_buf, 0, -1, false), { 'draft from compose', 'line 2' }, 'non-empty draft returns on reopen')
+
+  -- Insert-mode typing is unaffected: q in insert mode inserts text, it does not close.
+  vim.api.nvim_buf_set_lines(new_compose_buf, 0, -1, false, { '' })
+  vim.api.nvim_feedkeys('iq]mG' .. vim.keycode('<Esc>'), 'x', false)
+  eq(vim.api.nvim_get_mode().mode, 'n', 'back in normal mode')
+  eq(vim.api.nvim_buf_get_lines(new_compose_buf, 0, -1, false), { 'q]mG' }, 'insert-mode typing inserts, mappings are normal mode only')
+  local still_open = false
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(w)):match('/chat/') then
+      still_open = true
+    end
+  end
+  eq(still_open, true, 'the chat stays open after insert-mode typing')
+
+  -- No key but the send key sends: the focus, navigation and close keys queue nothing.
+  eq(gc_mail.queue.list(), {}, 'nothing queued by the focus keys')
+end)
+
+test('chat focus: <C-j>/<C-k> move between timeline and compose and a u-held id stays held across those moves (RS4)', function()
+  local fix, _, _, t2 = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  acted('mark-read', 'tc-wisp-m2')
+  acted('mark-unread', 'tc-wisp-m3')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = true })
+  preload()
+
+  local chat_mod = require('gc_mail.chat')
+  local chat = chat_mod.open('imd-city', 'mayor')
+  local win = chat.timeline_win
+  local stamp = os.date('%H:%M', t2)
+  wait('history rendered', function()
+    return header_row(win, stamp) ~= nil
+  end)
+  wait('the unread message is marked read', function()
+    return read_calls('tc-wisp-m2') == 1
+  end)
+
+  vim.api.nvim_set_current_win(win)
+  vim.api.nvim_win_set_cursor(win, { header_row(win, stamp), 0 })
+  vim.api.nvim_feedkeys('u', 'x', false)
+  wait('mark-unread called', function()
+    for _, c in ipairs(mail_calls()) do
+      if c[4] == 'mark-unread' and c[5] == 'tc-wisp-m3' then
+        return true
+      end
+    end
+    return false
+  end)
+  vim.wait(300)
+  eq(read_calls('tc-wisp-m3'), 0, 'u does not undo itself')
+
+  -- The focus keys move between the chat's own windows and never release the hold.
+  vim.api.nvim_feedkeys(vim.keycode('<C-j>'), 'x', false)
+  eq(vim.api.nvim_get_current_win(), chat.compose_win, '<C-j> focuses the compose box')
+  vim.wait(150)
+  eq(read_calls('tc-wisp-m3'), 0, 'compose focus keeps the hold (RS4)')
+  vim.api.nvim_feedkeys(vim.keycode('<C-k>'), 'x', false)
+  eq(vim.api.nvim_get_current_win(), win, '<C-k> focuses the timeline')
+  vim.wait(150)
+  eq(read_calls('tc-wisp-m3'), 0, 'timeline focus keeps the hold (RS4)')
+  -- From the compose box back again, still held.
+  vim.api.nvim_feedkeys(vim.keycode('<C-j>'), 'x', false)
+  eq(vim.api.nvim_get_current_win(), chat.compose_win, 'back in the compose box')
+  vim.wait(150)
+  eq(read_calls('tc-wisp-m3'), 0, 'still held')
+  vim.api.nvim_feedkeys(vim.keycode('<C-k>'), 'x', false)
+  eq(vim.api.nvim_get_current_win(), win, 'back in the timeline')
+
+  -- Leaving the chat releases it: entering again marks it read.
+  vim.api.nvim_set_current_win(chat.origin)
+  vim.wait(100)
+  vim.api.nvim_set_current_win(win)
+  wait('entering the chat again marks it read', function()
+    return read_calls('tc-wisp-m3') == 1
+  end)
+  vim.api.nvim_set_current_win(chat.origin)
+end)
+
+test('chat navigation: ]m/[m walk the three message headings and stop at the ends; G jumps to latest and follows', function()
+  local fix = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
+  preload()
+
+  local chat_mod = require('gc_mail.chat')
+  local chat = chat_mod.open('imd-city', 'mayor')
+  local win = chat.timeline_win
+  wait('three messages rendered', function()
+    local n = 0
+    for _, block in ipairs(chat.message_blocks) do
+      if block.message then
+        n = n + 1
+      end
+    end
+    return n == 3
+  end)
+  local starts = {}
+  for _, block in ipairs(chat.message_blocks) do
+    if block.message then
+      starts[#starts + 1] = block.start_line
+    end
+  end
+  eq(#starts, 3, 'three message headings')
+  local last_line = #vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(win), 0, -1, false)
+
+  vim.api.nvim_set_current_win(win)
+  vim.api.nvim_win_set_cursor(win, { starts[1], 0 })
+  vim.api.nvim_feedkeys(']m', 'x', false)
+  eq(vim.api.nvim_win_get_cursor(win)[1], starts[2], ']m lands on the second heading')
+  vim.api.nvim_feedkeys(']m', 'x', false)
+  eq(vim.api.nvim_win_get_cursor(win)[1], starts[3], ']m lands on the third heading')
+  vim.api.nvim_feedkeys(']m', 'x', false)
+  eq(vim.api.nvim_win_get_cursor(win)[1], starts[3], ']m stops at the last message')
+  vim.api.nvim_feedkeys('[m', 'x', false)
+  eq(vim.api.nvim_win_get_cursor(win)[1], starts[2], '[m lands on the second heading')
+  vim.api.nvim_feedkeys('[m', 'x', false)
+  eq(vim.api.nvim_win_get_cursor(win)[1], starts[1], '[m lands on the first heading')
+  vim.api.nvim_feedkeys('[m', 'x', false)
+  eq(vim.api.nvim_win_get_cursor(win)[1], starts[1], '[m stops at the first message')
+
+  -- G in the timeline lands on the last line and follows again.
+  vim.api.nvim_feedkeys('G', 'x', false)
+  eq(vim.api.nvim_win_get_cursor(win)[1], last_line, 'G lands on the last line')
+
+  -- Nothing queued or sent by the navigation keys.
+  eq(gc_mail.queue.list(), {}, 'navigation queues nothing')
+
+  vim.api.nvim_set_current_win(chat.origin)
+end)
+
+test('chat compose: a configured send key keeps sending where it meets a close or focus key', function()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_send_keys = { '<C-j>' } })
+  preload()
+
+  vim.cmd('GcMailChat imd-city')
+  local compose_win = vim.api.nvim_get_current_win()
+  local compose_buf = vim.api.nvim_win_get_buf(compose_win)
+
+  local cp_descs = {}
+  for _, m in ipairs(vim.api.nvim_buf_get_keymap(compose_buf, 'n')) do
+    cp_descs[m.lhs] = m.desc
+  end
+  eq(cp_descs['<C-J>'] or cp_descs['<C-j>'], 'gc-mail: send', 'the configured <C-j> still sends')
+
+  vim.api.nvim_buf_set_lines(compose_buf, 0, -1, false, { 'hello mayor', 'body line' })
+  vim.api.nvim_feedkeys(vim.keycode('<C-j>'), 'x', false)
+  eq(vim.api.nvim_buf_get_lines(compose_buf, 0, -1, false), { '' }, '<C-j> sends the draft instead of focusing')
+  eq(vim.api.nvim_get_current_win(), compose_win, 'focus stays in the compose box')
+
+  -- A send key on the close key: q in the compose box sends and the chat stays open.
+  reset()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_send_keys = { 'q' } })
+  preload()
+
+  vim.cmd('GcMailChat imd-city')
+  compose_win = vim.api.nvim_get_current_win()
+  compose_buf = vim.api.nvim_win_get_buf(compose_win)
+  local timeline_win = nil
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local b = vim.api.nvim_win_get_buf(w)
+    if vim.api.nvim_buf_get_name(b):match('/chat/') then
+      timeline_win = w
+    end
+  end
+  assert(timeline_win, 'the timeline is open')
+
+  cp_descs = {}
+  for _, m in ipairs(vim.api.nvim_buf_get_keymap(compose_buf, 'n')) do
+    cp_descs[m.lhs] = m.desc
+  end
+  eq(cp_descs['q'], 'gc-mail: send', 'the configured q still sends')
+
+  vim.api.nvim_buf_set_lines(compose_buf, 0, -1, false, { 'hello mayor', 'body line' })
+  vim.api.nvim_feedkeys('q', 'x', false)
+  eq(vim.api.nvim_buf_get_lines(compose_buf, 0, -1, false), { '' }, 'q sends the draft instead of closing')
+  eq(vim.api.nvim_win_is_valid(timeline_win), true, 'the timeline stays open')
+  eq(vim.api.nvim_win_is_valid(compose_win), true, 'the compose box stays open')
+
+  -- A send key that starts with a shared key: the shared mapping is skipped
+  -- so the longer send key stays reachable.
+  reset()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_send_keys = { 'qs' } })
+  preload()
+
+  vim.cmd('GcMailChat imd-city')
+  compose_win = vim.api.nvim_get_current_win()
+  compose_buf = vim.api.nvim_win_get_buf(compose_win)
+  timeline_win = nil
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local b = vim.api.nvim_win_get_buf(w)
+    if vim.api.nvim_buf_get_name(b):match('/chat/') then
+      timeline_win = w
+    end
+  end
+  assert(timeline_win, 'the timeline is open')
+
+  cp_descs = {}
+  for _, m in ipairs(vim.api.nvim_buf_get_keymap(compose_buf, 'n')) do
+    cp_descs[m.lhs] = m.desc
+  end
+  eq(cp_descs['q'], nil, 'no q close mapping when a send key starts with q')
+  eq(cp_descs['qs'], 'gc-mail: send', 'the qs send key is mapped')
+
+  vim.api.nvim_buf_set_lines(compose_buf, 0, -1, false, { 'hello mayor', 'body line' })
+  vim.api.nvim_feedkeys('qs', 'x', false)
+  eq(vim.api.nvim_buf_get_lines(compose_buf, 0, -1, false), { '' }, 'qs sends the draft instead of closing')
+  eq(vim.api.nvim_win_is_valid(timeline_win), true, 'the timeline stays open')
+  eq(vim.api.nvim_win_is_valid(compose_win), true, 'the compose box stays open')
+end)
+
+test('chat compose: the statusline only advertises close and focus keys that are actually mapped', function()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY })
+  preload()
+
+  vim.cmd('GcMailChat imd-city')
+  local compose_win = vim.api.nvim_get_current_win()
+  local st = vim.wo[compose_win].statusline
+  assert(st:find('q close', 1, true), 'the default statusline advertises q close: ' .. st)
+  assert(st:find('<C-j>/<C-k> focus', 1, true), 'the default statusline advertises the focus pair: ' .. st)
+
+  -- A send key on the close key: the statusline stops advertising q close.
+  reset()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_send_keys = { 'q' } })
+  preload()
+
+  vim.cmd('GcMailChat imd-city')
+  compose_win = vim.api.nvim_get_current_win()
+  st = vim.wo[compose_win].statusline
+  assert(st:find('q send', 1, true), 'the send key stays advertised: ' .. st)
+  eq(st:find('q close', 1, true), nil, 'no q close advertised when q sends: ' .. st)
+  assert(st:find('<C-j>/<C-k> focus', 1, true), 'the focus pair stays advertised: ' .. st)
+
+  -- A send key starting with a focus key: only the other half is advertised.
+  reset()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_send_keys = { '<C-j>s' } })
+  preload()
+
+  vim.cmd('GcMailChat imd-city')
+  compose_win = vim.api.nvim_get_current_win()
+  st = vim.wo[compose_win].statusline
+  assert(st:find('q close', 1, true), 'q close stays advertised: ' .. st)
+  eq(st:find('<C-j> focus', 1, true), nil, 'no <C-j> focus advertised when a send key starts with it: ' .. st)
+  assert(st:find('<C-k> focus', 1, true), 'the other half stays advertised: ' .. st)
+end)
+
+test('chat compose: G keeps Vim its own motion in the draft and never leaves the compose box', function()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY })
+  preload()
+
+  vim.cmd('GcMailChat imd-city')
+  local compose_win = vim.api.nvim_get_current_win()
+  local compose_buf = vim.api.nvim_win_get_buf(compose_win)
+
+  vim.api.nvim_buf_set_lines(compose_buf, 0, -1, false, { 'one', 'two', 'three' })
+  vim.api.nvim_win_set_cursor(compose_win, { 1, 0 })
+  vim.api.nvim_feedkeys('G', 'x', false)
+  eq(vim.api.nvim_win_get_cursor(compose_win), { 3, 0 }, 'G moves to the last draft line')
+  eq(vim.api.nvim_get_current_win(), compose_win, 'focus stays in the compose box')
+  vim.api.nvim_feedkeys('gg', 'x', false)
+  eq(vim.api.nvim_win_get_cursor(compose_win), { 1, 0 }, 'gg moves back to the first draft line')
+  eq(gc_mail.queue.list(), {}, 'motion queues nothing')
 end)
 
 test('timeline keys: <CR> opens message, t opens thread, u marks unread, R reloads', function()
@@ -6771,7 +7095,7 @@ test('chat status: correspondent, city, liveness and unread count; a narrow wind
     return vim.wo[chat.timeline_win].statusline
   end
   eq(status(), ' mayor in imd-city · live · 1 unread ', 'idle, one unread')
-  eq(vim.wo[chat.compose_win].statusline, ' <Space>ms send · above: q close  <CR> open  t thread  u un…',
+  eq(vim.wo[chat.compose_win].statusline, ' <Space>ms send · q close · <C-j>/<C-k> focus · above: <CR>…',
     'the keys, cut at the chat width')
   append(chat.log, message_line('mail.replied', { id = 'tc-wisp-live1', subject = 'later', body = 'later' }))
   wait('the arrival counts', function()

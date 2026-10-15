@@ -3,7 +3,9 @@
 --
 -- Opening it splits the current window to the right and puts the cursor in the
 -- compose box in normal mode; nothing else about the user's windows changes.
--- q in the timeline closes both windows.
+-- q in either window closes both windows. <C-j>/<C-k> move focus between the
+-- timeline and the compose box, ]m/[m walk message headings in the timeline,
+-- and G jumps the timeline to the latest message.
 --
 -- Live updates: while at least one chat is open, the chat is one subscriber
 -- ('chat') of the shared event log watcher (gc_mail.events) for the open
@@ -19,8 +21,10 @@ local events = require('gc_mail.events')
 
 local M = {}
 
--- The timeline's keys, after the send key on the compose window's statusline
-local KEYS = 'above: q close  <CR> open  t thread  u unread  R refresh  G latest'
+-- The timeline-only keys, shown after the shared keys on the compose window's
+-- statusline. Shared keys (q, focus) work in both chat windows; these work
+-- only in the timeline above the compose box.
+local KEYS = 'above: <CR> open  t thread  u unread  R refresh  G latest  ]m next  [m prev'
 
 -- Active chats: tab -> key -> chat
 -- where key is city.path .. '\0' .. with
@@ -450,11 +454,62 @@ local function update_status(chat)
   set_statusline(chat.timeline_win, fit(' ' .. table.concat(parts, ' · ') .. ' ', width))
 end
 
--- The compose window's statusline: the send key, then the timeline's keys
+-- The configured send keys as keycodes, for the close/focus collision guard.
+local function send_keycodes()
+  local codes = {}
+  local cfg = gc_mail.config.chat_send_keys
+  if cfg ~= false and type(cfg) == 'table' then
+    for _, key in ipairs(cfg) do
+      if type(key) == 'string' and key ~= '' then
+        codes[#codes + 1] = vim.keycode(key)
+      end
+    end
+  end
+  return codes
+end
+
+-- Whether a shared close/focus key would shadow a configured send key: an
+-- exact match, or a send key that starts with it. The shared mapping is
+-- nowait, so it would fire first and the longer send key would never reach.
+local function shadows_send(lhs, codes)
+  local code = vim.keycode(lhs)
+  for _, sc in ipairs(codes) do
+    if sc == code or sc:sub(1, #code) == code then
+      return true
+    end
+  end
+  return false
+end
+
+-- The shared keys actually installed in the compose box, for its statusline:
+-- a close/focus key a send key shadows is not mapped there, so it is not
+-- advertised either.
+local function shared_keys_text()
+  local codes = send_keycodes()
+  local parts = {}
+  if not shadows_send('q', codes) then
+    parts[#parts + 1] = 'q close'
+  end
+  local cj = not shadows_send('<C-j>', codes)
+  local ck = not shadows_send('<C-k>', codes)
+  if cj and ck then
+    parts[#parts + 1] = '<C-j>/<C-k> focus'
+  elseif cj then
+    parts[#parts + 1] = '<C-j> focus'
+  elseif ck then
+    parts[#parts + 1] = '<C-k> focus'
+  end
+  return table.concat(parts, ' · ')
+end
+
+-- The compose window's statusline: the send key, the shared keys of both chat
+-- windows, then the timeline-only keys above it
 local function update_keys(chat)
   local send_keys = gc_mail.config.chat_send_keys
   local send = type(send_keys) == 'table' and send_keys[1] and (send_keys[1] .. ' send · ') or ''
-  set_statusline(chat.compose_win, fit(' ' .. send .. KEYS .. ' ', vim.api.nvim_win_get_width(chat.compose_win)))
+  local shared = shared_keys_text()
+  local tail = shared ~= '' and (shared .. ' · ' .. KEYS) or KEYS
+  set_statusline(chat.compose_win, fit(' ' .. send .. tail .. ' ', vim.api.nvim_win_get_width(chat.compose_win)))
 end
 
 -- Drops from the messages waiting below what the view now shows, all of them
@@ -1268,6 +1323,86 @@ local function on_unread_message(chat)
   end
 end
 
+-- Focus moves between the chat's own two windows: moving there never leaves
+-- the chat, so RS4 keeps the ids this chat holds unread. Each is a no-op when
+-- already there or when the chat is gone.
+local function focus_timeline(chat)
+  if valid_chat(chat) then
+    pcall(vim.api.nvim_set_current_win, chat.timeline_win)
+  end
+end
+
+local function focus_compose(chat)
+  if valid_chat(chat) then
+    pcall(vim.api.nvim_set_current_win, chat.compose_win)
+  end
+end
+
+-- The message headings of the timeline, oldest first: the start lines of the
+-- message_blocks entries that carry a message (queue records are no message
+-- of the conversation and are never a navigation stop).
+local function message_starts(chat)
+  local starts = {}
+  for _, block in ipairs(chat.message_blocks) do
+    if block.message then
+      starts[#starts + 1] = block.start_line
+    end
+  end
+  return starts
+end
+
+-- Land the timeline cursor on the heading line of the adjacent message: the
+-- first message whose heading is below the cursor for next, the last one
+-- above it for previous. Inside a message the adjacent one wins; at the first
+-- or last message the cursor stays where it is.
+local function goto_message(chat, direction)
+  if not valid_chat(chat) then
+    return
+  end
+  local starts = message_starts(chat)
+  if #starts == 0 then
+    return
+  end
+  local row = vim.api.nvim_win_get_cursor(chat.timeline_win)[1]
+  local target = nil
+  if direction > 0 then
+    for _, line in ipairs(starts) do
+      if line > row then
+        target = line
+        break
+      end
+    end
+    -- Inside a message but past its heading: the next heading still wins, so
+    -- a row exactly on a heading moves to the one after it. At or past the
+    -- last heading there is nowhere to go.
+  else
+    for i = #starts, 1, -1 do
+      if starts[i] < row then
+        target = starts[i]
+        break
+      end
+    end
+  end
+  if target then
+    vim.api.nvim_win_set_cursor(chat.timeline_win, { target, 0 })
+    update_below(chat)
+  end
+end
+
+-- Jump the timeline to the latest message: the cursor lands on the last line
+-- and the view follows the end again under the autoscroll rules (the waiting
+-- anchor is off, the newer-below count clears through update_below).
+local function jump_latest(chat)
+  if not valid_chat(chat) then
+    return
+  end
+  chat.pending_place, chat.place_wait, chat.place_view = nil, nil, nil
+  local last = vim.api.nvim_buf_line_count(chat.timeline_buf)
+  last = math.max(last, 1)
+  vim.api.nvim_win_set_cursor(chat.timeline_win, { last, 0 })
+  update_below(chat)
+end
+
 function M.open(city_arg, with_arg)
   local cached = gc_mail.cached_cities()
   if not cached or #cached == 0 then
@@ -1434,6 +1569,10 @@ function M.open(city_arg, with_arg)
       update_below(chat)
     end, 'gc-mail: jump to the latest message' },
     { 'q', function() M.close(chat) end, 'gc-mail: close chat' },
+    { '<C-j>', function() focus_compose(chat) end, 'gc-mail: focus compose' },
+    { '<C-k>', function() focus_timeline(chat) end, 'gc-mail: focus timeline' },
+    { ']m', function() goto_message(chat, 1) end, 'gc-mail: next message' },
+    { '[m', function() goto_message(chat, -1) end, 'gc-mail: previous message' },
   }
   for _, item in ipairs(tl_map) do
     vim.keymap.set('n', item[1], item[2], {
@@ -1442,6 +1581,30 @@ function M.open(city_arg, with_arg)
       silent = true,
       desc = item[3],
     })
+  end
+
+  -- The compose box shares the close and focus keys; nothing here sends mail
+  -- and nothing is mapped in insert mode, so typing is unaffected. M.close
+  -- stays the one close path, with the same draft preservation as q in the
+  -- timeline. A new mapping never shadows a configured send key: where they
+  -- collide, or where a send key starts with the shared key, the shared
+  -- mapping is skipped and the send key keeps working. (G stays Vim's own
+  -- motion in the editable draft; jump-to-latest lives on the timeline.)
+  local codes = send_keycodes()
+  local cp_map = {
+    { 'q', function() M.close(chat) end, 'gc-mail: close chat' },
+    { '<C-j>', function() focus_compose(chat) end, 'gc-mail: focus compose' },
+    { '<C-k>', function() focus_timeline(chat) end, 'gc-mail: focus timeline' },
+  }
+  for _, item in ipairs(cp_map) do
+    if not shadows_send(item[1], codes) then
+      vim.keymap.set('n', item[1], item[2], {
+        buffer = compose_buf,
+        nowait = true,
+        silent = true,
+        desc = item[3],
+      })
+    end
   end
 
   local group = vim.api.nvim_create_augroup(('gc_mail_chat_%d_%d'):format(timeline_win, compose_win), { clear = true })
