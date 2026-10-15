@@ -5711,6 +5711,99 @@ test('chat live: with the timeline cursor moved up, an appended message does not
   eq(vim.api.nvim_win_get_cursor(chat.timeline_win), { 3, 0 }, 'the cursor stays where it was')
 end)
 
+-- The timeline of `chat` six rows high, too short for the conversation, with
+-- the cursor and the view at its end.
+local function short_timeline(chat)
+  vim.api.nvim_win_set_height(chat.timeline_win, 6)
+  vim.api.nvim_win_set_cursor(chat.timeline_win, { #lines_of(chat.timeline_win), 0 })
+end
+
+-- The timeline's cursor line, first and last line shown, and last line.
+local function timeline_view(chat)
+  return vim.api.nvim_win_call(chat.timeline_win, function()
+    return { cursor = vim.fn.line('.'), top = vim.fn.line('w0'), bottom = vim.fn.line('w$'), last = vim.fn.line('$') }
+  end)
+end
+
+-- The count of newer messages below the view the timeline's statusline shows.
+local function newer_below(chat)
+  return tonumber(vim.wo[chat.timeline_win].statusline:match('↓ (%d+) newer below'))
+end
+
+-- The timeline's view scrolled up 8 lines with <C-y>, no cursor motion.
+local function scroll_up(chat)
+  vim.api.nvim_win_call(chat.timeline_win, function()
+    vim.cmd('exe "normal! 8\\<C-y>"')
+  end)
+end
+
+test('chat live: with the view scrolled up, an appended message keeps cursor and topline and counts one newer below', function()
+  local chat = live_chat()
+  short_timeline(chat)
+  local start = timeline_view(chat)
+  eq(start.bottom, start.last, 'the view shows the end')
+  scroll_up(chat)
+  local before = timeline_view(chat)
+  assert(before.bottom < before.last, 'the view no longer shows the end')
+  local compose_cursor = vim.api.nvim_win_get_cursor(chat.compose_win)
+  eq(newer_below(chat), nil, 'nothing waits below yet')
+  append(chat.log, message_line('mail.replied', { id = 'tc-wisp-live1', subject = 'later', body = 'later\nanswer' }))
+  wait('the answer shows', function()
+    return shown(chat):find('later\nanswer', 1, true) ~= nil
+  end, 1000)
+  local after = timeline_view(chat)
+  eq({ after.cursor, after.top, after.bottom }, { before.cursor, before.top, before.bottom }, 'cursor and view held')
+  eq(newer_below(chat), 1, 'one newer message below')
+  eq(vim.api.nvim_win_get_cursor(chat.compose_win), compose_cursor, 'the compose cursor did not move')
+
+  -- A read flag and a closed mark above change no message id: no new count
+  local heading = '## mayor · ' .. os.date('%H:%M', chat.t1)
+  append(chat.log, id_line('mail.marked_read', 'tc-wisp-m2') .. id_line('mail.archived', 'tc-wisp-m3'))
+  wait('the read flag and the closed mark show', function()
+    local lines = lines_of(chat.timeline_win)
+    return lines[7] == heading and lines[14]:find('(closed)', 1, true) ~= nil
+  end, 1000)
+  local later = timeline_view(chat)
+  eq({ later.cursor, later.top }, { before.cursor, before.top }, 'still held')
+  eq(newer_below(chat), 1, 'still one newer message below')
+end)
+
+test('chat live: with the cursor and the view at the end, the view follows an appended message', function()
+  local chat = live_chat()
+  short_timeline(chat)
+  append(chat.log, message_line('mail.replied', { id = 'tc-wisp-live1', subject = 'later', body = 'later\nanswer' }))
+  wait('the answer shows', function()
+    return shown(chat):find('later\nanswer', 1, true) ~= nil
+  end, 1000)
+  local after = timeline_view(chat)
+  eq({ after.cursor, after.bottom }, { after.last, after.last }, 'cursor and view on the new end')
+  eq(lines_of(chat.timeline_win)[after.last], '---', 'the end of the new message')
+  eq(newer_below(chat), nil, 'nothing counted below')
+end)
+
+test('chat live: G jumps to the latest message, clears the count and follows again', function()
+  local chat = live_chat()
+  short_timeline(chat)
+  scroll_up(chat)
+  append(chat.log, message_line('mail.replied', { id = 'tc-wisp-live1', subject = 'later', body = 'later\nanswer' })
+    .. message_line('mail.replied', { id = 'tc-wisp-live2', subject = 'and more', body = 'and more' }))
+  wait('both answers counted', function()
+    return newer_below(chat) == 2
+  end, 1000)
+  vim.api.nvim_set_current_win(chat.timeline_win)
+  vim.api.nvim_feedkeys('G', 'x', false)
+  local at = timeline_view(chat)
+  eq({ at.cursor, at.bottom }, { at.last, at.last }, 'at the latest message')
+  eq(newer_below(chat), nil, 'the count is cleared')
+  append(chat.log, message_line('mail.replied', { id = 'tc-wisp-live3', subject = 'newest', body = 'newest' }))
+  wait('the newest shows', function()
+    return shown(chat):find('newest', 1, true) ~= nil
+  end, 1000)
+  local after = timeline_view(chat)
+  eq({ after.cursor, after.bottom }, { after.last, after.last }, 'following again')
+  eq(newer_below(chat), nil, 'nothing counted below')
+end)
+
 test('chat live: your own mail.sent hides its sending record without a load', function()
   local chat = live_chat()
   local path = chat.cities[1].path

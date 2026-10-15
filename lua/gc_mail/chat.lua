@@ -364,6 +364,47 @@ local function is_queue_hidden(rec, history_messages)
   return false
 end
 
+-- The timeline window's view: { view = winsaveview(), bottom = the last line
+-- shown, last = the buffer's last line }, read in that window
+local function view_of(chat)
+  return vim.api.nvim_win_call(chat.timeline_win, function()
+    return { view = vim.fn.winsaveview(), bottom = vim.fn.line('w$'), last = vim.fn.line('$') }
+  end)
+end
+
+-- The timeline follows the end while its view shows the last line with the
+-- cursor on it: scrolling the view up (the wheel, <C-y>) or moving the cursor
+-- up stops following, G resumes it
+local function following(at)
+  return at.view.lnum >= at.last and at.bottom >= at.last
+end
+
+-- Drops from the messages waiting below what the view now shows, all of them
+-- once it follows the end again, and shows their count in the timeline's
+-- statusline
+local function update_below(chat)
+  if not valid_chat(chat) then
+    return
+  end
+  if next(chat.below) ~= nil then
+    local at = view_of(chat)
+    local waiting = {}
+    if not following(at) then
+      for _, block in ipairs(chat.message_blocks) do
+        if block.message and chat.below[block.message.id] and block.start_line > at.bottom then
+          waiting[block.message.id] = true
+        end
+      end
+    end
+    chat.below = waiting
+  end
+  local count = vim.tbl_count(chat.below)
+  local status = count > 0 and (' ↓ %d newer below (G) %%<'):format(count) .. TITLE or TITLE
+  if vim.wo[chat.timeline_win].statusline ~= status then
+    vim.wo[chat.timeline_win].statusline = status
+  end
+end
+
 function M.render(chat)
   if not valid_chat(chat) then
     return
@@ -489,11 +530,15 @@ function M.render(chat)
     end
   end
 
-  local prev_cursor = vim.api.nvim_win_get_cursor(chat.timeline_win)
-  local prev_line = prev_cursor[1]
-  local prev_count = #chat.lines
-  local was_at_end = chat.just_opened or (prev_count == 0) or (prev_line >= prev_count)
+  local before = view_of(chat)
+  local follow = chat.just_opened or #chat.lines == 0 or following(before)
   chat.just_opened = false
+  local shown_ids = {}
+  for _, block in ipairs(chat.message_blocks) do
+    if block.message then
+      shown_ids[block.message.id] = true
+    end
+  end
 
   vim.bo[chat.timeline_buf].modifiable = true
   vim.api.nvim_buf_set_lines(chat.timeline_buf, 0, -1, false, lines)
@@ -502,12 +547,27 @@ function M.render(chat)
   chat.lines = lines
   chat.message_blocks = blocks
 
-  local new_count = #lines
-  if was_at_end then
-    vim.api.nvim_win_set_cursor(chat.timeline_win, { math.max(1, new_count), 0 })
+  local new_count = math.max(1, #lines)
+  if follow then
+    chat.below = {}
+    vim.api.nvim_win_set_cursor(chat.timeline_win, { new_count, 0 })
   else
-    vim.api.nvim_win_set_cursor(chat.timeline_win, { math.max(1, math.min(prev_line, new_count)), prev_cursor[2] })
+    -- Held: the same cursor and topline; a message first shown below the
+    -- view waits there, counted by its id
+    local view = before.view
+    view.lnum = math.min(view.lnum, new_count)
+    view.topline = math.min(view.topline, new_count)
+    local bottom = vim.api.nvim_win_call(chat.timeline_win, function()
+      vim.fn.winrestview(view)
+      return vim.fn.line('w$')
+    end)
+    for _, block in ipairs(blocks) do
+      if block.message and not shown_ids[block.message.id] and block.start_line > bottom then
+        chat.below[block.message.id] = true
+      end
+    end
   end
+  update_below(chat)
 end
 
 -- Whether message `m` belongs to the conversation of the human with `with`
@@ -948,6 +1008,8 @@ function M.open(city_arg, with_arg)
     compose_buf = compose_buf,
     lines = {},
     message_blocks = {},
+    -- Messages first shown below the view while it did not follow: id -> true
+    below = {},
     just_opened = true,
   }
 
@@ -973,6 +1035,11 @@ function M.open(city_arg, with_arg)
     { 'R', function()
       reload(chat)
     end, 'gc-mail: reload history' },
+    { 'G', function()
+      -- A count keeps G's own meaning: that line
+      vim.cmd('normal! ' .. (vim.v.count > 0 and vim.v.count or '') .. 'G')
+      update_below(chat)
+    end, 'gc-mail: jump to the latest message' },
     { 'q', function() M.close(chat) end, 'gc-mail: close chat' },
   }
   for _, item in ipairs(tl_map) do
@@ -1006,6 +1073,22 @@ function M.open(city_arg, with_arg)
     group = group,
     pattern = tostring(compose_win),
     callback = on_win_closed,
+  })
+
+  -- Reading down to a waiting message takes it off the count
+  vim.api.nvim_create_autocmd('WinScrolled', {
+    group = group,
+    pattern = tostring(timeline_win),
+    callback = function()
+      update_below(chat)
+    end,
+  })
+  vim.api.nvim_create_autocmd('CursorMoved', {
+    group = group,
+    buffer = timeline_buf,
+    callback = function()
+      update_below(chat)
+    end,
   })
 
   vim.api.nvim_create_autocmd('WinEnter', {

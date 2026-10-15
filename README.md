@@ -407,6 +407,7 @@ placing the cursor in the compose box in normal mode.
 | `t` | timeline | open thread of message under cursor |
 | `u` | timeline | mark message under cursor unread (`mailbox.actions.unread`) |
 | `R` | timeline | reload history (`history.load`) and re-render |
+| `G` | timeline | jump to the latest message and follow the end again (with a count, `G`'s own line) |
 | `q` | timeline | close both chat windows (non-empty draft preserved) |
 
 - **Timeline rendering.** Rendered oldest first from `history.conversation(city, with)`
@@ -422,9 +423,14 @@ placing the cursor in the compose box in normal mode.
   `## you · queued` (pending), or `## you · failed: <error>` (failed), followed by
   the body verbatim. The record is replaced once the delivered message appears in
   history. An empty conversation displays `no messages with <with> in <city> yet`.
-- **Scrolling.** Cursor remains at the end on open and on re-render if it was
-  previously at the end; otherwise it stays on its line without moving cursors in
-  other windows.
+- **Scrolling.** The timeline follows the end while its view shows the last line
+  with the cursor on it: on open and on every re-render the cursor lands on the
+  new last line. Scrolling the view up (the wheel, `<C-y>`) or moving the cursor up
+  stops following: a re-render then keeps the cursor and the first line shown, and
+  counts each message (by id) first shown below the view; a changed read or closed
+  mark is never counted. The timeline's statusline shows ` ↓ <n> newer below (G)`
+  until the view shows them; `G` jumps to the latest message, clears the count and
+  follows again. A re-render never moves cursors in other windows.
 - **Sending.** Sends through `gc_mail.send(compose_buf, city, { to = with })`.
   The compose box clears in one undo step (`u` restores the text). The timeline
   shows `sending…` immediately, and refreshes via `history.load` upon queue delivery.
