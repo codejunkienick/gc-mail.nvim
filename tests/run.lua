@@ -6106,6 +6106,52 @@ test('c in the mailbox float opens the chat with the sender in its city and clos
   eq(vim.tbl_contains(chat_timeline_names(), 'imd-city/chat/builder'), true, 'a message from human: its recipient')
 end)
 
+test('preview: closing the mailbox over an open chat removes the pane and keeps the chat', function()
+  chats_fixture()
+  inbox('imd-city', { msg('ic-wisp-a1', { subject = 'only subject', body = 'only body' }) })
+  inbox('side city', {})
+  gc_mail.config.preview = true
+  gc_mail.config.chat_mark_read = false
+  local chat = require('gc_mail.chat').open('imd-city', 'mayor')
+  assert(chat, 'the chat opened')
+  local chat_win, chat_buf = chat.compose_win, chat.compose_buf
+  local chat_cursor = vim.api.nvim_win_get_cursor(chat_win)
+  local win = mailbox().open()
+  settled(win, 1)
+  pane_shows({ 'only body' }, 'the preview over the chat')
+  vim.api.nvim_feedkeys('q', 'x', false)
+  eq(preview_win(), nil, 'no preview window remains')
+  eq(#floats(), 0, 'no float remains')
+  local groups = {}
+  for _, au in ipairs(vim.api.nvim_get_autocmds({})) do
+    if au.group_name and au.group_name:find('^gc_mail_preview') then
+      groups[#groups + 1] = au.group_name
+    end
+  end
+  eq(groups, {}, 'no preview autocmd group remains')
+  eq(vim.api.nvim_win_is_valid(chat_win), true, 'the chat window is still valid')
+  eq(vim.api.nvim_win_get_buf(chat_win), chat_buf, 'with its buffer')
+  eq(vim.api.nvim_win_get_cursor(chat_win), chat_cursor, 'and its cursor')
+  eq(vim.api.nvim_win_is_valid(chat.timeline_win), true, 'the timeline stays too')
+  -- Leaving the mailbox for the chat closes the list from its own WinLeave,
+  -- which never fires WinClosed: the pane must go with it all the same.
+  win = mailbox().open()
+  settled(win, 1)
+  pane_shows({ 'only body' }, 'the preview again')
+  vim.api.nvim_set_current_win(chat_win)
+  eq(preview_win(), nil, 'no preview window remains after leaving it')
+  eq(#floats(), 0, 'no float remains after leaving it')
+  groups = {}
+  for _, au in ipairs(vim.api.nvim_get_autocmds({})) do
+    if au.group_name and au.group_name:find('^gc_mail_preview') then
+      groups[#groups + 1] = au.group_name
+    end
+  end
+  eq(groups, {}, 'no preview autocmd group remains after leaving it')
+  eq(vim.api.nvim_win_is_valid(chat_win), true, 'the chat window is still valid')
+  eq(vim.api.nvim_win_get_buf(chat_win), chat_buf, 'with its buffer')
+end)
+
 test('c in the panel opens the chat beside its origin window and the panel stays', function()
   local cities = chats_fixture()
   inbox('imd-city', { msg('ic-wisp-a1', { subject = 'first' }) })

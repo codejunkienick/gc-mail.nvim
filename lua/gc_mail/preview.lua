@@ -240,6 +240,19 @@ function M.attach(opts)
       pane_win, pane_buf, last, shown = nil, nil, nil, false
     end
   end })
+  -- A float list closes when it is left (the picker's WinLeave), and closing
+  -- it from that WinLeave never fires WinClosed and wipes the list buffer
+  -- (taking buffer-scoped autocmds with it), so the pane, its timer and this
+  -- group would leak; close with the list instead. The handler stays global
+  -- so the wipe cannot take it first; it only answers for the list buffer. A
+  -- split list (the panel) stays open when it is left, so its pane stays too.
+  if opts.kind == 'float' then
+    vim.api.nvim_create_autocmd('WinLeave', { group = group, callback = function(args)
+      if args.buf == list_buf then
+        handle.close()
+      end
+    end })
+  end
   return handle
 end
 
