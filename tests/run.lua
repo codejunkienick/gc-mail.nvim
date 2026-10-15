@@ -502,6 +502,90 @@ test('queue.subscribe: a subscriber runs after add, after successful send and af
   eq(#events, 0, 'subscriber did not run after unsubscribe')
 end)
 
+test('fs.list: a missing directory lists as empty, and a written file lists back', function()
+  local fs = require('gc_mail.fs')
+  local dir = scratch .. '/fs-list-' .. run_id
+  eq(fs.list(dir), {}, 'missing directory')
+  assert(fs.ensure_dir(dir))
+  write(dir .. '/a.txt', 'x')
+  eq(fs.list(dir), { 'a.txt' }, 'listed')
+end)
+
+test('fs: stage plus commit leaves a 0600 file with the text and no temp file', function()
+  local fs = require('gc_mail.fs')
+  local dir = scratch .. '/fs-stage-' .. run_id
+  assert(fs.ensure_dir(dir))
+  local temp = assert(fs.stage(dir, 'note.json', '{"a":1}'))
+  eq(fs.commit(temp, dir .. '/note.json'), true, 'committed')
+  eq(read_file(dir .. '/note.json'), '{"a":1}', 'the text is there whole')
+  eq(vim.uv.fs_stat(dir .. '/note.json').mode % 512, 384, 'mode 0600')
+  eq(vim.tbl_filter(function(name)
+    return name:find('%.tmp$') ~= nil
+  end, vim.fn.readdir(dir)), {}, 'no temp file left')
+  eq(fs.read(dir .. '/note.json'), '{"a":1}', 'read back')
+end)
+
+test('fs: a failed write leaves no temp file', function()
+  local fs = require('gc_mail.fs')
+  local dir = scratch .. '/fs-fail-' .. run_id
+  assert(fs.ensure_dir(dir))
+  local real_write = vim.uv.fs_write
+  vim.uv.fs_write = function()
+    return nil, 'ENOSPC: no space left on device'
+  end
+  local ok, temp, err = pcall(fs.stage, dir, 'note.json', 'x')
+  vim.uv.fs_write = real_write
+  assert(ok, temp)
+  eq({ temp, err }, { nil, 'ENOSPC: no space left on device' }, 'stage refused')
+  eq(vim.fn.readdir(dir), {}, 'no temp file left')
+end)
+
+test('fs.ensure_dir: a mkdir failure keeps the plain text and the raised detail apart', function()
+  local fs = require('gc_mail.fs')
+  local dir = scratch .. '/fs-mkdir-' .. run_id .. '/inner'
+  local real_mkdir = vim.fn.mkdir
+  vim.fn.mkdir = function()
+    error('Vim:E739: Cannot create directory ' .. dir .. ': permission denied', 0)
+  end
+  local ok, err, detail = fs.ensure_dir(dir)
+  vim.fn.mkdir = real_mkdir
+  eq(ok, nil, 'ensure_dir refused')
+  eq(err, 'cannot create ' .. dir, 'plain text')
+  eq(detail, 'Vim:E739: Cannot create directory ' .. dir .. ': permission denied', 'detail apart')
+  -- No raise, made == 0: the same plain text and no detail.
+  vim.fn.mkdir = function()
+    return 0
+  end
+  local ok2, err2, detail2 = fs.ensure_dir(dir)
+  vim.fn.mkdir = real_mkdir
+  eq({ ok2, err2, detail2 }, { nil, 'cannot create ' .. dir, nil }, 'made 0')
+end)
+
+test('the queue mkdir failure keeps the Vim detail; fs keeps it apart', function()
+  local bad_dir = scratch .. '/queue-mkdir-' .. run_id .. '/queue'
+  gc_mail.queue.configure({ dir = bad_dir, retry_ms = RETRY })
+  local real_mkdir = vim.fn.mkdir
+  vim.fn.mkdir = function()
+    error('Vim:E739: Cannot create directory ' .. bad_dir .. ': permission denied', 0)
+  end
+  local id, err = gc_mail.queue.add(TWO[1], { subject = 'x', body = 'y' })
+  vim.fn.mkdir = real_mkdir
+  eq(id, nil, 'not queued')
+  eq(err, 'cannot write the queue file: cannot create ' .. bad_dir
+    .. ': Vim:E739: Cannot create directory ' .. bad_dir .. ': permission denied', 'queue detail kept')
+end)
+
+test('a queue entry that does not parse keeps its raw text on the entry', function()
+  gc_mail.queue.stop()
+  vim.fn.mkdir(queue_dir, 'p')
+  write(queue_dir .. '/0000000000000007-00001-00000007.json', 'not json at all')
+  local entries = gc_mail.queue.list()
+  eq(#entries, 1, 'one entry')
+  eq(entries[1].record, nil, 'no record')
+  eq(entries[1].raw, 'not json at all', 'raw text kept')
+  eq(gc_mail.queue.raw, nil, 'M.raw is gone')
+end)
+
 test('the subject is the first non-empty line trimmed to 72 characters', function()
   local long = string.rep('é', 80)
   local buf = buffer({ '   ', '\t' .. long .. '  ', 'body' })
@@ -1673,6 +1757,33 @@ test('opening a message shows it at once, marks it read once, and keeps it liste
   settled(win, 1)
   vim.wait(100)
   eq(rows(win), { '    demo-city  mayor  Mailbox plan' }, 'kept across a restart')
+  vim.api.nvim_feedkeys('q', 'x', false)
+end)
+
+test('a kept copy whose directory cannot be created says only the plain cannot-create text', function()
+  preload()
+  inbox('demo-city', { msg('ic-wisp-a1', { subject = 'Keep plain' }) })
+  inbox('other city', {})
+  answer('read', { message = msg('ic-wisp-a1', { subject = 'Keep plain', read = true }) })
+  local blocker = scratch .. '/keep-block-' .. run_id
+  write(blocker, 'x')
+  local bad_dir = blocker .. '/mailbox'
+  mailbox().configure({ dir = bad_dir })
+  local win = mailbox().open()
+  settled(win, 1)
+  vim.api.nvim_feedkeys(vim.keycode('<CR>'), 'x', false)
+  wait('the kept copy failure was said', function()
+    return vim.tbl_filter(function(n)
+      return n.message:find('cannot keep a copy', 1, true) ~= nil
+    end, notes)[1] ~= nil
+  end)
+  local said = vim.tbl_filter(function(n)
+    return n.message:find('cannot keep a copy', 1, true) ~= nil
+  end, notes)
+  eq(#said, 1, 'said once')
+  eq(said[1].message,
+    ('gc-mail: read, but cannot keep a copy of "Keep plain" (cannot create %s); it leaves the mailbox once gc closes it'):format(bad_dir),
+    'plain text, no Vim detail')
   vim.api.nvim_feedkeys('q', 'x', false)
 end)
 

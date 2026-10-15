@@ -42,6 +42,7 @@
 --    deleted or changed since, and never drops one whose action then fails.
 local queue = require('gc_mail.queue')
 local gc = require('gc_mail.gc')
+local fs = require('gc_mail.fs')
 
 local M = {}
 
@@ -380,11 +381,9 @@ end
 -- fsynced, then renamed over the old copy. true, or nil and the reason.
 local function keep(entry)
   local folder = dir()
-  if vim.fn.isdirectory(folder) == 0 then
-    local ok, made = pcall(vim.fn.mkdir, folder, 'p', tonumber('700', 8))
-    if not ok or made == 0 then
-      return nil, 'cannot create ' .. folder
-    end
+  local ok, err = fs.ensure_dir(folder)
+  if not ok then
+    return nil, err
   end
   local m = entry.message
   local text = vim.json.encode({
@@ -393,34 +392,15 @@ local function keep(entry)
       read = entry.read, thread_id = m.thread_id },
   })
   local name = file_of(entry.city, m.id)
-  local temp = ('%s/.%s.%d.%s.tmp'):format(folder, name, uv.os_getpid(), vim.text.hexencode(uv.random(4)))
-  local fd, err = uv.fs_open(temp, 'wx', tonumber('600', 8))
-  if not fd then
-    return nil, tostring(err)
+  local temp, serr = fs.stage(folder, name, text)
+  if not temp then
+    return nil, tostring(serr)
   end
-  local written
-  written, err = uv.fs_write(fd, text, 0)
-  local synced = written == #text and uv.fs_fsync(fd)
-  uv.fs_close(fd)
-  if synced then
-    synced, err = uv.fs_rename(temp, folder .. '/' .. name)
-  end
-  if not synced then
-    uv.fs_unlink(temp)
-    return nil, tostring(err or 'short write')
+  local committed, cerr = fs.commit(temp, folder .. '/' .. name)
+  if not committed then
+    return nil, tostring(cerr or 'short write')
   end
   return true
-end
-
-local function read_file(path)
-  local fd = uv.fs_open(path, 'r', 0)
-  if not fd then
-    return nil
-  end
-  local stat = uv.fs_fstat(fd)
-  local data = stat and uv.fs_read(fd, stat.size, 0)
-  uv.fs_close(fd)
-  return data
 end
 
 -- Removes the kept copy of `entry`; a copy that is not there is fine.
@@ -437,24 +417,14 @@ end
 --- empty mailbox).
 function M.kept()
   local folder = dir()
-  local handle, err = uv.fs_scandir(folder)
-  if not handle then
-    if tostring(err):find('ENOENT') then
-      return {}, {}
-    end
+  local names, err = fs.list(folder)
+  if not names then
     return nil, 'cannot read the mailbox directory: ' .. tostring(err)
   end
   local kept, bad = {}, {}
-  while true do
-    local name, failure = uv.fs_scandir_next(handle)
-    if not name then
-      if failure then
-        return nil, 'cannot read the mailbox directory: ' .. tostring(failure)
-      end
-      break
-    end
+  for _, name in ipairs(names) do
     if name:match('^%x+%-.+%.json$') then
-      local data = read_file(folder .. '/' .. name)
+      local data = fs.read(folder .. '/' .. name)
       local ok, record = decode(data or '')
       local why = data == nil and 'unreadable' or (not ok and 'not JSON') or invalid_kept(record)
       if why then

@@ -489,7 +489,7 @@ function M.open_queue()
       reload(picker)
     end),
     o = act(function(picker, entry)
-      local text = entry.record and entry.record.body or queue.raw(entry.name) or ''
+      local text = entry.record and entry.record.body or entry.raw or ''
       picker.close()
       vim.cmd('new')
       vim.api.nvim_buf_set_lines(0, 0, -1, false, vim.split(text, '\n', { plain = true }))

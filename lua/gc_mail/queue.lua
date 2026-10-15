@@ -40,6 +40,8 @@
 -- that is preferred to losing one.
 local M = {}
 
+local fs = require('gc_mail.fs')
+
 local uv = vim.uv
 
 local defaults = {
@@ -107,13 +109,8 @@ local function notify_subscribers(payload)
 end
 
 function M.subscribe(name, fn)
-  if fn == nil then
-    subscribers[name] = nil
-    subscriber_errors[name] = nil
-  else
-    subscribers[name] = fn
-    subscriber_errors[name] = nil
-  end
+  subscribers[name] = fn
+  subscriber_errors[name] = nil
 end
 
 function M.configure(opts)
@@ -142,16 +139,6 @@ end
 
 local function path(name)
   return config.dir .. '/' .. name
-end
-
-local function ensure_dir()
-  if vim.fn.isdirectory(config.dir) == 0 then
-    local ok, made = pcall(vim.fn.mkdir, config.dir, 'p', tonumber('700', 8))
-    if not ok or made == 0 then
-      return nil, 'cannot create ' .. config.dir .. (ok and '' or (': ' .. tostring(made)))
-    end
-  end
-  return true
 end
 
 local FIELDS = {
@@ -235,15 +222,9 @@ end
 local who = M.who
 
 local function read(name)
-  local fd, err = uv.fs_open(path(name), 'r', 0)
-  if not fd then
-    return nil, err
-  end
-  local stat = uv.fs_fstat(fd)
-  local data = stat and uv.fs_read(fd, stat.size, 0)
-  uv.fs_close(fd)
+  local data, err = fs.read(path(name))
   if not data then
-    return nil, 'unreadable'
+    return nil, err
   end
   local ok, record = pcall(vim.json.decode, data)
   local reason = ok and invalid(record) or (not ok and 'not JSON')
@@ -256,26 +237,11 @@ end
 -- Writes `record` to a fresh temp file in the queue directory, in full and
 -- fsynced; returns the temp file's path, which the caller renames.
 local function stage(name, record)
-  local ok, err = ensure_dir()
+  local ok, err, detail = fs.ensure_dir(config.dir)
   if not ok then
-    return nil, err
+    return nil, detail and (err .. ': ' .. detail) or err
   end
-  local text = vim.json.encode(record)
-  local temp = path(('.%s.%d.%s.tmp'):format(name, uv.os_getpid(), vim.text.hexencode(uv.random(4))))
-  local fd
-  fd, err = uv.fs_open(temp, 'wx', tonumber('600', 8))
-  if not fd then
-    return nil, err
-  end
-  local written
-  written, err = uv.fs_write(fd, text, 0)
-  local synced = written == #text and uv.fs_fsync(fd)
-  uv.fs_close(fd)
-  if not synced then
-    uv.fs_unlink(temp)
-    return nil, err or 'short write'
-  end
-  return temp
+  return fs.stage(config.dir, name, vim.json.encode(record))
 end
 
 -- Writes `record` as `name` atomically: staged, then renamed over `name`.
@@ -284,13 +250,7 @@ local function write(name, record)
   if not temp then
     return nil, err
   end
-  local ok
-  ok, err = uv.fs_rename(temp, path(name))
-  if not ok then
-    uv.fs_unlink(temp)
-    return nil, err
-  end
-  return true
+  return fs.commit(temp, path(name))
 end
 
 
@@ -365,53 +325,30 @@ local function touch(name)
   return uv.fs_utime(path(name), t, t)
 end
 
---- The raw text of queue file `name` (for one that does not parse).
-function M.raw(name)
-  local fd = uv.fs_open(path(name), 'r', 0)
-  if not fd then
-    return nil
-  end
-  local stat = uv.fs_fstat(fd)
-  local data = stat and uv.fs_read(fd, stat.size, 0)
-  uv.fs_close(fd)
-  return data
-end
-
 -- Every name in the queue directory, or nil and the reason. A directory that
 -- does not exist yet is an empty queue; any other failure to list it is an
 -- error, never an empty list (rule 6).
 local function scan()
-  local handle, err = uv.fs_scandir(config.dir)
-  if not handle then
-    if tostring(err):find('ENOENT') then
-      return {}
-    end
+  local names, err = fs.list(config.dir)
+  if not names then
     return nil, 'cannot read the queue directory: ' .. tostring(err)
   end
-  local names = {}
-  while true do
-    local name, failure = uv.fs_scandir_next(handle)
-    if not name then
-      if failure then
-        return nil, 'cannot read the queue directory: ' .. tostring(failure)
-      end
-      return names
-    end
-    names[#names + 1] = name
-  end
+  return names
 end
 
 -- The messages among `names`, oldest first: { id, name, claimed (pid or
--- nil), token, record (nil when unreadable), error }.
+-- nil), token, record (nil when unreadable), error, raw (the file's text
+-- when it does not parse) }.
 local function entries(names)
   local result = {}
   for _, name in ipairs(names) do
     local id = name:match(NAME_RE)
     local claimed_id, pid, token = name:match(CLAIM_RE)
     if id or claimed_id then
-      local record, err = read(name)
+      local record, err, raw = read(name)
       result[#result + 1] = {
         id = id or claimed_id, name = name, claimed = pid and tonumber(pid), token = token, record = record, error = err,
+        raw = raw,
       }
     end
   end
@@ -422,7 +359,7 @@ local function entries(names)
 end
 
 --- Every message in the queue, oldest first: { id, name, claimed (pid or
---- nil), record (nil when unreadable), error }; or nil and the reason when
+--- nil), record (nil when unreadable), error, raw }; or nil and the reason when
 --- the queue directory cannot be read.
 function M.list()
   if not config.dir then
@@ -474,7 +411,7 @@ function M.add(city, message)
     if count >= config.max_files then
       return nil, ('the queue already holds %d messages; send or delete some with :GcMailQueue'):format(config.max_files)
     end
-    local ok, rerr = uv.fs_rename(temp, path(name))
+    local ok, rerr = fs.commit(temp, path(name))
     if not ok then
       return nil, 'cannot write the queue file: ' .. tostring(rerr)
     end
