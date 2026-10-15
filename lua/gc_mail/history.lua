@@ -4,6 +4,7 @@
 -- Messages include open and closed mail. Nothing runs at load time.
 local queue = require('gc_mail.queue')
 local mailbox = require('gc_mail.mailbox')
+local gc = require('gc_mail.gc')
 
 local M = {}
 
@@ -95,149 +96,139 @@ function M.load(city, opts, on_done)
     end
   end
 
-  local ok, proc_err = pcall(vim.system, argv, { text = true, timeout = timeout_ms }, function(result)
-    vim.schedule(function()
-      if result == nil or (result.code == 124 and (result.signal or 0) ~= 0) then
-        return finish(nil, ('%s did not answer within %g s'):format(what, timeout_ms / 1000))
-      end
-      if result.code ~= 0 then
-        local detail = queue.first_lines(result.stderr, 3)
-        return finish(nil, what .. ' failed' .. (detail ~= '' and (': ' .. detail) or (' (exit ' .. tostring(result.code) .. ')')))
-      end
+  gc.run(argv, timeout_ms, what, function(result, err)
+    if err then
+      return finish(nil, err)
+    end
 
-      local decoded_ok, raw_list = pcall(vim.json.decode, result.stdout or '')
-      if not decoded_ok or type(raw_list) ~= 'table' or not vim.islist(raw_list) then
-        return finish(nil, what .. ' printed something unexpected')
-      end
+    local decoded_ok, raw_list = pcall(vim.json.decode, result.stdout or '')
+    if not decoded_ok or type(raw_list) ~= 'table' or not vim.islist(raw_list) then
+      return finish(nil, what .. ' printed something unexpected')
+    end
 
-      local list = {}
-      local skipped = 0
-      for _, elem in ipairs(raw_list) do
-        local valid = true
-        if type(elem) ~= 'table' then
+    local list = {}
+    local skipped = 0
+    for _, elem in ipairs(raw_list) do
+      local valid = true
+      if type(elem) ~= 'table' then
+        valid = false
+      elseif type(elem.id) ~= 'string' or not queue.mail_id(elem.id) then
+        valid = false
+      elseif type(elem.title) ~= 'string' then
+        valid = false
+      elseif type(elem.sender) ~= 'string' or elem.sender == '' then
+        valid = false
+      elseif type(elem.status) ~= 'string' then
+        valid = false
+      elseif type(elem.created_at) ~= 'string' or not mailbox.epoch(elem.created_at) then
+        valid = false
+      elseif elem.description ~= nil and type(elem.description) ~= 'string' then
+        valid = false
+      elseif elem.metadata ~= nil and type(elem.metadata) ~= 'table' then
+        valid = false
+      elseif elem.labels ~= nil then
+        if type(elem.labels) ~= 'table' or not vim.islist(elem.labels) or not all_strings(elem.labels) then
           valid = false
-        elseif type(elem.id) ~= 'string' or not queue.mail_id(elem.id) then
-          valid = false
-        elseif type(elem.title) ~= 'string' then
-          valid = false
-        elseif type(elem.sender) ~= 'string' or elem.sender == '' then
-          valid = false
-        elseif type(elem.status) ~= 'string' then
-          valid = false
-        elseif type(elem.created_at) ~= 'string' or not mailbox.epoch(elem.created_at) then
-          valid = false
-        elseif elem.description ~= nil and type(elem.description) ~= 'string' then
-          valid = false
-        elseif elem.metadata ~= nil and type(elem.metadata) ~= 'table' then
-          valid = false
-        elseif elem.labels ~= nil then
-          if type(elem.labels) ~= 'table' or not vim.islist(elem.labels) or not all_strings(elem.labels) then
-            valid = false
-          end
         end
+      end
 
-        local recipient = nil
-        if valid then
-          if type(elem.assignee) == 'string' and elem.assignee ~= '' then
-            recipient = elem.assignee
-          elseif elem.assignee == nil or elem.assignee == vim.NIL or elem.assignee == '' then
-            if elem.metadata and type(elem.metadata) == 'table'
-                and type(elem.metadata['gc.routed_to']) == 'string' and elem.metadata['gc.routed_to'] ~= '' then
-              recipient = elem.metadata['gc.routed_to']
-            else
-              valid = false
-            end
+      local recipient = nil
+      if valid then
+        if type(elem.assignee) == 'string' and elem.assignee ~= '' then
+          recipient = elem.assignee
+        elseif elem.assignee == nil or elem.assignee == vim.NIL or elem.assignee == '' then
+          if elem.metadata and type(elem.metadata) == 'table'
+              and type(elem.metadata['gc.routed_to']) == 'string' and elem.metadata['gc.routed_to'] ~= '' then
+            recipient = elem.metadata['gc.routed_to']
           else
             valid = false
           end
+        else
+          valid = false
+        end
+      end
+
+      if not valid then
+        skipped = skipped + 1
+      else
+        local thread_id = nil
+        local reply_to = nil
+        local has_read_label = false
+        if elem.labels then
+          for _, lbl in ipairs(elem.labels) do
+            if thread_id == nil then
+              local tid = lbl:match('^thread:(.*)$')
+              if tid and queue.thread_id(tid) then
+                thread_id = tid
+              end
+            end
+            if reply_to == nil then
+              local rid = lbl:match('^reply%-to:(.*)$')
+              if rid and queue.mail_id(rid) then
+                reply_to = rid
+              end
+            end
+            if lbl == 'read' then
+              has_read_label = true
+            end
+          end
         end
 
-        if not valid then
+        local closed = (elem.status == 'closed')
+        local read = (closed or has_read_label or (elem.metadata and elem.metadata['mail.read'] == 'true')) and true or false
+        local mapped = {
+          id = elem.id,
+          from = elem.sender,
+          to = recipient,
+          subject = elem.title,
+          body = elem.description or '',
+          created_at = elem.created_at,
+          read = read,
+          thread_id = thread_id,
+        }
+        local msg, _ = mailbox.message(mapped)
+        if not msg then
           skipped = skipped + 1
         else
-          local thread_id = nil
-          local reply_to = nil
-          local has_read_label = false
-          if elem.labels then
-            for _, lbl in ipairs(elem.labels) do
-              if thread_id == nil then
-                local tid = lbl:match('^thread:(.*)$')
-                if tid and queue.thread_id(tid) then
-                  thread_id = tid
-                end
-              end
-              if reply_to == nil then
-                local rid = lbl:match('^reply%-to:(.*)$')
-                if rid and queue.mail_id(rid) then
-                  reply_to = rid
-                end
-              end
-              if lbl == 'read' then
-                has_read_label = true
-              end
-            end
-          end
-
-          local closed = (elem.status == 'closed')
-          local read = (closed or has_read_label or (elem.metadata and elem.metadata['mail.read'] == 'true')) and true or false
-          local mapped = {
-            id = elem.id,
-            from = elem.sender,
-            to = recipient,
-            subject = elem.title,
-            body = elem.description or '',
-            created_at = elem.created_at,
-            read = read,
-            thread_id = thread_id,
-          }
-          local msg, _ = mailbox.message(mapped)
-          if not msg then
-            skipped = skipped + 1
-          else
-            msg.closed = closed
-            msg.reply_to = reply_to
-            msg.loaded_since = started
-            list[#list + 1] = msg
-          end
+          msg.closed = closed
+          msg.reply_to = reply_to
+          msg.loaded_since = started
+          list[#list + 1] = msg
         end
       end
+    end
 
-      table.sort(list, function(a, b)
-        if a.created ~= b.created then
-          return a.created < b.created
-        end
-        return a.id < b.id
-      end)
-
-      if opts.thread then
-        local cache_entry = M.cache[city.path]
-        if not cache_entry then
-          cache_entry = { by_id = {} }
-          M.cache[city.path] = cache_entry
-        end
-        for _, msg in ipairs(list) do
-          cache_entry.by_id[msg.id] = msg
-        end
-      else
-        local by_id = {}
-        for _, msg in ipairs(list) do
-          by_id[msg.id] = msg
-        end
-        M.cache[city.path] = { by_id = by_id, loaded_since = started }
+    table.sort(list, function(a, b)
+      if a.created ~= b.created then
+        return a.created < b.created
       end
-
-      if skipped > 0 and not said_skipped[city.path] then
-        said_skipped[city.path] = true
-        notify(('%d messages could not be read'):format(skipped), vim.log.levels.WARN)
-      end
-
-      finish(list, nil, skipped)
+      return a.id < b.id
     end)
-  end)
 
-  if not ok then
-    finish(nil, 'cannot run gc (is it on PATH?): ' .. tostring(proc_err))
-  end
+    if opts.thread then
+      local cache_entry = M.cache[city.path]
+      if not cache_entry then
+        cache_entry = { by_id = {} }
+        M.cache[city.path] = cache_entry
+      end
+      for _, msg in ipairs(list) do
+        cache_entry.by_id[msg.id] = msg
+      end
+    else
+      local by_id = {}
+      for _, msg in ipairs(list) do
+        by_id[msg.id] = msg
+      end
+      M.cache[city.path] = { by_id = by_id, loaded_since = started }
+    end
+
+    if skipped > 0 and not said_skipped[city.path] then
+      said_skipped[city.path] = true
+      notify(('%d messages could not be read'):format(skipped), vim.log.levels.WARN)
+    end
+
+    finish(list, nil, skipped)
+  end)
 end
 
 --- Inserts or replaces one message in the cache.

@@ -637,19 +637,17 @@ local function send(pick)
       pump()
     end
   end
-  local ok, err = pcall(vim.system, require('gc_mail').argv(record.city, record),
-    { text = true, timeout = config.send_timeout_ms }, function(result)
-      vim.schedule(function()
-        local detail = first_lines(result.stderr, 3)
-        if detail == '' then
-          detail = first_lines(result.stdout, 3)
-        end
-        finish(result.code, result.code == 124 and 'gc did not answer in time' or detail)
-      end)
+  require('gc_mail.gc').spawn(require('gc_mail').argv(record.city, record), config.send_timeout_ms,
+    function(result, spawn_err)
+      if spawn_err then
+        return finish('?', spawn_err)
+      end
+      local detail = first_lines(result.stderr, 3)
+      if detail == '' then
+        detail = first_lines(result.stdout, 3)
+      end
+      finish(result.code, result.code == 124 and 'gc did not answer in time' or detail)
     end)
-  if not ok then
-    finish('?', 'cannot run gc (is it on PATH?): ' .. tostring(err))
-  end
 end
 
 -- Runs under the lock, from a listing taken under it (rule 2). Removes the

@@ -41,6 +41,7 @@
 --    late answer never brings back, or keeps a copy of, a message archived,
 --    deleted or changed since, and never drops one whose action then fails.
 local queue = require('gc_mail.queue')
+local gc = require('gc_mail.gc')
 
 local M = {}
 
@@ -189,29 +190,37 @@ local function messages_of(list)
   return result
 end
 
---- The record of a finished `gc ... --json` (a vim.system result), or nil
---- and the reason. `what` names the call in the reason. Only the envelope:
---- the fields of the answer are DECODE's.
+--- The record of a finished `gc ... --json` (a vim.system result of a call
+--- that exited 0), or nil and the reason. `what` names the call in the
+--- reason. Only the envelope: the fields of the answer are DECODE's.
 function M.answer(result, what)
-  if result == nil or (result.code == 124 and (result.signal or 0) ~= 0) then
-    return nil, ('%s did not answer within %g s'):format(what, config.timeout_ms / 1000)
-  end
   local line = vim.trim(result.stdout or '')
   local ok, record = decode(line)
-  if result.code ~= 0 then
-    -- gc puts the reason on stderr; its JSON failure says only that it failed.
-    local detail = first_lines(result.stderr, 3)
-    if detail == '' and ok and type(record) == 'table' and type(record.error) == 'table'
-        and type(record.error.message) == 'string' then
-      detail = first_lines(record.error.message, 3)
-    end
-    return nil, what .. ' failed' .. (detail ~= '' and (': ' .. detail) or (' (exit ' .. tostring(result.code) .. ')'))
-  end
   if line == '' or line:find('\n') or not ok or type(record) ~= 'table' or record.ok ~= true
       or record.schema_version ~= '1' then
     return nil, what .. ' printed something unexpected'
   end
   return record
+end
+
+-- The reason a failed call failed: gc.run's reason, unless gc said why only
+-- in its JSON answer. gc puts the reason on stderr; its JSON failure says
+-- only that it failed, so a call that said nothing on stderr falls back to
+-- the answer's error.message.
+local function failure(result, what, err)
+  if result == nil or result.code == 0 or (result.code == 124 and (result.signal or 0) ~= 0)
+      or first_lines(result.stderr, 3) ~= '' then
+    return err
+  end
+  local ok, record = decode(vim.trim(result.stdout or ''))
+  if ok and type(record) == 'table' and type(record.error) == 'table'
+      and type(record.error.message) == 'string' then
+    local detail = first_lines(record.error.message, 3)
+    if detail ~= '' then
+      return what .. ' failed: ' .. detail
+    end
+  end
+  return err
 end
 
 -- An action answer (mail_action): the command and action of `verb`, every
@@ -326,22 +335,20 @@ local function run(city, verb, arg, on_done)
   local argv = { 'gc', '--city', city.path, 'mail', verb }
   vim.list_extend(argv, type(arg) == 'table' and arg or { arg })
   argv[#argv + 1] = '--json'
-  local ok, err = pcall(vim.system, argv, { text = true, timeout = config.timeout_ms }, function(result)
-    vim.schedule(function()
-      local record, why = M.answer(result, what)
-      if not record then
-        return on_done(nil, why)
-      end
-      local value, bad = DECODE[verb](record, arg)
-      if value == nil then
-        return on_done(nil, ('%s printed something unexpected (%s)'):format(what, bad or 'no value'))
-      end
-      on_done(value)
-    end)
+  gc.run(argv, config.timeout_ms, what, function(result, err)
+    if err then
+      return on_done(nil, failure(result, what, err))
+    end
+    local record, why = M.answer(result, what)
+    if not record then
+      return on_done(nil, why)
+    end
+    local value, bad = DECODE[verb](record, arg)
+    if value == nil then
+      return on_done(nil, ('%s printed something unexpected (%s)'):format(what, bad or 'no value'))
+    end
+    on_done(value)
   end)
-  if not ok then
-    on_done(nil, 'cannot run gc (is it on PATH?): ' .. tostring(err))
-  end
 end
 M.run = run
 

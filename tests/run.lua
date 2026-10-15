@@ -706,6 +706,15 @@ test('bad gc cities output or a failing gc closes the loading picker; a failed r
   end)
   eq(recorded_argv(), nil, 'mail sent')
 
+  -- A failing gc that says why on stderr: the detail follows on its own line.
+  reset({ FAKE_GC_CITIES_EXIT = '1', FAKE_GC_STDERR = 'registry broken\nsecond line' })
+  buffer({ 'hello' })
+  gc_mail.open()
+  wait('picker left open on gc stderr failure', function()
+    return #floats() == 0
+  end)
+  eq(notes[#notes].message, 'gc-mail: gc cities failed:\nregistry broken\nsecond line', 'cities stderr notice')
+
   -- With a good list cached, a failing refresh keeps it and says so once.
   reset()
   preload()
@@ -770,27 +779,32 @@ end)
 test('a gc cities that does not answer in time is reported, not raised', function()
   reset({ FAKE_GC_CITIES_HANG = '30' })
   local started = vim.uv.hrtime()
-  local cities, err = gc_mail.cities(200)
+  local done, cities, err
+  gc_mail.refresh(function(c, e)
+    done, cities, err = true, c, e
+  end, 200)
+  wait('cities from a hung gc never arrived', function()
+    return done
+  end)
   eq(cities, nil, 'cities from a hung gc')
   eq(err, 'gc cities did not answer within 0.2 s', 'timeout reason')
   assert((vim.uv.hrtime() - started) / 1e6 < 5000, 'waited for the hung gc to finish')
 
-  -- A child that is not reaped even after the kill: wait() returns nil.
-  local system, killed = vim.system, nil
-  vim.system = function()
-    return {
-      wait = function()
-        return nil
-      end,
-      kill = function(_, signal)
-        killed = signal
-      end,
-    }
+  -- A child whose answer never arrives (a nil result): the same reason.
+  local system = vim.system
+  vim.system = function(_, _, cb)
+    cb(nil)
+    return {}
   end
-  local ok, a, b = pcall(gc_mail.cities, 200)
+  local nil_done, nil_result
+  gc_mail.refresh(function(c, e)
+    nil_done, nil_result = true, { c, e }
+  end, 200)
   vim.system = system
-  eq({ ok, a, b }, { true, nil, 'gc cities did not answer within 0.2 s' }, 'nil wait result')
-  eq(killed, 9, 'unreaped child killed')
+  wait('nil result never arrived', function()
+    return nil_done
+  end)
+  eq(nil_result, { nil, 'gc cities did not answer within 0.2 s' }, 'nil result')
 
   -- The background refresh has the same bound, and keeps the cache.
   local done, result
@@ -804,6 +818,51 @@ test('a gc cities that does not answer in time is reported, not raised', functio
   eq(result, { nil, 'gc cities did not answer within 0.2 s' }, 'refresh timeout')
   assert((vim.uv.hrtime() - started) / 1e6 < 5000, 'waited for the hung gc to finish')
   eq(gc_mail.cached_cities(), nil, 'cache filled by a timeout')
+end)
+
+test('gc.run reports exit 0, a timeout, an exit with stderr and a spawn failure', function()
+  local gc = require('gc_mail.gc')
+  local function run_once(argv, timeout_ms, what)
+    local done, result, err
+    gc.run(argv, timeout_ms, what, function(r, e)
+      done, result, err = true, r, e
+    end)
+    wait('gc.run never finished', function()
+      return done
+    end)
+    return result, err
+  end
+
+  reset()
+  local result, err = run_once({ 'gc', 'cities', '--json' }, 10000, 'gc cities')
+  eq(err, nil, 'exit 0 reason')
+  eq(result.code, 0, 'exit 0 code')
+  eq(vim.json.decode(vim.trim(result.stdout)).ok, true, 'exit 0 answer')
+
+  reset({ FAKE_GC_CITIES_HANG = '5' })
+  result, err = run_once({ 'gc', 'cities', '--json' }, 200, 'gc cities')
+  eq(result, nil, 'timeout result')
+  eq(err, 'gc cities did not answer within 0.2 s', 'timeout reason')
+
+  reset({ FAKE_GC_EXIT = '3', FAKE_GC_STDERR = 'store unavailable' })
+  result, err = run_once({ 'gc', '--city', '/srv/demo-city', 'mail', 'send', 'mayor', '-s', 'x', '-m', 'y' },
+    10000, 'gc mail send in demo-city')
+  eq(result.code, 3, 'failed code')
+  eq(err, 'gc mail send in demo-city failed: store unavailable', 'exit reason')
+
+  reset({ FAKE_GC_CITIES_EXIT = '1' })
+  result, err = run_once({ 'gc', 'cities', '--json' }, 10000, 'gc cities')
+  eq(result.code, 1, 'silent failure code')
+  eq(err, 'gc cities failed (exit 1)', 'silent exit reason')
+
+  local system = vim.system
+  vim.system = function()
+    error('gc is not here', 0)
+  end
+  result, err = run_once({ 'gc', 'cities', '--json' }, 10000, 'gc cities')
+  vim.system = system
+  eq(result, nil, 'spawn failure result')
+  eq(err, 'cannot run gc (is it on PATH?): gc is not here', 'spawn failure reason')
 end)
 
 test('a fresh setup resends what an earlier Neovim left: pending files and claims of a gone process', function()

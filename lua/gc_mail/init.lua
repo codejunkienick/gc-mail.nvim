@@ -13,6 +13,7 @@
 -- mailbox docked below the current window (gc_mail.panel). Nothing runs at
 -- load time.
 local queue = require('gc_mail.queue')
+local gc = require('gc_mail.gc')
 
 local M = {}
 
@@ -138,20 +139,10 @@ end
 -- malformed (a picker line cannot hold a line break).
 local CONTROL = '[%z\1-\31\127]'
 
--- The cities in a finished `gc cities --json` (a vim.system result), or nil
--- and the reason. Anything but the documented record is an error, and so is a
--- gc killed at the timeout.
-local function parse_cities(result, timeout_ms)
-  -- On timeout Neovim kills gc (SIGKILL from wait(), SIGTERM from the
-  -- timeout option) and reports exit 124; a nil result is a child not reaped
-  -- even after the kill.
-  if result == nil or (result.code == 124 and (result.signal or 0) ~= 0) then
-    return nil, ('gc cities did not answer within %g s'):format(timeout_ms / 1000)
-  end
-  if result.code ~= 0 then
-    local detail = first_lines(result.stderr, 3)
-    return nil, 'gc cities failed' .. (detail ~= '' and (':\n' .. detail) or (' (exit ' .. result.code .. ')'))
-  end
+-- The cities in a finished `gc cities --json` (a vim.system result of a call
+-- that exited 0), or nil and the reason. Anything but the documented record
+-- is an error.
+local function parse_cities(result)
   -- Exactly one record line: anything else on stdout is unexpected output.
   local line = vim.trim(result.stdout or '')
   local decoded_ok, record = pcall(vim.json.decode, line)
@@ -171,23 +162,6 @@ local function parse_cities(result, timeout_ms)
     cities[#cities + 1] = { name = city.name, path = city.path }
   end
   return cities
-end
-
---- The registered cities from `gc cities --json`, waiting for gc: a list of
---- { name, path }, or nil and the reason. A gc that does not answer within
---- `timeout_ms` (default 10 s) is killed. The picker never waits on this; it
---- reads the cache M.refresh() fills.
-function M.cities(timeout_ms)
-  timeout_ms = timeout_ms or CITIES_TIMEOUT_MS
-  local ok, proc = pcall(vim.system, { 'gc', 'cities', '--json' }, { text = true })
-  if not ok then
-    return nil, 'cannot run gc (is it on PATH?)'
-  end
-  local result = proc:wait(timeout_ms)
-  if result == nil then
-    pcall(proc.kill, proc, 9)
-  end
-  return parse_cities(result, timeout_ms)
 end
 
 -- The city list cache: the last good list (nil before the first), and the
@@ -216,14 +190,12 @@ function M.refresh(on_done, timeout_ms)
       fn(cities, err)
     end
   end
-  local ok, err = pcall(vim.system, { 'gc', 'cities', '--json' }, { text = true, timeout = timeout_ms }, function(result)
-    vim.schedule(function()
-      finish(parse_cities(result, timeout_ms))
-    end)
-  end)
-  if not ok then
-    finish(nil, 'cannot run gc (is it on PATH?): ' .. tostring(err))
-  end
+  gc.run({ 'gc', 'cities', '--json' }, timeout_ms, 'gc cities', function(result, err)
+    if err then
+      return finish(nil, err)
+    end
+    finish(parse_cities(result))
+  end, ':\n')
 end
 
 --- The cached city list (nil before the first good answer).

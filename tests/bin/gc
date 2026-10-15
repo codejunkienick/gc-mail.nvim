@@ -3,7 +3,8 @@
 #   gc cities --json  prints $FAKE_GC_CITIES (a file) and exits $FAKE_GC_CITIES_EXIT;
 #                     with $FAKE_GC_CITIES_HANG set it sleeps that many seconds first,
 #                     as this process, so a kill reaches the sleep itself;
-#                     $FAKE_GC_CITIES_DELAY sleeps that long, then answers.
+#                     $FAKE_GC_CITIES_DELAY sleeps that long, then answers;
+#                     $FAKE_GC_STDERR is printed on stderr.
 #   gc --city <path> mail <inbox|count|peek|read|mark-read|mark-unread|thread|archive|delete> ...
 #                     appends its argv (fields split by 0x1f, one call per line) to
 #                     $FAKE_GC_MAIL_LOG and answers from $FAKE_GC_MAIL/<cmd>.<city>.* or
@@ -25,6 +26,9 @@ if [ "$1" = cities ]; then
     sleep "$FAKE_GC_CITIES_DELAY"
   fi
   cat "$FAKE_GC_CITIES"
+  if [ -n "${FAKE_GC_STDERR:-}" ]; then
+    printf '%s\n' "$FAKE_GC_STDERR" >&2
+  fi
   exit "${FAKE_GC_CITIES_EXIT:-0}"
 fi
 if [ "$3" = mail ]; then
