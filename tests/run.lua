@@ -6052,6 +6052,459 @@ test('chat live: G jumps to the latest message, clears the count and follows aga
   eq(newer_below(chat), nil, 'nothing counted below')
 end)
 
+-- The timeline window of a reopened chat, found by its buffer name.
+local function reopened_timeline()
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(w)):match('/chat/') then
+      return w
+    end
+  end
+end
+
+-- The cursor line, first and last line shown, and last line of window `win`.
+local function view_of_win(win)
+  return vim.api.nvim_win_call(win, function()
+    return { cursor = vim.fn.line('.'), top = vim.fn.line('w0'), bottom = vim.fn.line('w$'), last = vim.fn.line('$') }
+  end)
+end
+
+test('chat reopen: closing scrolled-up reopens with the same message at the top', function()
+  local chat = live_chat()
+  short_timeline(chat)
+  -- The middle message at the top of the view: the anchor is the message at
+  -- the top, plus the held following state.
+  vim.api.nvim_win_set_cursor(chat.timeline_win, { 7, 0 })
+  vim.api.nvim_win_call(chat.timeline_win, function()
+    vim.cmd('normal! zt')
+  end)
+  local before = timeline_view(chat)
+  eq({ before.cursor, before.top }, { 7, 7 }, 'the middle message at the top')
+  assert(before.bottom < before.last, 'the view no longer shows the end')
+  local top_text = lines_of(chat.timeline_win)[before.top]
+  eq(top_text, '## mayor · ' .. os.date('%H:%M', chat.t1) .. ' ●', 'the anchored heading')
+  vim.api.nvim_set_current_win(chat.timeline_win)
+  vim.api.nvim_feedkeys('q', 'x', false)
+  wait('closed', function()
+    return not vim.api.nvim_win_is_valid(chat.timeline_win)
+  end)
+  vim.cmd('GcMailChat imd-city')
+  local win = reopened_timeline()
+  assert(win, 'reopened')
+  wait('the anchor is back at the top', function()
+    local ok, top = pcall(function()
+      return view_of_win(win).top
+    end)
+    return ok and top == before.top
+  end)
+  vim.wait(100)
+  local after = view_of_win(win)
+  eq({ after.cursor, after.top }, { before.cursor, before.top }, 'the same message at the same view position')
+  eq(lines_of(win)[after.top], top_text, 'the anchored heading')
+  eq(newer_below({ timeline_win = win }), nil, 'nothing counted below')
+end)
+
+test('chat reopen: closing at the end reopens following the new end', function()
+  local chat = live_chat()
+  short_timeline(chat)
+  local start = timeline_view(chat)
+  eq({ start.cursor, start.bottom }, { start.last, start.last }, 'at the end')
+  vim.api.nvim_set_current_win(chat.timeline_win)
+  vim.api.nvim_feedkeys('q', 'x', false)
+  wait('closed', function()
+    return not vim.api.nvim_win_is_valid(chat.timeline_win)
+  end)
+  local list = vim.json.decode(chat.fix)
+  list[#list + 1] = { id = 'tc-wisp-new1', title = 'new arrival', sender = 'mayor', assignee = 'human',
+    status = 'open', description = 'new arrival\nfresh body', created_at = os.date('!%Y-%m-%dT%H:%M:%SZ'), labels = {} }
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', vim.json.encode(list))
+  vim.cmd('GcMailChat imd-city')
+  local win = reopened_timeline()
+  assert(win, 'reopened')
+  wait('the new message shows', function()
+    return table.concat(lines_of(win), '\n'):find('fresh body', 1, true) ~= nil
+  end)
+  vim.wait(100)
+  local after = view_of_win(win)
+  eq(after.last > start.last, true, 'the message was appended')
+  eq({ after.cursor, after.bottom }, { after.last, after.last }, 'following the new end')
+  eq(newer_below({ timeline_win = win }), nil, 'nothing counted below')
+end)
+
+test('chat reopen: a gone anchor reopens at the end', function()
+  local chat = live_chat()
+  short_timeline(chat)
+  vim.api.nvim_win_set_cursor(chat.timeline_win, { 7, 0 })
+  vim.api.nvim_win_call(chat.timeline_win, function()
+    vim.cmd('normal! zt')
+  end)
+  local before = timeline_view(chat)
+  eq({ before.cursor, before.top }, { 7, 7 }, 'the middle message at the top')
+  vim.api.nvim_set_current_win(chat.timeline_win)
+  vim.api.nvim_feedkeys('q', 'x', false)
+  wait('closed', function()
+    return not vim.api.nvim_win_is_valid(chat.timeline_win)
+  end)
+  local list = vim.json.decode(chat.fix)
+  local kept = {}
+  for _, entry in ipairs(list) do
+    if entry.id ~= 'tc-wisp-m2' then
+      kept[#kept + 1] = entry
+    end
+  end
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', vim.json.encode(kept))
+  vim.cmd('GcMailChat imd-city')
+  local win = reopened_timeline()
+  assert(win, 'reopened')
+  wait('the anchor is gone', function()
+    return table.concat(lines_of(win), '\n'):find('this is a reply', 1, true) == nil
+      and table.concat(lines_of(win), '\n'):find('all good', 1, true) ~= nil
+  end)
+  vim.wait(100)
+  local after = view_of_win(win)
+  eq({ after.cursor, after.bottom }, { after.last, after.last }, 'at the end instead')
+end)
+
+-- No chat window left anywhere: a directly closed timeline window finishes
+-- closing on schedule, so the timeline being gone is not enough.
+local function wait_chat_closed()
+  wait('closed', function()
+    if #vim.api.nvim_tabpage_list_wins(0) ~= 1 then
+      return false
+    end
+    local name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win()))
+    return name:find('/chat/', 1, true) == nil and name:find('/compose/', 1, true) == nil
+  end)
+end
+
+test('chat reopen: closing the timeline window itself keeps the place, with no stale anchor', function()
+  local chat = live_chat()
+  short_timeline(chat)
+  vim.api.nvim_win_set_cursor(chat.timeline_win, { 7, 0 })
+  vim.api.nvim_win_call(chat.timeline_win, function()
+    vim.cmd('normal! zt')
+  end)
+  local before = timeline_view(chat)
+  eq({ before.cursor, before.top }, { 7, 7 }, 'the middle message at the top')
+  local top_text = lines_of(chat.timeline_win)[before.top]
+  -- Close the timeline window directly, not through the q mapping: the window
+  -- is already gone when its WinClosed runs.
+  vim.api.nvim_set_current_win(chat.timeline_win)
+  vim.cmd('q')
+  wait_chat_closed()
+  vim.cmd('GcMailChat imd-city')
+  local win = reopened_timeline()
+  assert(win, 'reopened')
+  wait('the anchor is back at the top', function()
+    local ok, top = pcall(function()
+      return view_of_win(win).top
+    end)
+    return ok and top == before.top
+  end)
+  vim.wait(100)
+  local after = view_of_win(win)
+  eq({ after.cursor, after.top }, { before.cursor, before.top }, 'the same message at the same view position')
+  eq(lines_of(win)[after.top], top_text, 'the anchored heading')
+  -- At the end now: closing the timeline window again must record the end,
+  -- not keep the stale anchor.
+  vim.api.nvim_set_current_win(win)
+  vim.api.nvim_feedkeys('G', 'x', false)
+  wait('at the end', function()
+    local v = view_of_win(win)
+    return v.cursor == v.last and v.bottom == v.last
+  end)
+  vim.cmd('q')
+  wait_chat_closed()
+  vim.cmd('GcMailChat imd-city')
+  local win2 = reopened_timeline()
+  assert(win2, 'reopened again')
+  wait('following the end', function()
+    local ok, v = pcall(function()
+      return view_of_win(win2)
+    end)
+    return ok and v.cursor == v.last and v.bottom == v.last
+  end)
+  vim.wait(100)
+  local final = view_of_win(win2)
+  eq({ final.cursor, final.bottom }, { final.last, final.last }, 'the end, not the stale anchor')
+end)
+
+test('chat reopen: restoring with scrolloff keeps the same top across reopenings', function()
+  local chat = live_chat()
+  short_timeline(chat)
+  vim.wo[chat.timeline_win].scrolloff = 3
+  vim.api.nvim_win_set_cursor(chat.timeline_win, { 14, 0 })
+  vim.api.nvim_win_call(chat.timeline_win, function()
+    vim.cmd('normal! zt')
+  end)
+  local before = timeline_view(chat)
+  eq(before.top, 12, 'scrolloff keeps context above the cursor')
+  -- The anchor is the message holding the top line: its heading.
+  local anchor = before.top
+  while anchor > 1 and lines_of(chat.timeline_win)[anchor]:match('^## ') == nil do
+    anchor = anchor - 1
+  end
+  local heading = lines_of(chat.timeline_win)[anchor]
+  assert(heading:match('^## ') ~= nil, 'an anchor heading')
+  -- The open's load is slow, so the scrolloff is set before it answers.
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.delay', '1\n')
+  vim.api.nvim_set_current_win(chat.timeline_win)
+  vim.api.nvim_feedkeys('q', 'x', false)
+  wait('closed', function()
+    return not vim.api.nvim_win_is_valid(chat.timeline_win)
+  end)
+  vim.cmd('GcMailChat imd-city')
+  local win = reopened_timeline()
+  assert(win, 'reopened')
+  vim.wo[win].scrolloff = 3
+  wait('the anchor is back at the top', function()
+    local ok, top = pcall(function()
+      return view_of_win(win).top
+    end)
+    return ok and top == anchor
+  end)
+  vim.wait(100)
+  local after = view_of_win(win)
+  eq(after.top, anchor, 'the anchored heading back at the top')
+  eq(lines_of(win)[after.top], heading, 'the anchored heading')
+  -- Closing and reopening again stays on the same message: no drift.
+  vim.api.nvim_set_current_win(win)
+  vim.api.nvim_feedkeys('q', 'x', false)
+  wait('closed again', function()
+    return not vim.api.nvim_win_is_valid(win)
+  end)
+  vim.cmd('GcMailChat imd-city')
+  local win2 = reopened_timeline()
+  assert(win2, 'reopened again')
+  vim.wo[win2].scrolloff = 3
+  wait('still at the anchor', function()
+    local ok, top = pcall(function()
+      return view_of_win(win2).top
+    end)
+    return ok and top == anchor
+  end)
+  vim.wait(100)
+  eq(view_of_win(win2).top, anchor, 'no drift across reopenings')
+end)
+
+test('chat reopen: restoring with a huge scrolloff keeps the anchor at the top', function()
+  local chat = live_chat()
+  short_timeline(chat)
+  vim.wo[chat.timeline_win].scrolloff = 999
+  vim.api.nvim_win_set_cursor(chat.timeline_win, { 7, 0 })
+  vim.api.nvim_win_call(chat.timeline_win, function()
+    vim.cmd('normal! zt')
+  end)
+  local before = timeline_view(chat)
+  -- The anchor is the message holding the top line: its heading.
+  local anchor = before.top
+  while anchor > 1 and lines_of(chat.timeline_win)[anchor]:match('^## ') == nil do
+    anchor = anchor - 1
+  end
+  local heading = lines_of(chat.timeline_win)[anchor]
+  assert(heading:match('^## ') ~= nil, 'an anchor heading')
+  -- The open's load is slow, so the short height and scrolloff are set before
+  -- it answers (Neovim clamps scrolloff=999 to half the 6-row height).
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.delay', '1\n')
+  vim.api.nvim_set_current_win(chat.timeline_win)
+  vim.api.nvim_feedkeys('q', 'x', false)
+  wait('closed', function()
+    return not vim.api.nvim_win_is_valid(chat.timeline_win)
+  end)
+  vim.cmd('GcMailChat imd-city')
+  local win = reopened_timeline()
+  assert(win, 'reopened')
+  vim.api.nvim_win_set_height(win, 6)
+  vim.api.nvim_exec_autocmds('WinResized', {})
+  vim.wo[win].scrolloff = 999
+  wait('the anchor is back at the top', function()
+    local ok, top = pcall(function()
+      return view_of_win(win).top
+    end)
+    return ok and top == anchor
+  end)
+  vim.wait(100)
+  local after = view_of_win(win)
+  eq(after.top, anchor, 'the anchored heading back at the top')
+  eq(lines_of(win)[after.top], heading, 'the anchored heading')
+  assert(after.bottom < after.last, 'the view is not at the end')
+  -- Closing and reopening again stays on the same message: no drift to the end.
+  vim.api.nvim_set_current_win(win)
+  vim.api.nvim_feedkeys('q', 'x', false)
+  wait('closed again', function()
+    return not vim.api.nvim_win_is_valid(win)
+  end)
+  vim.cmd('GcMailChat imd-city')
+  local win2 = reopened_timeline()
+  assert(win2, 'reopened again')
+  vim.api.nvim_win_set_height(win2, 6)
+  vim.api.nvim_exec_autocmds('WinResized', {})
+  vim.wo[win2].scrolloff = 999
+  wait('still at the anchor', function()
+    local ok, top = pcall(function()
+      return view_of_win(win2).top
+    end)
+    return ok and top == anchor
+  end)
+  vim.wait(100)
+  eq(view_of_win(win2).top, anchor, 'no drift across reopenings')
+end)
+
+test('chat reopen: a scrolloff of half an even height keeps the last heading at the top', function()
+  local chat = live_chat()
+  short_timeline(chat)
+  vim.wo[chat.timeline_win].scrolloff = 3
+  -- The last heading at the top and the view ending on the buffer's last
+  -- line, the cursor above it: not following.
+  local all = lines_of(chat.timeline_win)
+  local anchor = #all
+  while anchor > 1 and all[anchor]:match('^## ') == nil do
+    anchor = anchor - 1
+  end
+  local heading = all[anchor]
+  assert(heading:match('^## ') ~= nil, 'an anchor heading')
+  vim.api.nvim_win_call(chat.timeline_win, function()
+    vim.fn.winrestview({ topline = anchor, lnum = anchor + 3, col = 0, coladd = 0 })
+  end)
+  local before = timeline_view(chat)
+  eq({ before.top, before.cursor, before.bottom }, { anchor, anchor + 3, before.last }, 'the closed view')
+  assert(before.cursor < before.last, 'not following')
+  for round = 1, 2 do
+    -- The open's load is slow, so the short height and scrolloff are set
+    -- before it answers.
+    write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.delay', '1\n')
+    local closing = vim.api.nvim_get_current_win()
+    if round == 1 then
+      closing = chat.timeline_win
+      vim.api.nvim_set_current_win(closing)
+    end
+    vim.api.nvim_feedkeys('q', 'x', false)
+    wait('closed', function()
+      return not vim.api.nvim_win_is_valid(closing)
+    end)
+    vim.cmd('GcMailChat imd-city')
+    local win = reopened_timeline()
+    assert(win, 'reopened')
+    vim.api.nvim_win_set_height(win, 6)
+    vim.api.nvim_exec_autocmds('WinResized', {})
+    vim.wo[win].scrolloff = 3
+    wait('the anchor is back at the top', function()
+      local ok, v = pcall(view_of_win, win)
+      return ok and v.top == anchor and v.cursor < v.last
+    end)
+    vim.wait(100)
+    local after = view_of_win(win)
+    eq(after.top, anchor, 'reopening ' .. round .. ' keeps the anchor at the top')
+    eq(lines_of(win)[after.top], heading, 'the anchored heading')
+    vim.api.nvim_set_current_win(win)
+  end
+end)
+
+test('chat reopen: moving during a slow open load keeps the view instead of yanking back', function()
+  local chat = live_chat()
+  short_timeline(chat)
+  vim.api.nvim_win_set_cursor(chat.timeline_win, { 7, 0 })
+  vim.api.nvim_win_call(chat.timeline_win, function()
+    vim.cmd('normal! zt')
+  end)
+  eq(timeline_view(chat).top, 7, 'the anchor in view')
+  vim.api.nvim_set_current_win(chat.timeline_win)
+  vim.api.nvim_feedkeys('q', 'x', false)
+  wait('closed', function()
+    return not vim.api.nvim_win_is_valid(chat.timeline_win)
+  end)
+  -- The open's load takes a second: move before it answers.
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.delay', '1\n')
+  vim.cmd('GcMailChat imd-city')
+  local win = reopened_timeline()
+  assert(win, 'reopened')
+  vim.api.nvim_win_set_height(win, 6)
+  -- A headless run has no main loop to notice the new size: say it as Neovim does
+  vim.api.nvim_exec_autocmds('WinResized', {})
+  vim.api.nvim_win_set_cursor(win, { 3, 0 })
+  vim.api.nvim_win_call(win, function()
+    vim.cmd('normal! zt')
+  end)
+  wait('the open load answered', function()
+    return bd_list_calls(chat.cities[1].path) == 2
+  end)
+  vim.wait(1500)
+  local after = view_of_win(win)
+  eq({ after.cursor, after.top }, { 3, 3 }, 'stayed where the user moved, not yanked to the anchor')
+end)
+
+test('chat reopen: a failed open load drops the anchor, so the next load stays at the end', function()
+  local chat = live_chat()
+  short_timeline(chat)
+  vim.api.nvim_win_set_cursor(chat.timeline_win, { 7, 0 })
+  vim.api.nvim_win_call(chat.timeline_win, function()
+    vim.cmd('normal! zt')
+  end)
+  eq(timeline_view(chat).top, 7, 'the anchor in view')
+  vim.api.nvim_set_current_win(chat.timeline_win)
+  vim.api.nvim_feedkeys('q', 'x', false)
+  wait('closed', function()
+    return not vim.api.nvim_win_is_valid(chat.timeline_win)
+  end)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.exit', '1\n')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.stderr', 'store unavailable\n')
+  vim.cmd('GcMailChat imd-city')
+  local win = reopened_timeline()
+  assert(win, 'reopened')
+  wait('the open load failed', function()
+    return (vim.wo[win].statusline:find('stale', 1, true) ~= nil)
+  end)
+  local failed_view = view_of_win(win)
+  eq({ failed_view.cursor, failed_view.bottom }, { failed_view.last, failed_view.last }, 'at the end meanwhile')
+  -- The next successful load (a manual reload) must not yank back.
+  vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.exit')
+  vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.stderr')
+  vim.api.nvim_set_current_win(win)
+  vim.api.nvim_feedkeys('R', 'x', false)
+  wait('reloaded', function()
+    return (vim.wo[win].statusline:find('live', 1, true) ~= nil)
+  end)
+  vim.wait(100)
+  local after = view_of_win(win)
+  eq({ after.cursor, after.bottom }, { after.last, after.last }, 'still at the end, not yanked to the anchor')
+end)
+
+test('chat reopen: mail that arrived while closed counts as newer below the restored view', function()
+  local chat = live_chat()
+  short_timeline(chat)
+  vim.api.nvim_win_set_cursor(chat.timeline_win, { 7, 0 })
+  vim.api.nvim_win_call(chat.timeline_win, function()
+    vim.cmd('normal! zt')
+  end)
+  local before = timeline_view(chat)
+  eq({ before.cursor, before.top }, { 7, 7 }, 'the middle message at the top')
+  vim.api.nvim_set_current_win(chat.timeline_win)
+  vim.api.nvim_feedkeys('q', 'x', false)
+  wait('closed', function()
+    return not vim.api.nvim_win_is_valid(chat.timeline_win)
+  end)
+  local list = vim.json.decode(chat.fix)
+  list[#list + 1] = { id = 'tc-wisp-new1', title = 'new arrival', sender = 'mayor', assignee = 'human',
+    status = 'open', description = 'new arrival\nfresh body', created_at = os.date('!%Y-%m-%dT%H:%M:%SZ'), labels = {} }
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', vim.json.encode(list))
+  -- The open's load is slow, so the short height is set before it answers.
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.delay', '1\n')
+  vim.cmd('GcMailChat imd-city')
+  local win = reopened_timeline()
+  assert(win, 'reopened')
+  vim.api.nvim_win_set_height(win, 6)
+  -- A headless run has no main loop to notice the new size: say it as Neovim does
+  vim.api.nvim_exec_autocmds('WinResized', {})
+  wait('the anchor is back at the top', function()
+    local ok, top = pcall(function()
+      return view_of_win(win).top
+    end)
+    return ok and top == before.top
+  end)
+  vim.wait(100)
+  eq(view_of_win(win).top, before.top, 'the same message at the top')
+  eq(newer_below({ timeline_win = win }), 1, 'the arrival waits below')
+end)
+
 test('chat live: your own mail.sent hides its sending record without a load', function()
   local chat = live_chat()
   local path = chat.cities[1].path

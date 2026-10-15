@@ -441,7 +441,12 @@ window holding the empty buffer, keeping any compose draft.
   counts each message (by id) first shown below the view; a changed read or closed
   mark is never counted. The timeline's statusline shows `↓ <n> newer below (G)`
   until the view shows them; `G` jumps to the latest message, clears the count and
-  follows again. A re-render never moves cursors in other windows.
+  follows again. A re-render never moves cursors in other windows. Closing a chat
+  keeps its place in session memory — the message at the top of the view and
+  whether it followed the end — and reopening it puts that message back at the
+  top with the same following state; a first open, or one whose message is gone,
+  opens at the end as before. Mail that arrived while the chat was closed and
+  sits below the restored view keeps its `↓ <n> newer below (G)` count.
 - **Statuslines.** The timeline's statusline says the state of the conversation,
   ` <with> in <city> · <last send> · <liveness> · <n> unread · ↓ <n> newer below (G) `,
   from what the chat already holds (no gc call):

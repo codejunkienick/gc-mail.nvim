@@ -34,6 +34,15 @@ local last_chat = nil
 -- open in two tab pages keeps one draft per tab page)
 local saved_compose = {}
 
+-- Reopen anchors kept across closings, in session memory only:
+-- key (city.path .. '\0' .. with) -> { id = <the message at the top of the
+-- view when closed>, following = <whether the view followed the end>,
+-- known = <the message ids the close had seen>, below = <the ids it counted
+-- below the view> }. The next open restores that message to the top with
+-- the same following state, or opens at the end when the message is gone
+-- (or was none).
+local saved_place = {}
+
 -- Read state, one record per message id (no record = idle):
 -- reads[id] = { phase = 'reading' | 'read' | 'refused' | 'unreading',
 --   seq = <number>, owner = <chat that pressed u>, answered = <hrtime> }
@@ -287,6 +296,15 @@ local function load_city(city)
         vim.notify('gc-mail: ' .. err, vim.log.levels.ERROR)
       end
       load_failed[city.path] = err
+      -- The open's history wait answered with nothing: drop pending reopen
+      -- anchors, so a later load does not yank the view back to them.
+      for _, tab_chats in pairs(chats) do
+        for _, c in pairs(tab_chats) do
+          if c.city.path == city.path and c.pending_place ~= nil then
+            c.pending_place, c.place_wait, c.place_view = nil, nil, nil
+          end
+        end
+      end
     else
       load_failed[city.path] = nil
     end
@@ -610,6 +628,53 @@ function M.render(chat)
 
   local before = view_of(chat)
   local follow = chat.just_opened or #chat.lines == 0 or following(before)
+  local restore_block = nil
+  local restore_known, restore_below = nil, nil
+  local waiting_anchor = false
+  local pending = chat.pending_place
+  if pending ~= nil then
+    local cached = history.cache[chat.city.path]
+    local stamp = cached and cached.loaded_since or nil
+    if pending.id == nil then
+      -- Nothing to restore: closed with no message in view.
+      follow = true
+      chat.pending_place, chat.place_wait, chat.place_view = nil, nil, nil
+    elseif stamp == chat.place_wait then
+      -- The open's history load has not answered yet: the cache is still the
+      -- one from before the close. Show the end meanwhile and keep the anchor.
+      waiting_anchor = true
+    else
+      local moved = false
+      if chat.place_view then
+        local pv = chat.place_view
+        moved = before.view.lnum ~= pv.lnum or before.view.topline ~= pv.topline or before.bottom ~= pv.bottom
+      end
+      if moved then
+        -- The user moved before the open's load answered: stay where they
+        -- are instead of yanking the view back to the anchor.
+        chat.pending_place, chat.place_wait, chat.place_view = nil, nil, nil
+      else
+        for _, block in ipairs(blocks) do
+          if block.message and block.message.id == pending.id then
+            restore_block = block
+            break
+          end
+        end
+        if restore_block and pending.following then
+          -- Closed while following: reopen following at the end.
+          restore_block = nil
+          follow = true
+        elseif restore_block then
+          follow = false
+          restore_known, restore_below = pending.known, pending.below
+        else
+          -- The anchor message is gone: open at the end, as on first open.
+          follow = true
+        end
+        chat.pending_place, chat.place_wait, chat.place_view = nil, nil, nil
+      end
+    end
+  end
   chat.just_opened = false
   local shown_ids = {}
   for _, block in ipairs(chat.message_blocks) do
@@ -629,6 +694,56 @@ function M.render(chat)
   if follow then
     chat.below = {}
     vim.api.nvim_win_set_cursor(chat.timeline_win, { new_count, 0 })
+  elseif restore_block then
+    -- Reopened at the anchor: the anchor message back at the top of the view,
+    -- held there, its topline restored exactly (a `zt` would honour
+    -- 'scrolloff' and drift the anchor across reopenings). The cursor stays a
+    -- scrolloff inside the view so the exact topline holds.
+    local target = math.min(restore_block.start_line, new_count)
+    local ok_soff, w_soff = pcall(function()
+      return vim.wo[chat.timeline_win].scrolloff
+    end)
+    local soff = (ok_soff and type(w_soff) == 'number') and w_soff or 0
+    -- Neovim clamps 'scrolloff' to half the window height: without the same
+    -- clamp the cursor lands past the visible band and drags the topline to
+    -- the end on large values like the common scrolloff=999.
+    local ok_h, height = pcall(vim.api.nvim_win_get_height, chat.timeline_win)
+    if ok_h and type(height) == 'number' and height > 1 then
+      soff = math.min(soff, math.floor((height - 1) / 2))
+    elseif ok_h and type(height) == 'number' then
+      soff = 0
+    end
+    soff = math.max(soff, 0)
+    local cursor = math.min(target + soff, new_count)
+    vim.api.nvim_win_call(chat.timeline_win, function()
+      local view = vim.fn.winsaveview()
+      view.topline = target
+      view.lnum = cursor
+      view.col = 0
+      view.coladd = 0
+      vim.fn.winrestview(view)
+      -- An even height with 'scrolloff' at exactly half of it, the view
+      -- ending on the last line: Neovim keeps that half above the cursor and
+      -- pulls the top up a line, so the cursor steps down one.
+      if vim.fn.line('w0') ~= target and cursor < new_count then
+        view.lnum = cursor + 1
+        vim.fn.winrestview(view)
+      end
+    end)
+    -- Mail that arrived while the chat was closed and sits below the restored
+    -- view was never shown, so it keeps its newer-below count; mail the close
+    -- had counted and is still below stays counted.
+    chat.below = {}
+    local bottom = vim.api.nvim_win_call(chat.timeline_win, function()
+      return vim.fn.line('w$')
+    end)
+    for _, block in ipairs(blocks) do
+      if block.message and block.start_line > bottom
+          and (not (restore_known and restore_known[block.message.id])
+            or (restore_below and restore_below[block.message.id])) then
+        chat.below[block.message.id] = true
+      end
+    end
   else
     -- Held: the same cursor and topline; a message first shown below the
     -- view waits there, counted by its id
@@ -643,6 +758,15 @@ function M.render(chat)
       if block.message and not shown_ids[block.message.id] and block.start_line > bottom then
         chat.below[block.message.id] = true
       end
+    end
+  end
+  if waiting_anchor and chat.pending_place ~= nil and follow then
+    -- Still waiting for the open's load, and the render shows the meanwhile
+    -- end: remember it, so a user move before the answer drops the anchor at
+    -- resolve time instead of yanking the view back to it.
+    local ok_v, v = pcall(view_of, chat)
+    if ok_v and v and v.view and v.view.topline then
+      chat.place_view = { lnum = v.view.lnum, topline = v.view.topline, bottom = v.bottom }
     end
   end
   update_below(chat)
@@ -931,10 +1055,67 @@ local function restore_origin(chat)
   end
 end
 
+-- Records where `chat` is for the next open: the message at the top of the
+-- view and whether it followed the end, with the ids it already knew and the
+-- ids it counted below (so a restore counts only newer arrivals). Returns
+-- false when the timeline cannot be read at all.
+local function capture_place(chat)
+  if not vim.api.nvim_win_is_valid(chat.timeline_win)
+      or not vim.api.nvim_buf_is_valid(chat.timeline_buf)
+      or #chat.message_blocks == 0 then
+    return false
+  end
+  local ok_at, at = pcall(view_of, chat)
+  if not (ok_at and at and at.view and at.view.topline) then
+    return false
+  end
+  local topline = at.view.topline
+  local id = nil
+  for _, block in ipairs(chat.message_blocks) do
+    if block.message and topline >= block.start_line and topline <= block.end_line then
+      id = block.message.id
+      break
+    end
+  end
+  if not id then
+    local ok_row, row = pcall(vim.api.nvim_win_get_cursor, chat.timeline_win)
+    if ok_row and row then
+      for _, block in ipairs(chat.message_blocks) do
+        if block.message and row[1] >= block.start_line and row[1] <= block.end_line then
+          id = block.message.id
+          break
+        end
+      end
+    end
+  end
+  local known = {}
+  for _, block in ipairs(chat.message_blocks) do
+    if block.message then
+      known[block.message.id] = true
+    end
+  end
+  local below = {}
+  for mid in pairs(chat.below) do
+    below[mid] = true
+  end
+  saved_place[chat.city.path .. '\0' .. chat.with] = { id = id, following = following(at), known = known, below = below }
+  chat.place_captured = true
+  return true
+end
+
 function M.close(chat)
   local k = key_of(chat.city, chat.with)
   local compose_key = chat.city.path .. '\0' .. chat.with
   local tab = chat.tab
+
+  -- The reopen anchor, captured while the timeline can still be read (a
+  -- directly closed timeline window is captured by BufWinLeave, whose
+  -- WinClosed runs after it is gone). A close that reads nothing keeps a
+  -- fresh anchor of this chat, but drops a stale one no close of this chat
+  -- ever replaced.
+  if not capture_place(chat) and not chat.place_captured then
+    saved_place[compose_key] = nil
+  end
 
   if vim.api.nvim_buf_is_valid(chat.compose_buf) then
     local lines = vim.api.nvim_buf_get_lines(chat.compose_buf, 0, -1, false)
@@ -1200,11 +1381,24 @@ function M.open(city_arg, with_arg)
     -- Messages first shown below the view while it did not follow: id -> true
     below = {},
     just_opened = true,
+    -- The previous close's anchor, resolved against the history the open
+    -- loads (place_wait is that cache's stamp, nil when none yet; place_view
+    -- is the meanwhile end the waiting renders show, to spot a user move)
+    pending_place = nil,
+    place_wait = nil,
+    place_view = nil,
     -- The statusline's state as of the last render: this conversation's
     -- unread count and the last pending send's state (nil for none)
     unread = 0,
     last_send = nil,
   }
+
+  local anchor = saved_place[compose_key]
+  if anchor then
+    chat.pending_place = { id = anchor.id, following = anchor.following, known = anchor.known, below = anchor.below }
+    local cached = history.cache[city.path]
+    chat.place_wait = cached and cached.loaded_since or nil
+  end
 
   chats[tab][k] = chat
   sync_live()
@@ -1228,9 +1422,13 @@ function M.open(city_arg, with_arg)
     { 't', function() on_thread_message(chat) end, 'gc-mail: open thread' },
     { 'u', function() on_unread_message(chat) end, 'gc-mail: mark unread' },
     { 'R', function()
+      -- A reload answers the open's history wait itself: the anchor is off.
+      chat.pending_place, chat.place_wait, chat.place_view = nil, nil, nil
       reload(chat)
     end, 'gc-mail: reload history' },
     { 'G', function()
+      -- Jumping to the end means the end, not the waiting anchor.
+      chat.pending_place, chat.place_wait, chat.place_view = nil, nil, nil
       -- A count keeps G's own meaning: that line
       vim.cmd('normal! ' .. (vim.v.count > 0 and vim.v.count or '') .. 'G')
       update_below(chat)
@@ -1248,6 +1446,17 @@ function M.open(city_arg, with_arg)
 
   local group = vim.api.nvim_create_augroup(('gc_mail_chat_%d_%d'):format(timeline_win, compose_win), { clear = true })
   chat.group = group
+
+  -- Captures the reopen anchor while the timeline window still shows it: a
+  -- directly closed timeline window (:q, <C-w>c, :tabclose) is already gone
+  -- when its WinClosed runs, so M.close alone would keep a stale anchor.
+  vim.api.nvim_create_autocmd('BufWinLeave', {
+    group = group,
+    buffer = timeline_buf,
+    callback = function()
+      capture_place(chat)
+    end,
+  })
 
   local closing = false
   local function on_win_closed()
@@ -1292,6 +1501,14 @@ function M.open(city_arg, with_arg)
       if valid_chat(chat) then
         update_status(chat)
         update_keys(chat)
+        if chat.pending_place ~= nil and chat.place_view ~= nil then
+          -- A resize during the open's history wait re-seats the meanwhile
+          -- end: follow it, unless the user had already left it.
+          local ok_v, v = pcall(view_of, chat)
+          if ok_v and v and v.view and v.view.topline and following(v) then
+            chat.place_view = { lnum = v.view.lnum, topline = v.view.topline, bottom = v.bottom }
+          end
+        end
       end
     end,
   })
@@ -1552,6 +1769,7 @@ function M.reset()
     end
   end
   saved_compose = {}
+  saved_place = {}
   reads = {}
   if queue_subscribed then
     queue.subscribe('chat', nil)
