@@ -4491,6 +4491,249 @@ test(':GcMailChat imd-city opens two windows to the right with expected geometry
   eq(vim.api.nvim_buf_get_lines(tl_buf, 0, -1, false), expected_lines, 'exact timeline markdown lines')
 end)
 
+-- A single window holding the session's only listed buffer: empty, unnamed
+-- and unmodified.
+local function only_empty_buffer()
+  vim.cmd('silent! tabonly!')
+  vim.cmd('silent! only!')
+  vim.cmd('enew!')
+  local cur = vim.api.nvim_get_current_buf()
+  for _, b in ipairs(vim.api.nvim_list_bufs()) do
+    if b ~= cur and vim.api.nvim_buf_is_valid(b) and vim.fn.buflisted(b) == 1 then
+      pcall(vim.api.nvim_buf_delete, b, { force = true })
+    end
+  end
+  return vim.api.nvim_get_current_win(), vim.api.nvim_get_current_buf()
+end
+
+test('chat full-window: the only empty buffer is taken over full-size, and q returns to it', function()
+  local fix = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
+  preload()
+
+  local origin_win, origin_buf = only_empty_buffer()
+  local full_width = vim.api.nvim_win_get_width(origin_win)
+  local st_before = vim.api.nvim_get_option_value('statusline', { win = origin_win, scope = 'local' })
+  local wfw_before = vim.api.nvim_get_option_value('winfixwidth', { win = origin_win, scope = 'local' })
+
+  vim.cmd('GcMailChat imd-city')
+  local compose_win = vim.api.nvim_get_current_win()
+  assert(compose_win ~= origin_win, 'cursor in compose box')
+  eq(vim.api.nvim_get_mode().mode, 'n', 'normal mode in compose box')
+
+  local wins = vim.api.nvim_tabpage_list_wins(0)
+  eq(#wins, 2, 'timeline in the origin window plus the compose box: no leftover window')
+  local timeline_win = wins[1] == compose_win and wins[2] or wins[1]
+  eq(timeline_win, origin_win, 'the timeline took over the origin window')
+  eq(vim.api.nvim_win_get_width(origin_win), full_width, 'full width kept')
+  eq(vim.api.nvim_win_get_width(compose_win), full_width, 'compose spans the full width')
+  eq(vim.api.nvim_win_get_height(compose_win), 3, 'compose height 3')
+
+  local tl_buf = vim.api.nvim_win_get_buf(timeline_win)
+  local cp_buf = vim.api.nvim_win_get_buf(compose_win)
+  eq(vim.api.nvim_buf_get_name(tl_buf):match('gc%-mail://imd%-city/chat/mayor$') ~= nil, true, 'timeline buf name')
+  eq(vim.api.nvim_buf_get_name(cp_buf):match('gc%-mail://imd%-city/compose/mayor$') ~= nil, true, 'compose buf name')
+  eq(vim.api.nvim_buf_is_valid(origin_buf), true, 'the empty buffer is kept')
+  eq(vim.api.nvim_buf_get_name(origin_buf), '', 'the empty buffer is not renamed')
+
+  wait('timeline rendered', function()
+    return #vim.api.nvim_buf_get_lines(tl_buf, 0, -1, false) > 1
+  end)
+
+  vim.api.nvim_set_current_win(timeline_win)
+  vim.api.nvim_feedkeys('q', 'x', false)
+  eq(vim.api.nvim_win_is_valid(compose_win), false, 'compose closed')
+  eq(#vim.api.nvim_tabpage_list_wins(0), 1, 'one window again')
+  eq(vim.api.nvim_get_current_win(), origin_win, 'focus back in the origin window')
+  eq(vim.api.nvim_get_current_buf(), origin_buf, 'the empty buffer is current again')
+  eq(vim.api.nvim_buf_get_name(origin_buf), '', 'still unnamed')
+  eq(vim.api.nvim_buf_get_lines(origin_buf, 0, -1, false), { '' }, 'still empty')
+  eq(vim.api.nvim_get_option_value('statusline', { win = origin_win, scope = 'local' }), st_before, 'statusline local restored')
+  eq(vim.api.nvim_get_option_value('winfixwidth', { win = origin_win, scope = 'local' }), wfw_before, 'winfixwidth restored')
+  -- No pinned local copy of the global default: a later global change still
+  -- reaches the window and splits of it.
+  vim.go.statusline = 'gc-mail-test-global'
+  eq(vim.wo[origin_win].statusline, 'gc-mail-test-global', 'global statusline reaches the origin')
+  vim.cmd('vsplit')
+  local split_win = vim.api.nvim_get_current_win()
+  eq(vim.wo[split_win].statusline, 'gc-mail-test-global', 'global statusline reaches a new split')
+  vim.cmd('close')
+  vim.go.statusline = ''
+end)
+
+test('chat full-window: q with the taken buffer wiped falls back to a fresh empty buffer', function()
+  local fix = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
+  preload()
+
+  local origin_win, origin_buf = only_empty_buffer()
+  vim.cmd('GcMailChat imd-city')
+  local compose_win = vim.api.nvim_get_current_win()
+  local wins = vim.api.nvim_tabpage_list_wins(0)
+  local timeline_win = wins[1] == compose_win and wins[2] or wins[1]
+  eq(timeline_win, origin_win, 'the timeline took over the origin window')
+  local tl_buf = vim.api.nvim_win_get_buf(timeline_win)
+  wait('timeline rendered', function()
+    return #vim.api.nvim_buf_get_lines(tl_buf, 0, -1, false) > 1
+  end)
+
+  vim.api.nvim_buf_delete(origin_buf, { force = true })
+  eq(vim.api.nvim_buf_is_valid(origin_buf), false, 'the taken buffer is gone')
+
+  vim.api.nvim_set_current_win(timeline_win)
+  vim.api.nvim_feedkeys('q', 'x', false)
+  eq(#vim.api.nvim_tabpage_list_wins(0), 1, 'one window again')
+  eq(vim.api.nvim_get_current_win(), origin_win, 'focus back in the origin window')
+  local cur = vim.api.nvim_get_current_buf()
+  assert(cur ~= tl_buf, 'not left showing the closed timeline')
+  eq(vim.api.nvim_buf_get_name(cur), '', 'fallback buffer unnamed')
+  eq(vim.api.nvim_buf_get_lines(cur, 0, -1, false), { '' }, 'fallback buffer empty')
+end)
+
+test('chat full-window: closing the timeline window directly leaves an empty buffer, not the compose scratch', function()
+  local fix = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
+  preload()
+
+  local origin_win, origin_buf = only_empty_buffer()
+  vim.cmd('GcMailChat imd-city')
+  local compose_win = vim.api.nvim_get_current_win()
+  local wins = vim.api.nvim_tabpage_list_wins(0)
+  local timeline_win = wins[1] == compose_win and wins[2] or wins[1]
+  eq(timeline_win, origin_win, 'the timeline took over the origin window')
+  local compose_buf = vim.api.nvim_win_get_buf(compose_win)
+  local tl_buf = vim.api.nvim_win_get_buf(timeline_win)
+  wait('timeline rendered', function()
+    return #vim.api.nvim_buf_get_lines(tl_buf, 0, -1, false) > 1
+  end)
+
+  vim.api.nvim_buf_set_lines(compose_buf, 0, -1, false, { 'draft line' })
+  vim.api.nvim_set_current_win(timeline_win)
+  vim.cmd('q')
+  -- The WinClosed close runs on schedule after :q drops the timeline window.
+  wait('compose window given the empty buffer back', function()
+    local ws = vim.api.nvim_tabpage_list_wins(0)
+    return #ws == 1 and vim.api.nvim_win_get_buf(ws[1]) == origin_buf
+  end)
+  local only = vim.api.nvim_tabpage_list_wins(0)[1]
+  local cur = vim.api.nvim_win_get_buf(only)
+  assert(cur ~= tl_buf, 'not left on the closed timeline')
+  assert(cur ~= compose_buf, 'not stranded in the compose scratch buffer')
+  eq(cur, origin_buf, 'the empty buffer is back')
+  eq(vim.api.nvim_buf_get_name(cur), '', 'still unnamed')
+  eq(vim.api.nvim_buf_get_lines(cur, 0, -1, false), { '' }, 'still empty')
+  eq(vim.api.nvim_buf_is_valid(compose_buf), true, 'non-empty draft preserved')
+end)
+
+test('chat split: a named, textured, modified or second buffer keeps the three-window geometry', function()
+  local function split_geometry(what)
+    local origin_win = vim.api.nvim_get_current_win()
+    local origin_buf = vim.api.nvim_win_get_buf(origin_win)
+    vim.cmd('GcMailChat imd-city')
+    local compose_win = vim.api.nvim_get_current_win()
+    assert(compose_win ~= origin_win, what .. ': cursor in compose box')
+    eq(vim.api.nvim_get_mode().mode, 'n', what .. ': normal mode in compose box')
+    local wins = vim.api.nvim_tabpage_list_wins(0)
+    eq(#wins, 3, what .. ': origin + timeline + compose windows')
+    local timeline_win = nil
+    for _, w in ipairs(wins) do
+      if w ~= origin_win and w ~= compose_win then
+        timeline_win = w
+      end
+    end
+    assert(timeline_win, what .. ': timeline window exists')
+    eq(vim.api.nvim_win_get_width(timeline_win), 60, what .. ': timeline width 60')
+    eq(vim.api.nvim_win_get_width(compose_win), 60, what .. ': compose width 60')
+    eq(vim.api.nvim_win_get_height(compose_win), 3, what .. ': compose height 3')
+    eq(vim.api.nvim_win_get_buf(origin_win), origin_buf, what .. ': origin buffer unchanged')
+    vim.api.nvim_set_current_win(timeline_win)
+    vim.api.nvim_feedkeys('q', 'x', false)
+    eq(#vim.api.nvim_tabpage_list_wins(0), 1, what .. ': q closes back to one window')
+  end
+
+  local cases = {
+    named = function()
+      vim.cmd('file chat-split-named')
+    end,
+    text = function()
+      buffer({ 'hello' })
+      vim.bo[vim.api.nvim_get_current_buf()].modified = false
+    end,
+    modified = function()
+      buffer({ 'x' })
+      buffer({ '' })
+    end,
+    second = function()
+      vim.api.nvim_create_buf(true, false)
+    end,
+  }
+  for name, mutate in pairs(cases) do
+    reset()
+    local fix = conversation_fixture()
+    write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+    gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
+    preload()
+    only_empty_buffer()
+    mutate()
+    split_geometry(name)
+  end
+end)
+
+test('chat split: an extra window keeps the split geometry, not full-size', function()
+  local function split_not_fullsize(what, setup_extra)
+    local origin_win = vim.api.nvim_get_current_win()
+    local origin_buf = vim.api.nvim_win_get_buf(origin_win)
+    setup_extra()
+    eq(#vim.api.nvim_tabpage_list_wins(0), 2, what .. ': two windows before open')
+    vim.api.nvim_set_current_win(origin_win)
+    vim.cmd('GcMailChat imd-city')
+    local compose_win = vim.api.nvim_get_current_win()
+    assert(compose_win ~= origin_win, what .. ': cursor in compose box')
+    local wins = vim.api.nvim_tabpage_list_wins(0)
+    eq(#wins, 4, what .. ': extra window + origin + timeline + compose')
+    local timeline_win = nil
+    for _, w in ipairs(wins) do
+      if w ~= origin_win and w ~= compose_win then
+        local b = vim.api.nvim_win_get_buf(w)
+        if vim.api.nvim_buf_get_name(b):match('/chat/') then
+          timeline_win = w
+        end
+      end
+    end
+    assert(timeline_win, what .. ': timeline window exists')
+    assert(timeline_win ~= origin_win, what .. ': the origin window is not taken over')
+    eq(vim.api.nvim_win_get_width(timeline_win), 60, what .. ': timeline width 60')
+    eq(vim.api.nvim_win_get_buf(origin_win), origin_buf, what .. ': origin buffer unchanged')
+    vim.api.nvim_set_current_win(timeline_win)
+    vim.api.nvim_feedkeys('q', 'x', false)
+    eq(#vim.api.nvim_tabpage_list_wins(0), 2, what .. ': q closes back to the two windows')
+    eq(vim.api.nvim_win_get_buf(origin_win), origin_buf, what .. ': origin buffer still unchanged')
+  end
+
+  local cases = {
+    same_buffer = function()
+      vim.cmd('vsplit')
+    end,
+    unlisted_window = function()
+      vim.cmd('split')
+      local scratch = vim.api.nvim_create_buf(false, true)
+      vim.api.nvim_win_set_buf(0, scratch)
+    end,
+  }
+  for name, setup_extra in pairs(cases) do
+    reset()
+    local fix = conversation_fixture()
+    write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+    gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
+    preload()
+    only_empty_buffer()
+    split_not_fullsize(name, setup_extra)
+  end
+end)
+
 test('<Space>ms in normal mode queues to mayor; typing ms in insert mode, <C-s> and <CR> queue nothing', function()
   local fix = conversation_fixture()
   write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)

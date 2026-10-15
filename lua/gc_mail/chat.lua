@@ -869,6 +869,68 @@ local function release_unreading(chat)
   end
 end
 
+-- The full-size case: when the origin window is the tab's only window and
+-- shows the session's only listed buffer and that buffer is empty (unnamed,
+-- unmodified, empty buftype, no text), the chat takes over the origin window
+-- instead of splitting beside it. Returns that buffer, else nil. It reads
+-- only buffer and window state.
+local function fullsize_buf(origin)
+  -- Any other window in the tab (an unlisted scratch, or a second view of
+  -- the same empty buffer) keeps today's split: taking over the origin
+  -- would strand or hide the empty buffer on close.
+  if #vim.api.nvim_tabpage_list_wins(0) ~= 1 then
+    return nil
+  end
+  local buf = vim.api.nvim_win_get_buf(origin)
+  if vim.fn.buflisted(buf) ~= 1 then
+    return nil
+  end
+  if vim.api.nvim_buf_get_name(buf) ~= '' then
+    return nil
+  end
+  if vim.bo[buf].modified then
+    return nil
+  end
+  if vim.bo[buf].buftype ~= '' then
+    return nil
+  end
+  for _, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+    if line ~= '' then
+      return nil
+    end
+  end
+  for _, b in ipairs(vim.api.nvim_list_bufs()) do
+    if b ~= buf and vim.fn.buflisted(b) == 1 then
+      return nil
+    end
+  end
+  return buf
+end
+
+-- Gives a taken-over origin window back its buffer and window options: the
+-- close and reset paths never close the user's own window. The options are
+-- captured and restored in local scope only: reading the effective value and
+-- writing it back would pin a copy of the global default onto the window.
+local function restore_origin(chat)
+  if vim.api.nvim_buf_is_valid(chat.origin_buf) then
+    pcall(vim.api.nvim_win_set_buf, chat.origin, chat.origin_buf)
+  else
+    -- The taken buffer is gone (wiped at open through bufhidden, or wiped
+    -- while the chat was open): fall back to a fresh empty buffer so the
+    -- window never keeps showing the closed timeline.
+    local fresh = vim.api.nvim_create_buf(true, false)
+    if fresh and fresh ~= 0 then
+      pcall(vim.api.nvim_win_set_buf, chat.origin, fresh)
+    end
+  end
+  if chat.origin_opts then
+    pcall(function()
+      vim.api.nvim_set_option_value('statusline', chat.origin_opts.statusline, { win = chat.origin, scope = 'local' })
+      vim.api.nvim_set_option_value('winfixwidth', chat.origin_opts.winfixwidth, { win = chat.origin, scope = 'local' })
+    end)
+  end
+end
+
 function M.close(chat)
   local k = key_of(chat.city, chat.with)
   local compose_key = chat.city.path .. '\0' .. chat.with
@@ -900,7 +962,9 @@ function M.close(chat)
   pcall(vim.api.nvim_del_augroup_by_id, chat.group)
   release_unreading(chat)
 
-  if vim.api.nvim_win_is_valid(chat.timeline_win) then
+  if chat.fullsize and vim.api.nvim_win_is_valid(chat.origin) then
+    restore_origin(chat)
+  elseif vim.api.nvim_win_is_valid(chat.timeline_win) then
     pcall(vim.api.nvim_win_close, chat.timeline_win, true)
   end
   if vim.api.nvim_win_is_valid(chat.compose_win) then
@@ -909,6 +973,26 @@ function M.close(chat)
 
   if vim.api.nvim_win_is_valid(chat.origin) then
     pcall(vim.api.nvim_set_current_win, chat.origin)
+  elseif chat.fullsize and vim.api.nvim_win_is_valid(chat.compose_win) then
+    -- The timeline was the origin window, so closing it directly (:q,
+    -- <C-w>c) leaves the compose window as the editor's only window and the
+    -- close above cannot drop the last window: give it an empty buffer back
+    -- instead of stranding the user in the compose scratch buffer.
+    local target = chat.origin_buf
+    if not vim.api.nvim_buf_is_valid(target) then
+      target = vim.api.nvim_create_buf(true, false)
+    end
+    if target and target ~= 0 then
+      pcall(vim.api.nvim_win_set_buf, chat.compose_win, target)
+    end
+    if chat.origin_opts then
+      pcall(function()
+        vim.api.nvim_set_option_value('statusline', chat.origin_opts.statusline, { win = chat.compose_win, scope = 'local' })
+        vim.api.nvim_set_option_value('winfixwidth', chat.origin_opts.winfixwidth, { win = chat.compose_win, scope = 'local' })
+      end)
+    end
+    pcall(vim.api.nvim_set_option_value, 'winfixheight', false, { win = chat.compose_win, scope = 'local' })
+    pcall(vim.api.nvim_set_current_win, chat.compose_win)
   end
 end
 
@@ -1039,6 +1123,10 @@ function M.open(city_arg, with_arg)
     return nil
   end
 
+  -- The only empty buffer's window is taken over full-size; every other case
+  -- splits beside it exactly as before.
+  local taken_buf = fullsize_buf(origin)
+
   local compose_key = city.path .. '\0' .. with
   local compose_buf
   for _, b in ipairs(saved_compose[compose_key] or {}) do
@@ -1067,9 +1155,21 @@ function M.open(city_arg, with_arg)
   local chat_width = gc_mail.config.chat_width or 60
   local compose_height = gc_mail.config.chat_compose_height or 3
 
-  local timeline_win = vim.api.nvim_open_win(timeline_buf, false, {
-    split = 'right', win = origin, width = chat_width,
-  })
+  -- The empty buffer is kept, not wiped or renamed: it waits, hidden, until
+  -- the chat closes.
+  local timeline_win, origin_opts
+  if taken_buf then
+    origin_opts = {
+      statusline = vim.api.nvim_get_option_value('statusline', { win = origin, scope = 'local' }),
+      winfixwidth = vim.api.nvim_get_option_value('winfixwidth', { win = origin, scope = 'local' }),
+    }
+    timeline_win = origin
+    vim.api.nvim_win_set_buf(origin, timeline_buf)
+  else
+    timeline_win = vim.api.nvim_open_win(timeline_buf, false, {
+      split = 'right', win = origin, width = chat_width,
+    })
+  end
   local compose_win = vim.api.nvim_open_win(compose_buf, true, {
     split = 'below', win = timeline_win, height = compose_height,
   })
@@ -1088,6 +1188,9 @@ function M.open(city_arg, with_arg)
     city = city,
     with = with,
     origin = origin,
+    fullsize = taken_buf ~= nil,
+    origin_buf = taken_buf,
+    origin_opts = origin_opts,
     timeline_win = timeline_win,
     timeline_buf = timeline_buf,
     compose_win = compose_win,
@@ -1427,7 +1530,11 @@ function M.reset()
   for _, tab_chats in pairs(chats) do
     for _, chat in pairs(tab_chats) do
       if valid_chat(chat) then
-        pcall(vim.api.nvim_win_close, chat.timeline_win, true)
+        if chat.fullsize and vim.api.nvim_win_is_valid(chat.origin) then
+          restore_origin(chat)
+        else
+          pcall(vim.api.nvim_win_close, chat.timeline_win, true)
+        end
         pcall(vim.api.nvim_win_close, chat.compose_win, true)
       end
     end

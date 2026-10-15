@@ -402,7 +402,14 @@ or `:GcMailChat [city] [with]` opens a two-window conversation view
 beside the current window: a vertical split of `chat_width` columns (default 60,
 `winfixwidth`) on the right for the timeline, and a split below of
 `chat_compose_height` rows (default 3, `winfixheight`) for the compose box,
-placing the cursor in the compose box in normal mode.
+placing the cursor in the compose box in normal mode. When the current window
+is the tab's only window, a normal window holding the session's only listed
+buffer, and that buffer is empty (unnamed, unmodified, no text), the chat
+instead takes over that window full-size — timeline in it, compose box split
+below — and `q` in the timeline
+closes both chat windows and returns to the empty buffer. Closing the timeline
+window itself (`:q`, `<C-w>c`) in a full-size chat likewise leaves a single
+window holding the empty buffer, keeping any compose draft.
 
 | key | context | action |
 | --- | --- | --- |
