@@ -3542,15 +3542,18 @@ test('an appended chunk over 1 MiB gives one overflow event and later lines are 
   vim.wait(50)
   write(log, '')
   wait('rotated event received after recreate', function()
-    return #rec == 3
+    return rec[#rec].type == 'watching' and rec[#rec].watching == true
   end)
-  eq(rec[3].type, 'rotated')
+  -- The log gone unwatched, then the new one armed and reported once
+  eq(vim.tbl_map(function(ev)
+    return ev.type == 'watching' and 'watching ' .. tostring(ev.watching) or ev.type
+  end, vim.list_slice(rec, 3)), { 'watching false', 'rotated', 'watching true' })
 
   append(log, event('mail.read'))
   wait('later line received after rotation', function()
-    return #rec == 4
+    return #rec == 6
   end)
-  eq(rec[4].type, 'mail.read')
+  eq(rec[6].type, 'mail.read')
   events.unsubscribe('test_overflow')
 end)
 
@@ -5613,17 +5616,19 @@ local function id_line(kind, id)
   return vim.json.encode({ seq = 1, type = kind, ts = '2026-10-08T10:00:00Z', actor = 'human', subject = id }) .. '\n'
 end
 
--- A chat with mayor in imd-city (a real directory with an empty event log),
--- opened on the conversation fixture, after its first history load. No
--- background watch; nothing is marked read unless `opts` says so.
-local function live_chat(opts)
+-- A chat with mayor in imd-city (a real directory with an empty event log, or
+-- none with `no_log`), opened on the conversation fixture, after its first
+-- history load. No background watch; nothing is marked read unless `opts` says so.
+local function live_chat(opts, no_log)
   require('gc_mail.history').reset()
   local fix, past, t1, t2 = conversation_fixture()
   write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
   gc_mail.setup(vim.tbl_extend('force', { state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY,
     chat_mark_read = false, watch = false }, opts or {}))
   local cities, log = city_dirs()
-  write(log, '')
+  if not no_log then
+    write(log, '')
+  end
   vim.cmd('GcMailChat imd-city')
   local chat = { cities = cities, log = log, compose_win = vim.api.nvim_get_current_win(), past = past, t1 = t1, t2 = t2,
     fix = fix }
@@ -6060,6 +6065,190 @@ test('chat live: a failed load after a delivered send is said as an error', func
     return #errors() == 1
   end)
   eq(shown(chat):find('all good', 1, true) ~= nil, true, 'the timeline keeps what it showed')
+end)
+
+-- ---- the chat's statuslines -----------------------------------------------------
+
+test('chat status: correspondent, city, liveness and unread count; a narrow window cuts from the end; the keys stay below', function()
+  local chat = live_chat()
+  local status = function()
+    return vim.wo[chat.timeline_win].statusline
+  end
+  eq(status(), ' mayor in imd-city · live · 1 unread ', 'idle, one unread')
+  eq(vim.wo[chat.compose_win].statusline, ' <Space>ms send · above: q close  <CR> open  t thread  u un…',
+    'the keys, cut at the chat width')
+  append(chat.log, message_line('mail.replied', { id = 'tc-wisp-live1', subject = 'later', body = 'later' }))
+  wait('the arrival counts', function()
+    return status() == ' mayor in imd-city · live · 2 unread '
+  end, 1000)
+
+  -- A new width cuts again; neither the timeline nor a cursor moves
+  local tick = vim.api.nvim_buf_get_changedtick(vim.api.nvim_win_get_buf(chat.timeline_win))
+  local cursors = { vim.api.nvim_win_get_cursor(chat.timeline_win), vim.api.nvim_win_get_cursor(chat.compose_win) }
+  -- A headless run has no main loop to notice the new size: say it as Neovim does
+  vim.api.nvim_win_set_width(chat.timeline_win, 24)
+  vim.api.nvim_exec_autocmds('WinResized', {})
+  wait('cut to 24 columns', function()
+    return status() == ' mayor in imd-city · li…'
+  end, 1000)
+  eq(vim.api.nvim_buf_get_changedtick(vim.api.nvim_win_get_buf(chat.timeline_win)), tick, 'the timeline was not rendered')
+  eq({ vim.api.nvim_win_get_cursor(chat.timeline_win), vim.api.nvim_win_get_cursor(chat.compose_win) }, cursors,
+    'no cursor moved')
+  vim.api.nvim_win_set_width(chat.timeline_win, 12)
+  vim.api.nvim_exec_autocmds('WinResized', {})
+  wait('the correspondent stays first', function()
+    return status() == ' mayor in i…'
+  end, 1000)
+
+  -- A % in the correspondent shows as itself
+  local other = require('gc_mail.chat').open('imd-city', '50%off')
+  eq(vim.wo[other.timeline_win].statusline, ' 50%%off in imd-city · live ', 'escaped for the statusline')
+end)
+
+test('chat status: a send shows sending…, then queued while it retries, then failed', function()
+  vim.env.FAKE_GC_FAIL_TIMES = '1'
+  vim.env.FAKE_GC_DELAY = '0.5'
+  local chat = live_chat({ retry_ms = { 5000, 5000 } })
+  local status = function()
+    return vim.wo[chat.timeline_win].statusline
+  end
+  local compose_buf = vim.api.nvim_win_get_buf(chat.compose_win)
+  vim.api.nvim_buf_set_lines(compose_buf, 0, -1, false, { 'will retry' })
+  vim.api.nvim_set_current_win(chat.compose_win)
+  vim.api.nvim_feedkeys(vim.keycode('<Space>ms'), 'x', false)
+  wait('sending', function()
+    return status() == ' mayor in imd-city · sending… · live · 1 unread '
+  end)
+  wait('queued for a retry', function()
+    return status() == ' mayor in imd-city · queued · live · 1 unread '
+  end)
+
+  vim.env.FAKE_GC_FAIL_TIMES = '99'
+  vim.env.FAKE_GC_DELAY = nil
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = { 20 }, chat_mark_read = false, watch = false })
+  vim.api.nvim_buf_set_lines(compose_buf, 0, -1, false, { 'will fail' })
+  vim.api.nvim_feedkeys(vim.keycode('<Space>ms'), 'x', false)
+  -- The send's state outranks liveness and the counts: a long error cuts them
+  wait('failed', function()
+    return status():find('^ mayor in imd%-city · failed: ') ~= nil
+  end)
+  eq(status(), ' mayor in imd-city · failed: exit 1: gc mail send: store un…', 'the first error line')
+end)
+
+test('chat status: a failed load shows stale until a load succeeds', function()
+  require('gc_mail.chat').configure({ poll_ms = 100 })
+  local chat = live_chat()
+  local status = function()
+    return vim.wo[chat.timeline_win].statusline
+  end
+  eq(status(), ' mayor in imd-city · live · 1 unread ', 'live')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.exit', '1\n')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.stderr', 'store unavailable\n')
+  wait('stale', function()
+    return status() == ' mayor in imd-city · stale · 1 unread '
+  end, 2000)
+  os.remove(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.exit')
+  os.remove(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.stderr')
+  wait('live again', function()
+    return status() == ' mayor in imd-city · live · 1 unread '
+  end, 2000)
+end)
+
+test('chat status: a city with no event log is polling, live once its log is watched, polling when it goes', function()
+  -- No fallback load comes within the test: the watcher's own notice moves the word
+  require('gc_mail.chat').configure({ poll_ms = 600000 })
+  require('gc_mail.events').configure({ rearm_ms = 600000 })
+  local chat = live_chat(nil, true)
+  local path = chat.cities[1].path
+  local status = function()
+    return vim.wo[chat.timeline_win].statusline
+  end
+  eq(status(), ' mayor in imd-city · polling · 1 unread ', 'no event log to watch')
+  local calls = #mail_calls()
+  write(chat.log, '')
+  require('gc_mail.events').rearm()
+  wait('live once the log is armed', function()
+    return status() == ' mayor in imd-city · live · 1 unread '
+  end, 1000)
+  os.remove(chat.log)
+  wait('polling once the log is gone', function()
+    return status() == ' mayor in imd-city · polling · 1 unread '
+  end, 1000)
+  vim.wait(100)
+  eq(bd_list_calls(path), 1, 'no history load moved it')
+  eq(#mail_calls(), calls, 'no gc call either')
+end)
+
+test('chat status: an unreadable queue file shows in the timeline but is no send of the chat', function()
+  local chat = live_chat()
+  local status = function()
+    return vim.wo[chat.timeline_win].statusline
+  end
+  vim.fn.mkdir(queue_dir, 'p')
+  write(queue_dir .. '/9999999999999999-00001-00000099.json', '{"version": 1, ')
+  vim.api.nvim_set_current_win(chat.timeline_win)
+  vim.api.nvim_feedkeys('R', 'x', false)
+  wait('the unreadable file shows', function()
+    return shown(chat):find('## you · failed: not a gc-mail message: not JSON', 1, true) ~= nil
+  end)
+  eq(status(), ' mayor in imd-city · live · 1 unread ', 'no send state')
+
+  -- A failed send of the chat is its last send, though the unreadable file sorts after it
+  vim.env.FAKE_GC_FAIL_TIMES = '99'
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = { 20 }, chat_mark_read = false, watch = false })
+  local compose_buf = vim.api.nvim_win_get_buf(chat.compose_win)
+  vim.api.nvim_buf_set_lines(compose_buf, 0, -1, false, { 'will fail' })
+  vim.api.nvim_set_current_win(chat.compose_win)
+  vim.api.nvim_feedkeys(vim.keycode('<Space>ms'), 'x', false)
+  wait('failed', function()
+    return status() == ' mayor in imd-city · failed: exit 1: gc mail send: store un…'
+  end)
+end)
+
+test('chat is_current: only the current chat of that city and correspondent in this tab page; the watch keeps quiet only then', function()
+  local cities, log = watched({ chat_mark_read = false })
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', (conversation_fixture()))
+  seeded(3)
+  local chat = require('gc_mail.chat')
+  local origin = vim.api.nvim_get_current_win()
+  vim.cmd('GcMailChat imd-city')
+  local function notices()
+    return #vim.tbl_filter(function(note)
+      return note.level == vim.log.levels.INFO
+    end, notes)
+  end
+  eq(chat.is_current(cities[1], 'mayor'), true, 'the compose window is current')
+  eq(chat.is_current(cities[1], 'planner'), false, 'another correspondent')
+  eq(chat.is_current(cities[2], 'mayor'), false, 'another city')
+  append(log, mail_line('mail.sent', 'ic-wisp-a1', { from = 'mayor', subject = 'in the chat' }))
+  seeded(4)
+  eq(notices(), 0, 'the chat shows it')
+  append(log, mail_line('mail.sent', 'ic-wisp-b2', { from = 'planner' }))
+  seeded(5)
+  eq(notices(), 1, 'another correspondent is said')
+
+  vim.cmd('tabnew')
+  eq(chat.is_current(cities[1], 'mayor'), false, 'the chat of another tab page')
+  append(log, mail_line('mail.sent', 'ic-wisp-c3', { from = 'mayor' }))
+  seeded(6)
+  eq(notices(), 2, 'said from another tab page')
+  vim.cmd('tabclose')
+
+  vim.api.nvim_set_current_win(origin)
+  eq(chat.is_current(cities[1], 'mayor'), false, 'a window beside the chat')
+  local timeline
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(w)):match('/chat/') then
+      timeline = w
+    end
+  end
+  vim.api.nvim_set_current_win(timeline)
+  eq(chat.is_current(cities[1], 'mayor'), true, 'the timeline is current')
+  vim.api.nvim_feedkeys('q', 'x', false)
+  eq(chat.is_current(cities[1], 'mayor'), false, 'after close')
+  append(log, mail_line('mail.sent', 'ic-wisp-d4', { from = 'mayor' }))
+  seeded(7)
+  eq(notices(), 3, 'said after close')
 end)
 
 test('setup({ chat_poll_ms = 1000 }) raises; 15000 is taken', function()

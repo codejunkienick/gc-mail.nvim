@@ -318,7 +318,9 @@ is one call) and never with a second inbox call for the city while one runs
 (then once more after it). A line that is not JSON, or has no `type`, is
 ignored. When gc rotates the file (renames it and starts a new one with an
 `events.rotated` line) or it is recreated, the file now at the path is watched
-instead and reported as `rotated`, listing the city once.
+instead and reported as `rotated`, listing the city once. A city's log
+starting or ending being watched (a missing log armed, a rotated one that
+cannot be armed again) is reported as `watching`, which lists nothing.
 
 **Fallback.** Every `panel_poll_ms` (default one minute) while the panel is
 open, every city is listed again and the kept copies are read again, also for
@@ -364,8 +366,10 @@ city's event log (the shared watcher above) and needs no timer to see mail.
 - **Notice.** When mail for you arrives (a `mail.sent` or `mail.replied` event
   whose message is addressed to `human` and not from `human`), it says
   `gc-mail: <from> in <city>: <subject>`, each part on one line and the
-  subject cut at 72 characters, once per message. If the chat window of that
-  city and sender is open and current, there is no notice: the chat shows it.
+  subject cut at 72 characters, once per message. If the chat of that city and
+  sender is open in the current tab page with one of its windows current, there
+  is no notice: the chat shows it (`require('gc_mail.chat').is_current(city, with)`
+  says so). A chat in another tab page, or one you are not in, still gets one.
 - **Unread count.** One `gc --city <path> mail count human --json` per city
   seeds the count when the watch starts, every `watch_resync_ms` (default five
   minutes) and after an `overflow` or `rotated` event of that city. Between
@@ -428,9 +432,28 @@ placing the cursor in the compose box in normal mode.
   new last line. Scrolling the view up (the wheel, `<C-y>`) or moving the cursor up
   stops following: a re-render then keeps the cursor and the first line shown, and
   counts each message (by id) first shown below the view; a changed read or closed
-  mark is never counted. The timeline's statusline shows ` ↓ <n> newer below (G)`
+  mark is never counted. The timeline's statusline shows `↓ <n> newer below (G)`
   until the view shows them; `G` jumps to the latest message, clears the count and
   follows again. A re-render never moves cursors in other windows.
+- **Statuslines.** The timeline's statusline says the state of the conversation,
+  ` <with> in <city> · <last send> · <liveness> · <n> unread · ↓ <n> newer below (G) `,
+  from what the chat already holds (no gc call):
+  - the last pending send's state as its timeline heading says it, `sending…`,
+    `queued` or `failed: <first error line>`; nothing once no send is pending. An
+    unreadable queue file shows in the timeline but is no send of the chat;
+  - `live` while the event watcher follows the city's event log, `polling` when only
+    the fallback timer loads it (the log is missing or cannot be watched), `stale`
+    from a failed history load until one succeeds;
+  - the conversation's unread mail to you (the rule of the conversations list),
+    left out at zero, and the newer-below count of scrolling, left out at zero.
+
+  A window narrower than the line cuts it from the end, `…` marking the cut, so the
+  correspondent always shows and the counts go first. It changes only when a value
+  it shows changed (a render, a load, a send, the view, a new width, the city's
+  log starting or ending being watched), and never re-renders the timeline or
+  moves a cursor. The compose window's statusline holds
+  the keys, ` <send key> send · above: q close  <CR> open  t thread  u unread  R refresh  G latest `,
+  cut the same way.
 - **Sending.** Sends through `gc_mail.send(compose_buf, city, { to = with })`.
   The compose box clears in one undo step (`u` restores the text). The timeline
   shows `sending…` immediately, and refreshes via `history.load` upon queue delivery.

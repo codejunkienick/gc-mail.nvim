@@ -158,6 +158,10 @@ local function start()
     if live ~= this then
       return
     end
+    -- Whether a log is watched changes nothing the panel shows
+    if ev.type == 'watching' then
+      return
+    end
     local w = this.cities[city.path]
     if w and not w.stopped then
       soon(this, w)

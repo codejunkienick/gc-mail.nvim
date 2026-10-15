@@ -19,7 +19,8 @@ local events = require('gc_mail.events')
 
 local M = {}
 
-local TITLE = ' gc mail: <CR> open  t thread  u unread  R refresh  q close '
+-- The timeline's keys, after the send key on the compose window's statusline
+local KEYS = 'above: q close  <CR> open  t thread  u unread  R refresh  G latest'
 
 -- Active chats: tab -> key -> chat
 -- where key is city.path .. '\0' .. with
@@ -379,6 +380,65 @@ local function following(at)
   return at.view.lnum >= at.last and at.bottom >= at.last
 end
 
+-- `text` cut to `width` display cells, a cut end marked …, as a statusline
+-- shows it literally
+local function fit(text, width)
+  if vim.fn.strdisplaywidth(text) > width then
+    local n = vim.fn.strchars(text)
+    repeat
+      n = n - 1
+    until n == 0 or vim.fn.strdisplaywidth(vim.fn.strcharpart(text, 0, n)) < width
+    text = vim.fn.strcharpart(text, 0, n) .. '…'
+  end
+  return (text:gsub('%%', '%%%%'))
+end
+
+-- live while the event watcher follows the city's log, polling when only the
+-- fallback timer loads it (no log, or one that cannot be watched), stale while
+-- its last load failed
+local function liveness(chat)
+  local path = chat.city.path
+  if load_failed[path] then
+    return 'stale'
+  elseif live and live.cities[path] and events.watching(path) then
+    return 'live'
+  end
+  return 'polling'
+end
+
+local function set_statusline(win, text)
+  if vim.wo[win].statusline ~= text then
+    vim.wo[win].statusline = text
+  end
+end
+
+-- The timeline's statusline, from what the chat already knows: correspondent
+-- and city, the last pending send's state, liveness, then the unread and
+-- newer-below counts; a narrow window cuts from the end. It is set only when
+-- it changed and never touches the timeline or a cursor.
+local function update_status(chat)
+  local one_line = gc_mail.one_line
+  local parts = { ('%s in %s'):format(one_line(chat.with), one_line(chat.city.name)) }
+  parts[#parts + 1] = chat.last_send
+  parts[#parts + 1] = liveness(chat)
+  if chat.unread > 0 then
+    parts[#parts + 1] = chat.unread .. ' unread'
+  end
+  local below = vim.tbl_count(chat.below)
+  if below > 0 then
+    parts[#parts + 1] = ('↓ %d newer below (G)'):format(below)
+  end
+  local width = vim.api.nvim_win_get_width(chat.timeline_win)
+  set_statusline(chat.timeline_win, fit(' ' .. table.concat(parts, ' · ') .. ' ', width))
+end
+
+-- The compose window's statusline: the send key, then the timeline's keys
+local function update_keys(chat)
+  local send_keys = gc_mail.config.chat_send_keys
+  local send = type(send_keys) == 'table' and send_keys[1] and (send_keys[1] .. ' send · ') or ''
+  set_statusline(chat.compose_win, fit(' ' .. send .. KEYS .. ' ', vim.api.nvim_win_get_width(chat.compose_win)))
+end
+
 -- Drops from the messages waiting below what the view now shows, all of them
 -- once it follows the end again, and shows their count in the timeline's
 -- statusline
@@ -398,11 +458,18 @@ local function update_below(chat)
     end
     chat.below = waiting
   end
-  local count = vim.tbl_count(chat.below)
-  local status = count > 0 and (' ↓ %d newer below (G) %%<'):format(count) .. TITLE or TITLE
-  if vim.wo[chat.timeline_win].statusline ~= status then
-    vim.wo[chat.timeline_win].statusline = status
+  update_status(chat)
+end
+
+-- What a pending send's heading says after `## you · `, its error passed
+-- through `escape`
+local function send_state(q, escape)
+  if q.claimed then
+    return 'sending…'
+  elseif q.record.failed then
+    return 'failed: ' .. escape((q.record.last_error or ''):match('[^\n]+') or '')
   end
+  return 'queued'
 end
 
 function M.render(chat)
@@ -424,6 +491,7 @@ function M.render(chat)
   local relevant_queue = {}
   if not queue_entries then
     relevant_queue[#relevant_queue + 1] = {
+      unreadable = true,
       record = {
         failed = true,
         last_error = queue_err or 'cannot read queue',
@@ -434,6 +502,7 @@ function M.render(chat)
     for _, q in ipairs(queue_entries) do
       if not q.record or q.error then
         relevant_queue[#relevant_queue + 1] = {
+          unreadable = true,
           record = {
             failed = true,
             last_error = q.error or ('unreadable: ' .. tostring(q.name)),
@@ -455,6 +524,7 @@ function M.render(chat)
           end
         elseif type(rec) ~= 'table' or type(rec.city) ~= 'table' then
           relevant_queue[#relevant_queue + 1] = {
+            unreadable = true,
             record = {
               failed = true,
               last_error = 'malformed queue record: ' .. tostring(q.name),
@@ -509,16 +579,7 @@ function M.render(chat)
     for _, q in ipairs(relevant_queue) do
       local rec = q.record
       local start_line = #lines + 1
-      local heading
-      if q.claimed then
-        heading = '## you · sending…'
-      elseif rec.failed then
-        local first_err = (rec.last_error or ''):match('[^\n]+') or ''
-        heading = '## you · failed: ' .. md_escape(first_err)
-      else
-        heading = '## you · queued'
-      end
-      lines[#lines + 1] = heading
+      lines[#lines + 1] = '## you · ' .. send_state(q, md_escape)
       lines[#lines + 1] = ''
       for _, bline in ipairs(body_lines(rec.body)) do
         lines[#lines + 1] = bline
@@ -527,6 +588,23 @@ function M.render(chat)
       lines[#lines + 1] = '---'
       local end_line = #lines
       blocks[#blocks + 1] = { record = rec, start_line = start_line, end_line = end_line }
+    end
+  end
+
+  -- The last own send of this conversation; a queue that cannot be read, or a
+  -- record of no known city or conversation, is shown in the timeline but is
+  -- no send of this chat
+  local last = nil
+  for _, q in ipairs(relevant_queue) do
+    if not q.unreadable then
+      last = q
+    end
+  end
+  chat.last_send = last and send_state(last, gc_mail.one_line) or nil
+  chat.unread = 0
+  for _, c in ipairs(M.conversations(chat.city)) do
+    if c.with == chat.with then
+      chat.unread = c.unread
     end
   end
 
@@ -640,6 +718,15 @@ local function on_event(this, city, event)
   elseif kind == 'overflow' or kind == 'rotated' then
     -- A rotated reported twice joins the load still running (history.load)
     load_city(city)
+  elseif kind == 'watching' then
+    -- The city's log armed or disarmed: its chats say live or polling now
+    for _, tab_chats in pairs(chats) do
+      for _, chat in pairs(tab_chats) do
+        if valid_chat(chat) and chat.city.path == city.path then
+          update_status(chat)
+        end
+      end
+    end
   elseif READ_EVENTS[kind] ~= nil or CLOSED_EVENTS[kind] then
     local m = event.id and cached and cached.by_id and cached.by_id[event.id]
     if not m then
@@ -989,7 +1076,6 @@ function M.open(city_arg, with_arg)
 
   local wo_tl = vim.wo[timeline_win]
   wo_tl.winfixwidth = true
-  wo_tl.statusline = TITLE
 
   local wo_cp = vim.wo[compose_win]
   wo_cp.winfixwidth = true
@@ -1011,10 +1097,16 @@ function M.open(city_arg, with_arg)
     -- Messages first shown below the view while it did not follow: id -> true
     below = {},
     just_opened = true,
+    -- The statusline's state as of the last render: this conversation's
+    -- unread count and the last pending send's state (nil for none)
+    unread = 0,
+    last_send = nil,
   }
 
   chats[tab][k] = chat
   sync_live()
+  update_status(chat)
+  update_keys(chat)
 
   local send_keys = gc_mail.config.chat_send_keys
   if send_keys ~= false and type(send_keys) == 'table' then
@@ -1090,6 +1182,16 @@ function M.open(city_arg, with_arg)
       update_below(chat)
     end,
   })
+  -- A new width cuts the statuslines again (each is set only when it changed)
+  vim.api.nvim_create_autocmd('WinResized', {
+    group = group,
+    callback = function()
+      if valid_chat(chat) then
+        update_status(chat)
+        update_keys(chat)
+      end
+    end,
+  })
 
   vim.api.nvim_create_autocmd('WinEnter', {
     group = group,
@@ -1128,6 +1230,22 @@ function M.open(city_arg, with_arg)
   reload(chat)
 
   return chat
+end
+
+--- Whether the chat of `city` and `with` is open in the current tab page with
+--- one of its two windows current: it shows that conversation's new mail
+--- itself (the background watch then says nothing).
+function M.is_current(city, with)
+  if type(city) ~= 'table' or type(city.path) ~= 'string' or type(with) ~= 'string' then
+    return false
+  end
+  local tab_chats = chats[vim.api.nvim_get_current_tabpage()]
+  local chat = tab_chats and tab_chats[key_of(city, with)]
+  if not valid_chat(chat) then
+    return false
+  end
+  local cur = vim.api.nvim_get_current_win()
+  return cur == chat.timeline_win or cur == chat.compose_win
 end
 
 function M.open_last()

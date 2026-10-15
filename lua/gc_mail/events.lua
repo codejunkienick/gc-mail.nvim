@@ -114,14 +114,22 @@ local function arm(this, w)
   return true
 end
 
+-- Tells the city's subscribers that its log is now watched or no longer is,
+-- so a view showing that can say it at once
+local function watching_changed(this, w)
+  dispatch(this, w.city, { type = 'watching', watching = w.event ~= nil })
+end
+
 local function rotated(this, w)
   if arm(this, w) then
     return dispatch(this, w.city, { type = 'rotated' })
   end
+  watching_changed(this, w)
   w.rearm:start(config.rearm_ms or 1000, 0, function()
     vim.schedule(function()
       if live == this and not w.stopped and arm(this, w) then
         dispatch(this, w.city, { type = 'rotated' })
+        watching_changed(this, w)
       end
     end)
   end)
@@ -213,6 +221,7 @@ local function rearm_missing(this)
         if had_ino then
           dispatch(this, w.city, { type = 'rotated' })
         end
+        watching_changed(this, w)
       end
     end
   end
@@ -352,6 +361,14 @@ end
 
 function M.running()
   return live ~= nil and next(subscribers) ~= nil and next(live.cities) ~= nil
+end
+
+--- Whether the event log of the city at `city_path` is watched right now: a
+--- subscriber holds the city and its log file is armed. A city whose log is
+--- missing or cannot be watched is false until a rearm arms it.
+function M.watching(city_path)
+  local w = live and live.cities[city_path]
+  return w ~= nil and not w.stopped and w.event ~= nil and not w.event:is_closing()
 end
 
 function M.handles()
