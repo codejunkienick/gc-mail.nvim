@@ -44,7 +44,7 @@ local function cities_record(cities)
   return vim.json.encode({ schema_version = '1', ok = true, registry_path = '/r/cities.toml', cities = cities }) .. '\n'
 end
 
-local TWO = { { name = 'imd-city', path = '/srv/imd-city' }, { name = 'side-city', path = '/srv/side city' } }
+local TWO = { { name = 'demo-city', path = '/srv/demo-city' }, { name = 'other-city', path = '/srv/other city' } }
 
 local notes = {}
 vim.notify = function(message, level)
@@ -289,7 +289,7 @@ test('the picker lists one line per city mayor, even for a single city', functio
   buffer({ 'hello' })
   local win = gc_mail.open()
   eq(#floats(), 1, 'picker window')
-  eq(lines_of(win), { ' imd-city  mayor ', ' side-city  mayor ' }, 'picker lines')
+  eq(lines_of(win), { ' demo-city  mayor ', ' other-city  mayor ' }, 'picker lines')
   eq(vim.api.nvim_win_get_height(win), 2, 'picker height = city count')
   wait('background refresh', function()
     return vim.fn.filereadable(vim.env.FAKE_GC_CITIES) == 1 and gc_mail.cached_cities() ~= nil
@@ -303,7 +303,7 @@ test('the picker lists one line per city mayor, even for a single city', functio
   buffer({ 'hello' })
   win = gc_mail.open()
   wait('the single city is listed', function()
-    return vim.deep_equal(lines_of(win), { ' imd-city  mayor ' })
+    return vim.deep_equal(lines_of(win), { ' demo-city  mayor ' })
   end)
   eq(#floats(), 1, 'a single city still asks')
   vim.api.nvim_feedkeys('q', 'x', false)
@@ -324,13 +324,13 @@ test('the picker opens before a slow gc cities answers, then fills in', function
   vim.api.nvim_feedkeys(vim.keycode('<CR>'), 'x', false)
   eq(#floats(), 1, '<CR> while loading')
   wait('cities filled in', function()
-    return vim.deep_equal(lines_of(win), { ' imd-city  mayor ', ' side-city  mayor ' })
+    return vim.deep_equal(lines_of(win), { ' demo-city  mayor ', ' other-city  mayor ' })
   end)
   eq(vim.api.nvim_win_get_height(win), 2, 'resized to the cities')
   -- The next open shows the cached list at once while gc runs again.
   vim.api.nvim_feedkeys(vim.keycode('<Esc>'), 'x', false)
   win = gc_mail.open()
-  eq(lines_of(win), { ' imd-city  mayor ', ' side-city  mayor ' }, 'cached list at once')
+  eq(lines_of(win), { ' demo-city  mayor ', ' other-city  mayor ' }, 'cached list at once')
   vim.api.nvim_feedkeys(vim.keycode('<Esc>'), 'x', false)
 end)
 
@@ -354,13 +354,13 @@ test('choosing a city queues the message on disk before the buffer clears, then 
   eq(vim.api.nvim_buf_get_lines(buf, 0, -1, false), { '' }, 'buffer cleared at once')
   eq(spooled_at_clear, 1, 'queue file written before the clear')
   eq(vim.bo[buf].modified, false, 'modified reset')
-  eq(notes[#notes].message, 'gc-mail: queued for side-city mayor: Deploy plan for tomorrow', 'queued notice')
+  eq(notes[#notes].message, 'gc-mail: queued for other-city mayor: Deploy plan for tomorrow', 'queued notice')
   local record = vim.json.decode(read_file(queue_dir .. '/' .. spool()[1]))
   eq({ record.city, record.subject, type(record.created) }, { TWO[2], 'Deploy plan for tomorrow', 'number' }, 'queue record')
   wait('sent and removed', drained)
-  eq(recorded_argv(), { '--city', '/srv/side city', 'mail', 'send', 'mayor', '-s', 'Deploy plan for tomorrow',
+  eq(recorded_argv(), { '--city', '/srv/other city', 'mail', 'send', 'mayor', '-s', 'Deploy plan for tomorrow',
     '-m', '\n  Deploy plan for tomorrow  \nstep one\n\nstep "two" $(not run)', '--notify' }, 'argv')
-  eq(notes[#notes].message, 'gc-mail: sent to side-city mayor', 'success notice')
+  eq(notes[#notes].message, 'gc-mail: sent to other-city mayor', 'success notice')
   -- The clear is one undo step: u brings the text back.
   vim.cmd('silent undo')
   eq(vim.api.nvim_buf_get_lines(buf, 0, -1, false), { '', '  Deploy plan for tomorrow  ', 'step one', '', 'step "two" $(not run)' },
@@ -375,17 +375,17 @@ test(':GcMail planner queues a record with to = planner and sends the exact argv
   local picker_win = floats()[1]
   assert(picker_win, 'picker opened')
   eq(vim.api.nvim_win_get_config(picker_win).title[1][1], ' mail buffer to planner in ', 'picker title with to')
-  eq(lines_of(picker_win), { ' imd-city  planner ', ' side-city  planner ' }, 'picker items with to')
+  eq(lines_of(picker_win), { ' demo-city  planner ', ' other-city  planner ' }, 'picker items with to')
   vim.api.nvim_feedkeys(vim.keycode('j<CR>'), 'x', false)
   eq(#floats(), 0, 'picker closes on <CR>')
   eq(vim.api.nvim_buf_get_lines(buf, 0, -1, false), { '' }, 'buffer cleared')
-  eq(notes[#notes].message, 'gc-mail: queued for side-city planner: hello planner', 'queued notice')
+  eq(notes[#notes].message, 'gc-mail: queued for other-city planner: hello planner', 'queued notice')
   local record = vim.json.decode(read_file(queue_dir .. '/' .. spool()[1]))
   eq(record.to, 'planner', 'queue record has to = planner')
   wait('sent and removed', drained)
-  eq(recorded_argv(), { '--city', '/srv/side city', 'mail', 'send', 'planner', '-s', 'hello planner',
+  eq(recorded_argv(), { '--city', '/srv/other city', 'mail', 'send', 'planner', '-s', 'hello planner',
     '-m', 'hello planner\nhere is the task', '--notify' }, 'exact argv with planner')
-  eq(notes[#notes].message, 'gc-mail: sent to side-city planner', 'success notice')
+  eq(notes[#notes].message, 'gc-mail: sent to other-city planner', 'success notice')
 end)
 
 test('a record file with invalid to is listed as unreadable and never sent; M.send refuses bad to', function()
@@ -414,7 +414,7 @@ test('a record file with invalid to is listed as unreadable and never sent; M.se
   wait('the valid one sent', function()
     return #sent() == 1 and gc_mail.queue.idle()
   end)
-  eq(sent(), { '/srv/side city|fine' }, 'only the valid message was sent')
+  eq(sent(), { '/srv/other city|fine' }, 'only the valid message was sent')
 
   -- M.send(buf, city, { to = '-x' }) is refused and the buffer unchanged
   notes = {}
@@ -433,7 +433,7 @@ test('a record without to still sends to mayor', function()
   gc_mail.queue.configure({ dir = queue_dir, retry_ms = RETRY })
   gc_mail.queue.pump()
   wait('legacy sent', drained)
-  eq(recorded_argv(), { '--city', '/srv/imd-city', 'mail', 'send', 'mayor', '-s', 'legacy mail',
+  eq(recorded_argv(), { '--city', '/srv/demo-city', 'mail', 'send', 'mayor', '-s', 'legacy mail',
     '-m', 'legacy body', '--notify' }, 'sent to mayor')
 end)
 
@@ -462,7 +462,7 @@ test('queue.subscribe: a subscriber runs after add, after successful send and af
     return #events >= 2
   end)
   eq(#events[#events].spool, 0, 'subscriber saw file gone after success')
-  eq(sent(), { '/srv/imd-city|sub-test' }, 'message was sent despite broken subscriber')
+  eq(sent(), { '/srv/demo-city|sub-test' }, 'message was sent despite broken subscriber')
 
   local sub_errors = vim.tbl_filter(function(n)
     return n.message:find('subscriber broken_sub failed')
@@ -515,14 +515,14 @@ test('a failed send keeps its file, shows gc stderr once, retries, and is marked
   local buf = buffer({ 'flaky store', 'please' })
   assert(gc_mail.send(buf, TWO[1]), 'not queued')
   wait('retried until sent', drained)
-  eq(sent(), { '/srv/imd-city|flaky store', '/srv/imd-city|flaky store', '/srv/imd-city|flaky store' }, 'three tries')
+  eq(sent(), { '/srv/demo-city|flaky store', '/srv/demo-city|flaky store', '/srv/demo-city|flaky store' }, 'three tries')
   local errors = vim.tbl_filter(function(note)
     return note.level == vim.log.levels.ERROR
   end, notes)
   eq(#errors, 1, 'the error is shown once')
-  eq(errors[1].message, 'gc-mail: send to imd-city mayor failed (exit 1):\ngc mail send: store unavailable (try 1); retrying in the background',
+  eq(errors[1].message, 'gc-mail: send to demo-city mayor failed (exit 1):\ngc mail send: store unavailable (try 1); retrying in the background',
     'failure notice')
-  eq(notes[#notes].message, 'gc-mail: sent to imd-city mayor', 'sent in the end')
+  eq(notes[#notes].message, 'gc-mail: sent to demo-city mayor', 'sent in the end')
 
   reset({ FAKE_GC_EXIT = '3', FAKE_GC_STDERR = 'gc mail send: mayor not found\nsecond line\nthird\nfourth' })
   buf = buffer({ 'never lands' })
@@ -535,7 +535,7 @@ test('a failed send keeps its file, shows gc stderr once, retries, and is marked
   local entry = gc_mail.queue.list()[1]
   eq({ entry.id, entry.record.attempts, entry.record.last_error },
     { id, 4, 'exit 3: gc mail send: mayor not found\nsecond line\nthird' }, 'failed record')
-  eq(notes[#notes].message, 'gc-mail: gave up sending to imd-city mayor after 4 tries; :GcMailQueue to retry', 'give-up notice')
+  eq(notes[#notes].message, 'gc-mail: gave up sending to demo-city mayor after 4 tries; :GcMailQueue to retry', 'give-up notice')
   -- A failed message is never resent on its own.
   gc_mail.queue.resume()
   vim.wait(150)
@@ -557,7 +557,7 @@ test('two messages are sent one at a time, in order', function()
   eq(gc_mail.queue.idle(), false, 'the first send is running')
   eq(#sent(), 1, 'only one gc at a time')
   wait('all sent', drained)
-  eq(sent(), { '/srv/imd-city|first', '/srv/imd-city|second', '/srv/side city|to another city' }, 'order')
+  eq(sent(), { '/srv/demo-city|first', '/srv/demo-city|second', '/srv/other city|to another city' }, 'order')
 end)
 
 test('an empty buffer, a full queue or a failed queue write leaves the buffer as it was', function()
@@ -631,12 +631,12 @@ test('a buffer that is not modifiable is refused before anything is queued; a fa
   assert(id, 'nothing queued')
   eq(#notes, 1, 'notices')
   eq(notes[1].level, vim.log.levels.WARN, 'notice level')
-  assert(notes[1].message:find('^gc%-mail: queued for imd%-city mayor: locked text; the buffer was left as it is %(cannot clear it: .*E21'),
+  assert(notes[1].message:find('^gc%-mail: queued for demo%-city mayor: locked text; the buffer was left as it is %(cannot clear it: .*E21'),
     notes[1].message)
   eq(vim.api.nvim_buf_get_lines(buf, 0, -1, false), { 'locked text' }, 'buffer changed')
   eq(vim.bo[buf].modified, true, 'modified flag changed')
   wait('sent', drained)
-  eq(sent(), { '/srv/imd-city|locked text' }, 'sent once')
+  eq(sent(), { '/srv/demo-city|locked text' }, 'sent once')
 end)
 
 test('the picker fits a 10-line editor, border included, and scrolls past that', function()
@@ -713,7 +713,7 @@ test('bad gc cities output or a failing gc closes the loading picker; a failed r
   vim.env.FAKE_GC_CITIES_EXIT = '1'
   for _ = 1, 2 do
     local win = gc_mail.open()
-    eq(lines_of(win), { ' imd-city  mayor ', ' side-city  mayor ' }, 'last good list')
+    eq(lines_of(win), { ' demo-city  mayor ', ' other-city  mayor ' }, 'last good list')
     -- The refresh (a failing fake gc) ends well within this.
     vim.wait(300)
     eq(#floats(), 1, 'picker kept')
@@ -729,9 +729,9 @@ end)
 
 test('a city name or path with a control character makes gc cities malformed and raises nothing', function()
   local bad = {
-    cities_record({ { name = 'imd\ncity', path = '/srv/imd-city' } }),
-    cities_record({ { name = 'imd-city', path = '/srv/imd\tcity' } }),
-    cities_record({ { name = 'imd\127city', path = '/srv/imd-city' } }),
+    cities_record({ { name = 'demo\ncity', path = '/srv/demo-city' } }),
+    cities_record({ { name = 'demo-city', path = '/srv/demo\tcity' } }),
+    cities_record({ { name = 'demo\127city', path = '/srv/demo-city' } }),
   }
   local want = 'gc-mail: gc cities --json listed a city name or path with a control character'
   for _, text in ipairs(bad) do
@@ -755,7 +755,7 @@ test('a city name or path with a control character makes gc cities malformed and
   for _ = 1, 2 do
     local win = gc_mail.open()
     vim.wait(300)
-    eq(lines_of(win), { ' imd-city  mayor ', ' side-city  mayor ' }, 'last good list')
+    eq(lines_of(win), { ' demo-city  mayor ', ' other-city  mayor ' }, 'last good list')
     eq(gc_mail.cached_cities(), TWO, 'cache kept')
     vim.api.nvim_feedkeys(vim.keycode('<Esc>'), 'x', false)
   end
@@ -828,7 +828,7 @@ test('a fresh setup resends what an earlier Neovim left: pending files and claim
   wait('resumed', function()
     return #sent() == 2 and gc_mail.queue.idle()
   end)
-  eq(sent(), { '/srv/imd-city|left mid-send', '/srv/imd-city|left pending' }, 'resent in order')
+  eq(sent(), { '/srv/demo-city|left mid-send', '/srv/demo-city|left pending' }, 'resent in order')
   local left = vim.tbl_map(function(entry)
     return { entry.record.subject, entry.claimed ~= nil, entry.record.failed }
   end, gc_mail.queue.list())
@@ -848,8 +848,8 @@ test(':GcMailQueue lists pending and failed messages, and retries, opens and del
   local win = floats()[1]
   local lines = lines_of(win)
   eq(#lines, 2, 'one line per message')
-  assert(lines[1]:find('^ imd%-city  still pending  %d+s  pending $'), lines[1])
-  eq(lines[2], ' side-city  gave up  2m  failed  exit 3: mayor not found ', 'failed line')
+  assert(lines[1]:find('^ demo%-city  still pending  %d+s  pending $'), lines[1])
+  eq(lines[2], ' other-city  gave up  2m  failed  exit 3: mayor not found ', 'failed line')
   eq(gc_mail.queue_lines({}, os.time()), { ' the queue is empty ' }, 'empty queue')
 
   -- o opens the text in a new buffer and leaves the queue as it is.
@@ -862,13 +862,13 @@ test(':GcMailQueue lists pending and failed messages, and retries, opens and del
   vim.cmd('GcMailQueue')
   vim.api.nvim_feedkeys('d', 'x', false)
   eq(vim.uv.fs_stat(queue_dir .. '/' .. a .. '.json'), nil, 'deleted')
-  eq(lines_of(floats()[1]), { ' side-city  gave up  2m  failed  exit 3: mayor not found ' }, 'list after delete')
+  eq(lines_of(floats()[1]), { ' other-city  gave up  2m  failed  exit 3: mayor not found ' }, 'list after delete')
 
   -- r sends a failed message again.
   gc_mail.queue.configure({ dir = queue_dir, retry_ms = RETRY })
   vim.api.nvim_feedkeys('r', 'x', false)
   wait('retried', drained)
-  eq(sent(), { '/srv/side city|gave up' }, 'retry sent it')
+  eq(sent(), { '/srv/other city|gave up' }, 'retry sent it')
   vim.api.nvim_feedkeys('q', 'x', false)
   eq(#floats(), 0, 'q closes')
 end)
@@ -975,7 +975,7 @@ test('a claim is live only while its own Neovim holds it, or a living one took i
     hold = false
   end)
   wait('removed', drained)
-  eq(sent(), { '/srv/imd-city|held' }, 'sent once')
+  eq(sent(), { '/srv/demo-city|held' }, 'sent once')
 end)
 
 
@@ -1009,15 +1009,15 @@ test('a failed send whose new state cannot be written stays claimed and holds th
     end)
     eq(claims(), { ('%s.json.sending-%d-%s'):format(a, vim.uv.os_getpid(), gc_mail.queue.token) },
       'claim kept while the state is not written')
-    eq(sent(), { '/srv/imd-city|first' }, 'sent anything while held')
+    eq(sent(), { '/srv/demo-city|first' }, 'sent anything while held')
     wait('claim put back', function()
       return back_fails == 0 and #claims() == 0
     end)
   end)
   wait('all sent', drained)
   -- Its retry delay ran out during the hold, and it is the oldest.
-  eq(sent(), { '/srv/imd-city|first', '/srv/imd-city|first', '/srv/side city|other city' }, 'resent once, then the next')
-  eq(#errors_matching('cannot record the failed send to imd-city mayor (ENOSPC'), 1, 'the hold is shown once')
+  eq(sent(), { '/srv/demo-city|first', '/srv/demo-city|first', '/srv/other city|other city' }, 'resent once, then the next')
+  eq(#errors_matching('cannot record the failed send to demo-city mayor (ENOSPC'), 1, 'the hold is shown once')
 end)
 
 test('a delivered message whose file cannot be removed is marked sent, holds the queue, and is never resent', function()
@@ -1039,14 +1039,14 @@ test('a delivered message whose file cannot be removed is marked sent, holds the
     end)
     local claim = claims()[1]
     eq(vim.json.decode(read_file(queue_dir .. '/' .. claim)).delivered, true, 'claim marked delivered')
-    eq(sent(), { '/srv/imd-city|delivered' }, 'sent anything while held')
+    eq(sent(), { '/srv/demo-city|delivered' }, 'sent anything while held')
     wait('removed', function()
       return unlink_fails == 0 and #claims() == 0
     end)
   end)
   wait('all sent', drained)
-  eq(sent(), { '/srv/imd-city|delivered', '/srv/side city|next' }, 'each once')
-  eq(#errors_matching('sent to imd-city mayor, but cannot remove its queue file (EACCES: permission denied); it is marked sent'),
+  eq(sent(), { '/srv/demo-city|delivered', '/srv/other city|next' }, 'each once')
+  eq(#errors_matching('sent to demo-city mayor, but cannot remove its queue file (EACCES: permission denied); it is marked sent'),
     1, 'shown once')
 
   -- Neovim quits while the file still cannot be removed: the next start
@@ -1075,7 +1075,7 @@ test('a delivered message whose file cannot be removed is marked sent, holds the
   gc_mail.queue.resume()
   wait('dropped', drained)
   vim.wait(100)
-  eq(sent(), { '/srv/imd-city|once only' }, 'a delivered message was sent again')
+  eq(sent(), { '/srv/demo-city|once only' }, 'a delivered message was sent again')
 end)
 
 -- vim.uv.fs_utime refused on claims while `hold()`, with the real one to age a claim.
@@ -1115,12 +1115,12 @@ test('a held claim whose time cannot be set is rewritten whole to stay young, ma
       local name = queue_dir .. '/' .. claims()[1]
       eq(vim.json.decode(read_file(name)).delivered, true, 'claim marked delivered')
       made_young(name, real_utime)
-      eq(sent(), { '/srv/imd-city|delivered' }, 'sent anything while held')
+      eq(sent(), { '/srv/demo-city|delivered' }, 'sent anything while held')
       hold = false
     end)
   end)
   wait('removed', drained)
-  eq(sent(), { '/srv/imd-city|delivered' }, 'sent once')
+  eq(sent(), { '/srv/demo-city|delivered' }, 'sent once')
   eq(#errors_matching('cannot keep the claim'), 0, 'a claim kept young by a rewrite needs no warning')
 
   -- A failed send: the rewrite is its new state, and only the rename back waits.
@@ -1141,12 +1141,12 @@ test('a held claim whose time cannot be set is rewritten whole to stay young, ma
         return vim.json.decode(read_file(name)).attempts == 1
       end)
       made_young(name, real_utime)
-      eq(sent(), { '/srv/imd-city|failed once' }, 'resent while held')
+      eq(sent(), { '/srv/demo-city|failed once' }, 'resent while held')
       hold = false
     end)
   end)
   wait('retried and removed', drained)
-  eq(sent(), { '/srv/imd-city|failed once', '/srv/imd-city|failed once' }, 'one retry')
+  eq(sent(), { '/srv/demo-city|failed once', '/srv/demo-city|failed once' }, 'one retry')
   eq(#errors_matching('cannot keep the claim'), 0, 'no warning')
 end)
 
@@ -1171,14 +1171,14 @@ test('a held claim that can neither have its time set nor be rewritten is said o
         end)
         vim.wait(200)
         eq(#claims(), 1, 'still claimed')
-        eq(sent(), { '/srv/imd-city|stuck' }, 'sent anything while held')
+        eq(sent(), { '/srv/demo-city|stuck' }, 'sent anything while held')
         hold = false
       end)
     end)
   end)
   wait('removed', drained)
-  eq(sent(), { '/srv/imd-city|stuck' }, 'sent once')
-  eq(#errors_matching('cannot keep the claim on the message to imd-city mayor young (EPERM: operation not permitted; ENOSPC: no space left on device); another Neovim may send it again after 240 s'),
+  eq(sent(), { '/srv/demo-city|stuck' }, 'sent once')
+  eq(#errors_matching('cannot keep the claim on the message to demo-city mayor young (EPERM: operation not permitted; ENOSPC: no space left on device); another Neovim may send it again after 240 s'),
     1, 'said once')
 end)
 
@@ -1226,7 +1226,7 @@ test('a queue file with any malformed field is listed as unreadable and never se
   wait('the good one sent', function()
     return #sent() == 1 and gc_mail.queue.idle()
   end)
-  eq(sent(), { '/srv/side city|fine' }, 'sent')
+  eq(sent(), { '/srv/other city|fine' }, 'sent')
   eq(#spool(), #cases + 1, 'malformed files kept for a look')
 end)
 
@@ -1339,7 +1339,7 @@ test('rules 1 and 2: queue files change only whole, by rename or unlink, and onl
   local kinds = vim.tbl_keys(changes)
   table.sort(kinds)
   eq(kinds, { 'rename:claim', 'rename:file', 'unlink:claim', 'unlink:file' }, 'every kind of change was seen')
-  eq(sent(), { '/srv/imd-city|fails once', '/srv/imd-city|fails once', '/srv/imd-city|retried', '/srv/imd-city|again' },
+  eq(sent(), { '/srv/demo-city|fails once', '/srv/demo-city|fails once', '/srv/demo-city|retried', '/srv/demo-city|again' },
     'each sent once (the failure aside), the delivered one never')
 end)
 
@@ -1415,7 +1415,7 @@ test('rule 6: a queue directory that cannot be read refuses adds, shows the erro
       1, 'worker error shown once')
   end)
   wait('sent once readable', drained)
-  eq(sent(), { '/srv/imd-city|already queued' }, 'sent after recovery')
+  eq(sent(), { '/srv/demo-city|already queued' }, 'sent after recovery')
   eq(#vim.tbl_filter(function(note)
     return note.message == 'gc-mail: the queue can be read again'
   end, notes), 1, 'recovery shown')
@@ -1546,18 +1546,18 @@ end
 
 test('the mailbox lists the human mail of every city, newest first, with one inbox call per city', function()
   preload()
-  inbox('imd-city', {
+  inbox('demo-city', {
     msg('ic-wisp-a1', { subject = 'at noon', created_at = '2026-10-07T12:00:00Z' }),
     msg('ic-wisp-a2', { subject = 'at eleven', from = 'builder-1', created_at = '2026-10-07T13:00:00.123+02:00' }),
   })
-  inbox('side city', { msg('sc-wisp-b1', { subject = 'Re: side\nwith a break', created_at = '2026-10-07T11:30:00Z' }) })
+  inbox('other city', { msg('sc-wisp-b1', { subject = 'Re: side\nwith a break', created_at = '2026-10-07T11:30:00Z' }) })
   local win = mailbox().open()
   eq(#floats(), 1, 'mailbox window')
   settled(win, 3)
   eq(rows(win), {
-    '  ● imd-city  mayor  at noon',
-    '  ● side-city  mayor  Re: side / with a break',
-    '  ● imd-city  builder-1  at eleven',
+    '  ● demo-city  mayor  at noon',
+    '  ● other-city  mayor  Re: side / with a break',
+    '  ● demo-city  builder-1  at eleven',
   }, 'newest first across cities (13:00+02:00 is 11:00Z), one sanitized line each')
   wait('the city refresh', function()
     return gc_mail.cached_cities() ~= nil and #mail_calls() >= 2
@@ -1567,7 +1567,7 @@ test('the mailbox lists the human mail of every city, newest first, with one inb
   table.sort(calls, function(a, b)
     return a[2] < b[2]
   end)
-  eq(calls, { call('inbox', '/srv/imd-city', 'human', '--json'), call('inbox', '/srv/side city', 'human', '--json') },
+  eq(calls, { call('inbox', '/srv/demo-city', 'human', '--json'), call('inbox', '/srv/other city', 'human', '--json') },
     'one inbox call per city, also after the city list refreshed')
   eq(recorded_argv(), nil, 'nothing was sent')
   vim.api.nvim_feedkeys('q', 'x', false)
@@ -1576,23 +1576,23 @@ end)
 
 test('opening a message shows it at once, marks it read once, and keeps it listed after gc closes it', function()
   preload()
-  inbox('imd-city', { msg('ic-wisp-a1', { subject = 'Mailbox plan' }) })
-  inbox('side city', {})
+  inbox('demo-city', { msg('ic-wisp-a1', { subject = 'Mailbox plan' }) })
+  inbox('other city', {})
   answer('read', { message = msg('ic-wisp-a1', { subject = 'Mailbox plan', read = true }) })
   local win = mailbox().open()
   settled(win, 1)
-  eq(rows(win), { '  ● imd-city  mayor  Mailbox plan' }, 'unread')
+  eq(rows(win), { '  ● demo-city  mayor  Mailbox plan' }, 'unread')
   vim.api.nvim_feedkeys(vim.keycode('<CR>'), 'x', false)
   eq(#floats(), 0, 'the mailbox closes on open')
   local shown = vim.api.nvim_buf_get_lines(0, 0, -1, false)
   eq(vim.list_slice(shown, 1, 3), { '# Mailbox plan', '',
-    '**From** mayor · **To** human · **City** imd-city · 2026-10-07T12:00:00Z' }, 'headers')
+    '**From** mayor · **To** human · **City** demo-city · 2026-10-07T12:00:00Z' }, 'headers')
   eq(vim.list_slice(shown, #shown - 1), { 'body of ic-wisp-a1', 'second line' }, 'body')
   wait('marked read and kept', function()
-    return has_call(call('read', '/srv/imd-city', 'ic-wisp-a1', '--json')) and #kept_files() == 1
+    return has_call(call('read', '/srv/demo-city', 'ic-wisp-a1', '--json')) and #kept_files() == 1
   end)
   -- gc's sweep closes read mail: the inbox no longer lists it.
-  inbox('imd-city', {})
+  inbox('demo-city', {})
   local before = #mail_calls()
   win = mailbox().open()
   settled(win, 1)
@@ -1600,7 +1600,7 @@ test('opening a message shows it at once, marks it read once, and keeps it liste
     return #mail_calls() == before + 2
   end)
   vim.wait(100)
-  eq(rows(win), { '    imd-city  mayor  Mailbox plan' }, 'read and still listed')
+  eq(rows(win), { '    demo-city  mayor  Mailbox plan' }, 'read and still listed')
   vim.api.nvim_feedkeys(vim.keycode('<CR>'), 'x', false)
   vim.wait(200)
   eq(#vim.tbl_filter(function(c)
@@ -1613,41 +1613,41 @@ test('opening a message shows it at once, marks it read once, and keeps it liste
   win = mailbox().open()
   settled(win, 1)
   vim.wait(100)
-  eq(rows(win), { '    imd-city  mayor  Mailbox plan' }, 'kept across a restart')
+  eq(rows(win), { '    demo-city  mayor  Mailbox plan' }, 'kept across a restart')
   vim.api.nvim_feedkeys('q', 'x', false)
 end)
 
 test('mark read, mark unread, archive, delete and thread call gc with the exact argv for the picked message only', function()
   preload()
-  inbox('imd-city', {
+  inbox('demo-city', {
     msg('ic-wisp-a1', { subject = 'first', created_at = '2026-10-07T13:00:00Z' }),
     msg('ic-wisp-a2', { subject = 'second', created_at = '2026-10-07T12:00:00Z' }),
   })
-  inbox('side city', {})
+  inbox('other city', {})
   local win = mailbox().open()
   settled(win, 2)
   acted('mark-read', 'ic-wisp-a1')
   vim.api.nvim_feedkeys('m', 'x', false)
   wait('marked read', function()
-    return rows(win)[1] == '    imd-city  mayor  first'
+    return rows(win)[1] == '    demo-city  mayor  first'
   end)
-  eq(has_call(call('mark-read', '/srv/imd-city', 'ic-wisp-a1', '--json')), true, 'mark-read argv')
+  eq(has_call(call('mark-read', '/srv/demo-city', 'ic-wisp-a1', '--json')), true, 'mark-read argv')
   eq(#kept_files(), 1, 'kept once read')
   acted('mark-unread', 'ic-wisp-a1')
   vim.api.nvim_feedkeys('u', 'x', false)
   wait('unread again', function()
-    return rows(win)[1] == '  ● imd-city  mayor  first'
+    return rows(win)[1] == '  ● demo-city  mayor  first'
   end)
-  eq(has_call(call('mark-unread', '/srv/imd-city', 'ic-wisp-a1', '--json')), true, 'mark-unread argv')
+  eq(has_call(call('mark-unread', '/srv/demo-city', 'ic-wisp-a1', '--json')), true, 'mark-unread argv')
   eq(vim.json.decode(read_file(mailbox_dir .. '/' .. kept_files()[1])).read, false, 'the kept copy says unread')
   acted('archive', 'ic-wisp-a1')
   vim.api.nvim_feedkeys('a', 'x', false)
   wait('archived', function()
     return #rows(win) == 1
   end)
-  eq(has_call(call('archive', '/srv/imd-city', 'ic-wisp-a1', '--json')), true, 'archive argv')
+  eq(has_call(call('archive', '/srv/demo-city', 'ic-wisp-a1', '--json')), true, 'archive argv')
   eq(kept_files(), {}, 'the kept copy goes with it')
-  eq(rows(win), { '  ● imd-city  mayor  second' }, 'the other message stays')
+  eq(rows(win), { '  ● demo-city  mayor  second' }, 'the other message stays')
   -- Delete asks first; No deletes nothing.
   local confirm = vim.fn.confirm
   local asked
@@ -1659,7 +1659,7 @@ test('mark read, mark unread, archive, delete and thread call gc with the exact 
   vim.api.nvim_feedkeys('d', 'x', false)
   vim.wait(200)
   eq(asked, 'Delete "second" from mayor?', 'delete asks')
-  eq(has_call(call('delete', '/srv/imd-city', 'ic-wisp-a2', '--json')), false, 'No deleted it')
+  eq(has_call(call('delete', '/srv/demo-city', 'ic-wisp-a2', '--json')), false, 'No deleted it')
   vim.fn.confirm = function()
     return 1
   end
@@ -1668,7 +1668,7 @@ test('mark read, mark unread, archive, delete and thread call gc with the exact 
   wait('deleted', function()
     return rows(win)[1] == ' no mail '
   end)
-  eq(has_call(call('delete', '/srv/imd-city', 'ic-wisp-a2', '--json')), true, 'delete argv')
+  eq(has_call(call('delete', '/srv/demo-city', 'ic-wisp-a2', '--json')), true, 'delete argv')
   for _, c in ipairs(mail_calls()) do
     if c[4] == 'archive' or c[4] == 'delete' then
       eq(#c, 6, 'one id per archive or delete: ' .. table.concat(c, ' '))
@@ -1678,7 +1678,7 @@ test('mark read, mark unread, archive, delete and thread call gc with the exact 
   -- t shows the thread, oldest first.
   local m3 = msg('ic-wisp-a3', { subject = 'Re: plan' })
   m3.thread_id = nil
-  inbox('imd-city', { m3 })
+  inbox('demo-city', { m3 })
   answer('thread', { thread_id = 'thread-0a1b2c3d4e5f', messages = {
     msg('ic-wisp-a3', { subject = 'Re: plan', thread_id = 'thread-0a1b2c3d4e5f', created_at = '2026-10-07T13:00:00Z' }),
     msg('ic-wisp-a0', { from = 'human', to = 'mayor', subject = 'plan', thread_id = 'thread-0a1b2c3d4e5f', read = true }),
@@ -1690,7 +1690,7 @@ test('mark read, mark unread, archive, delete and thread call gc with the exact 
   wait('thread shown', function()
     return vim.api.nvim_buf_get_lines(0, 0, 1, false)[1] == '# plan'
   end)
-  eq(has_call(call('thread', '/srv/imd-city', 'ic-wisp-a3', '--json')), true, 'thread argv')
+  eq(has_call(call('thread', '/srv/demo-city', 'ic-wisp-a3', '--json')), true, 'thread argv')
   local text = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), '\n')
   assert(text:find('# plan', 1, true) == 1, 'titled with the first subject')
   assert(text:find('## human', 1, true) < text:find('## mayor', 1, true), 'oldest first')
@@ -1699,8 +1699,8 @@ end)
 -- Opens the message `m` from the mailbox with gc's answers for it in place.
 local function open_message(m, thread_messages)
   preload()
-  inbox('imd-city', { m })
-  inbox('side city', {})
+  inbox('demo-city', { m })
+  inbox('other city', {})
   answer('read', { message = vim.tbl_extend('force', m, { read = true }) })
   if thread_messages then
     answer('thread', { thread_id = m.thread_id, messages = thread_messages })
@@ -1732,10 +1732,10 @@ test('markdown message view: title, escaped header lines, a rule, then the body 
   eq(vim.bo[buf].buftype, 'nofile', 'buftype')
   eq(vim.bo[buf].modifiable, false, 'nomodifiable')
   eq(vim.bo[buf].bufhidden, 'wipe', 'bufhidden')
-  eq(vim.api.nvim_buf_get_name(buf):match('gc%-mail://.*$'), 'gc-mail://imd-city/ic-wisp-a1', 'name')
+  eq(vim.api.nvim_buf_get_name(buf):match('gc%-mail://.*$'), 'gc-mail://demo-city/ic-wisp-a1', 'name')
   local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
   eq(lines[1], '# Re: \\*plan\\* \\[v2\\] \\<now\\> \\#1 \\| \\`x\\` \\\\ end', 'escaped title')
-  eq(lines[3], '**From** may\\_or · **To** human · **City** imd-city · 2026-10-07T12:00:00Z', 'sender line')
+  eq(lines[3], '**From** may\\_or · **To** human · **City** demo-city · 2026-10-07T12:00:00Z', 'sender line')
   assert(lines[5]:find('^`ic%-wisp%-a1` · thread `thread%-0a1b2c3d4e5f` · r reply  t thread  c chat  u unread  a archive  d delete  q close · Read mail stays'),
     'id line: ' .. lines[5])
   eq(lines[7], '---', 'rule')
@@ -1760,7 +1760,7 @@ test('markdown thread view: first subject as the title, a heading per message, a
   eq(vim.bo[buf].modifiable, false, 'nomodifiable')
   eq(vim.bo[buf].buftype, 'nofile', 'buftype')
   eq(vim.bo[buf].bufhidden, 'wipe', 'bufhidden')
-  eq(vim.api.nvim_buf_get_name(buf):match('gc%-mail://.*$'), 'gc-mail://imd-city/thread/thread-0a1b2c3d4e5f', 'name')
+  eq(vim.api.nvim_buf_get_name(buf):match('gc%-mail://.*$'), 'gc-mail://demo-city/thread/thread-0a1b2c3d4e5f', 'name')
   eq(vim.api.nvim_buf_get_lines(buf, 0, -1, false), {
     '# plan \\*v1\\*', '',
     '## human · 2026-10-07T11:00:00Z', '',
@@ -1779,8 +1779,8 @@ test('markdown = false keeps the plain message and thread layouts, with no filet
   local first = msg('ic-wisp-a0', { from = 'human', to = 'mayor', subject = 'plan', thread_id = 'thread-0a1b2c3d4e5f' })
   local second = msg('ic-wisp-a3', { subject = 'Re: plan', thread_id = 'thread-0a1b2c3d4e5f',
     created_at = '2026-10-07T13:00:00Z' })
-  inbox('imd-city', { second })
-  inbox('side city', {})
+  inbox('demo-city', { second })
+  inbox('other city', {})
   answer('read', { message = second })
   answer('thread', { thread_id = 'thread-0a1b2c3d4e5f', messages = { second, first } })
   local win = mailbox().open()
@@ -1790,7 +1790,7 @@ test('markdown = false keeps the plain message and thread layouts, with no filet
   eq(vim.bo[buf].filetype, '', 'no filetype')
   eq(vim.bo[buf].modifiable, false, 'nomodifiable')
   eq(vim.api.nvim_buf_get_lines(buf, 0, -1, false), {
-    'From:    mayor', 'To:      human', 'City:    imd-city', 'Date:    2026-10-07T13:00:00Z', 'Subject: Re: plan',
+    'From:    mayor', 'To:      human', 'City:    demo-city', 'Date:    2026-10-07T13:00:00Z', 'Subject: Re: plan',
     'Id:      ic-wisp-a3   thread thread-0a1b2c3d4e5f',
     'Keys:    r reply  t thread  c chat  u unread  a archive  d delete  q close',
     'Read mail stays in this mailbox until you archive or delete it; gc closes read mail an hour after it was sent.',
@@ -1798,16 +1798,16 @@ test('markdown = false keeps the plain message and thread layouts, with no filet
   }, 'plain message')
   vim.api.nvim_feedkeys('t', 'x', false)
   wait('thread shown', function()
-    return vim.api.nvim_buf_get_lines(0, 0, 1, false)[1]:find('^Thread thread%-0a1b2c3d4e5f in imd%-city, 2 message%(s%)') ~= nil
+    return vim.api.nvim_buf_get_lines(0, 0, 1, false)[1]:find('^Thread thread%-0a1b2c3d4e5f in demo%-city, 2 message%(s%)') ~= nil
   end)
   buf = vim.api.nvim_get_current_buf()
   eq(vim.bo[buf].filetype, '', 'no filetype on the thread')
   eq(vim.api.nvim_buf_get_lines(buf, 0, -1, false), {
-    'Thread thread-0a1b2c3d4e5f in imd-city, 2 message(s)',
-    '', 'From:    human', 'To:      mayor', 'City:    imd-city', 'Date:    2026-10-07T12:00:00Z', 'Subject: plan',
+    'Thread thread-0a1b2c3d4e5f in demo-city, 2 message(s)',
+    '', 'From:    human', 'To:      mayor', 'City:    demo-city', 'Date:    2026-10-07T12:00:00Z', 'Subject: plan',
     'Id:      ic-wisp-a0   thread thread-0a1b2c3d4e5f',
     '', 'body of ic-wisp-a0', 'second line',
-    '', 'From:    mayor', 'To:      human', 'City:    imd-city', 'Date:    2026-10-07T13:00:00Z', 'Subject: Re: plan',
+    '', 'From:    mayor', 'To:      human', 'City:    demo-city', 'Date:    2026-10-07T13:00:00Z', 'Subject: Re: plan',
     'Id:      ic-wisp-a3   thread thread-0a1b2c3d4e5f',
     '', 'body of ic-wisp-a3', 'second line',
   }, 'plain thread')
@@ -1816,39 +1816,39 @@ end)
 test('a malformed, failed or hung gc answer is said once and leaves the mailbox as it was', function()
   preload()
   mailbox().configure({ timeout_ms = 300 })
-  inbox('imd-city', { msg('ic-wisp-a1', { subject = 'kept on screen' }) })
-  inbox('side city', {})
+  inbox('demo-city', { msg('ic-wisp-a1', { subject = 'kept on screen' }) })
+  inbox('other city', {})
   local win = mailbox().open()
   settled(win, 1)
   vim.api.nvim_feedkeys('q', 'x', false)
   local cases = {
-    { 'not json', function() raw_answer('inbox', 'json', 'gc mail inbox: not json\n', 'imd-city') end,
-      'gc mail inbox in imd-city printed something unexpected' },
+    { 'not json', function() raw_answer('inbox', 'json', 'gc mail inbox: not json\n', 'demo-city') end,
+      'gc mail inbox in demo-city printed something unexpected' },
     { 'a message without its read flag', function()
       local m = msg('ic-wisp-a9')
       m.read = nil
-      inbox('imd-city', { m })
-    end, 'gc mail inbox in imd-city printed something unexpected (a message has no read flag)' },
-    { 'ok false', function() answer('inbox', { ok = false, messages = {} }, 'imd-city') end,
-      'gc mail inbox in imd-city printed something unexpected' },
+      inbox('demo-city', { m })
+    end, 'gc mail inbox in demo-city printed something unexpected (a message has no read flag)' },
+    { 'ok false', function() answer('inbox', { ok = false, messages = {} }, 'demo-city') end,
+      'gc mail inbox in demo-city printed something unexpected' },
     { 'messages as an empty object', function()
       raw_answer('inbox', 'json', '{"schema_version":"1","ok":true,"recipient":"human","recipients":["human"],"messages":{}}\n',
-        'imd-city')
-    end, 'gc mail inbox in imd-city printed something unexpected (no message list)' },
+        'demo-city')
+    end, 'gc mail inbox in demo-city printed something unexpected (no message list)' },
     { 'a failing gc', function()
-      inbox('imd-city', {})
-      raw_answer('inbox', 'exit', '1', 'imd-city')
-      raw_answer('inbox', 'stderr', 'gc mail inbox: store unavailable\n', 'imd-city')
-    end, 'gc mail inbox in imd-city failed: gc mail inbox: store unavailable' },
+      inbox('demo-city', {})
+      raw_answer('inbox', 'exit', '1', 'demo-city')
+      raw_answer('inbox', 'stderr', 'gc mail inbox: store unavailable\n', 'demo-city')
+    end, 'gc mail inbox in demo-city failed: gc mail inbox: store unavailable' },
     { 'a hung gc', function()
-      vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/inbox.imd-city.exit')
-      vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/inbox.imd-city.stderr')
-      raw_answer('inbox', 'hang', '5', 'imd-city')
-    end, 'gc mail inbox in imd-city did not answer within 0.3 s' },
+      vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/inbox.demo-city.exit')
+      vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/inbox.demo-city.stderr')
+      raw_answer('inbox', 'hang', '5', 'demo-city')
+    end, 'gc mail inbox in demo-city did not answer within 0.3 s' },
   }
   for _, case in ipairs(cases) do
     local name, setup, expected = case[1], case[2], case[3]
-    vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/inbox.imd-city.json')
+    vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/inbox.demo-city.json')
     setup()
     for round = 1, 2 do
       notes = {}
@@ -1857,7 +1857,7 @@ test('a malformed, failed or hung gc answer is said once and leaves the mailbox 
         return #notes > 0 or (round == 2 and vim.wait(600) == false)
       end, 5000)
       vim.wait(100)
-      eq(rows(win), { '  ● imd-city  mayor  kept on screen' }, name .. ': the list on screen')
+      eq(rows(win), { '  ● demo-city  mayor  kept on screen' }, name .. ': the list on screen')
       local errors = vim.tbl_filter(function(note)
         return note.level == vim.log.levels.ERROR
       end, notes)
@@ -1874,8 +1874,8 @@ end)
 
 test('a reply opens a compose buffer, goes through the disk queue and survives a failed first send', function()
   preload()
-  inbox('imd-city', { msg('ic-wisp-a1', { subject = 'Mailbox plan' }) })
-  inbox('side city', {})
+  inbox('demo-city', { msg('ic-wisp-a1', { subject = 'Mailbox plan' }) })
+  inbox('other city', {})
   local win = mailbox().open()
   settled(win, 1)
   vim.api.nvim_feedkeys('r', 'x', false)
@@ -1888,18 +1888,18 @@ test('a reply opens a compose buffer, goes through the disk queue and survives a
   notes = {}
   eq(gc_mail.open(), nil, 'no city picker for a reply')
   eq(#floats(), 0, 'no float')
-  eq(notes[1].message, 'gc-mail: queued for imd-city mayor: Re: Mailbox plan', 'queued notice')
+  eq(notes[1].message, 'gc-mail: queued for demo-city mayor: Re: Mailbox plan', 'queued notice')
   eq(vim.api.nvim_buf_get_lines(buf, 0, -1, false), { '' }, 'cleared once on disk')
   eq(vim.b[buf].gc_mail_reply, nil, 'no longer a reply waiting')
   local record = vim.json.decode(read_file(queue_dir .. '/' .. spool()[1]))
   eq({ record.reply_to, record.to, record.subject }, { 'ic-wisp-a1', 'mayor', 'Re: Mailbox plan' }, 'queue record')
-  eq(gc_mail.queue_lines({ { record = record } }, record.created)[1], ' imd-city mayor  Re: Mailbox plan  0s  pending ',
+  eq(gc_mail.queue_lines({ { record = record } }, record.created)[1], ' demo-city mayor  Re: Mailbox plan  0s  pending ',
     ':GcMailQueue line')
   wait('retried until sent', drained)
-  eq(sent(), { '/srv/imd-city|Re: Mailbox plan', '/srv/imd-city|Re: Mailbox plan' }, 'two tries')
-  eq(recorded_argv(), { '--city', '/srv/imd-city', 'mail', 'reply', 'ic-wisp-a1', '-s', 'Re: Mailbox plan', '-m',
+  eq(sent(), { '/srv/demo-city|Re: Mailbox plan', '/srv/demo-city|Re: Mailbox plan' }, 'two tries')
+  eq(recorded_argv(), { '--city', '/srv/demo-city', 'mail', 'reply', 'ic-wisp-a1', '-s', 'Re: Mailbox plan', '-m',
     'Re: Mailbox plan\n\nlooks good', '--notify' }, 'reply argv')
-  eq(notes[#notes].message, 'gc-mail: sent to imd-city mayor', 'sent notice')
+  eq(notes[#notes].message, 'gc-mail: sent to demo-city mayor', 'sent notice')
   -- A reply record that names no message, or an option-like id, is refused.
   eq(select(2, gc_mail.queue.add(TWO[1], { subject = 's', body = 'b', reply_to = '--all', to = 'mayor' })),
     'cannot queue the message: bad reply_to', 'option-like id refused')
@@ -1912,7 +1912,7 @@ test('subject_prefix and subject_suffix label every sent subject once, within 72
   assert(gc_mail.send(buf, TWO[1]), 'not queued')
   wait('sent', drained)
   eq(recorded_argv()[7], '[Nick] Deploy plan (nvim)', 'labelled send')
-  eq(notes[#notes - 1].message, 'gc-mail: queued for imd-city mayor: [Nick] Deploy plan (nvim)', 'queued line shows the label')
+  eq(notes[#notes - 1].message, 'gc-mail: queued for demo-city mayor: [Nick] Deploy plan (nvim)', 'queued line shows the label')
   buf = buffer({ string.rep('x', 80) })
   assert(gc_mail.send(buf, TWO[1]), 'not queued')
   wait('sent', drained)
@@ -1938,8 +1938,8 @@ end)
 test('the opt-in new-mail check: no timer by default, one count per city while focused, a notice when unread grows', function()
   preload()
   eq(mailbox().checking(), false, 'no timer')
-  answer('count', { recipient = 'human', recipients = { 'human' }, total = 3, unread = 1 }, 'imd-city')
-  answer('count', { recipient = 'human', recipients = { 'human' }, total = 0, unread = 0 }, 'side city')
+  answer('count', { recipient = 'human', recipients = { 'human' }, total = 3, unread = 1 }, 'demo-city')
+  answer('count', { recipient = 'human', recipients = { 'human' }, total = 0, unread = 0 }, 'other city')
   mailbox().start_check(1000)
   eq(mailbox().checking(), true, 'started')
   mailbox().check_once()
@@ -1948,13 +1948,13 @@ test('the opt-in new-mail check: no timer by default, one count per city while f
   end)
   vim.wait(100)
   eq(#notes, 0, 'the first pass only learns the counts')
-  answer('count', { recipient = 'human', recipients = { 'human' }, total = 4, unread = 2 }, 'imd-city')
+  answer('count', { recipient = 'human', recipients = { 'human' }, total = 4, unread = 2 }, 'demo-city')
   mailbox().check_once()
   wait('second pass', function()
     return #notes == 1
   end)
-  eq(notes[1].message, 'gc-mail: 2 unread mail in imd-city; <Space>mi opens the mailbox', 'notice')
-  eq(has_call(call('count', '/srv/imd-city', 'human', '--json')), true, 'count argv')
+  eq(notes[1].message, 'gc-mail: 2 unread mail in demo-city; <Space>mi opens the mailbox', 'notice')
+  eq(has_call(call('count', '/srv/demo-city', 'human', '--json')), true, 'count argv')
   vim.api.nvim_exec_autocmds('FocusLost', {})
   mailbox().check_once()
   vim.wait(200)
@@ -1973,15 +1973,15 @@ end)
 
 test('an outdated inbox answer never brings back what a later call, a read or an archive changed', function()
   preload()
-  inbox('side city', {})
+  inbox('other city', {})
   -- A mailbox closed and reopened while its first inbox call still runs.
-  inbox('imd-city', { msg('ic-wisp-a1', { subject = 'old' }) })
-  raw_answer('inbox', 'delay', '1', 'imd-city')
+  inbox('demo-city', { msg('ic-wisp-a1', { subject = 'old' }) })
+  raw_answer('inbox', 'delay', '1', 'demo-city')
   local win = mailbox().open()
   vim.wait(100)
   vim.api.nvim_feedkeys('q', 'x', false)
-  vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/inbox.imd-city.delay')
-  inbox('imd-city', {})
+  vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/inbox.demo-city.delay')
+  inbox('demo-city', {})
   win = mailbox().open()
   wait('the second call answered', function()
     return rows(win)[1] == ' no mail '
@@ -1990,27 +1990,27 @@ test('an outdated inbox answer never brings back what a later call, a read or an
   eq(rows(win), { ' no mail ' }, 'the first call\'s late answer is dropped')
   vim.api.nvim_feedkeys('q', 'x', false)
   -- An archive and a read while a refresh still runs.
-  inbox('imd-city', {
+  inbox('demo-city', {
     msg('ic-wisp-a2', { subject = 'to archive', created_at = '2026-10-07T13:00:00Z' }),
     msg('ic-wisp-a3', { subject = 'to read', created_at = '2026-10-07T12:00:00Z' }),
     msg('ic-wisp-a4', { subject = 'untouched', created_at = '2026-10-07T11:00:00Z' }),
   })
   win = mailbox().open()
   settled(win, 3)
-  raw_answer('inbox', 'delay', '1', 'imd-city')
+  raw_answer('inbox', 'delay', '1', 'demo-city')
   vim.api.nvim_feedkeys('R', 'x', false)
   acted('archive', 'ic-wisp-a2')
   vim.api.nvim_feedkeys('a', 'x', false)
   wait('archived', function()
-    return rows(win)[1] == '  ● imd-city  mayor  to read'
+    return rows(win)[1] == '  ● demo-city  mayor  to read'
   end)
   acted('mark-read', 'ic-wisp-a3')
   vim.api.nvim_feedkeys('m', 'x', false)
   wait('marked read', function()
-    return rows(win)[1] == '    imd-city  mayor  to read'
+    return rows(win)[1] == '    demo-city  mayor  to read'
   end)
   vim.wait(1500) -- the refresh answers 1 s after it was made
-  eq(rows(win), { '    imd-city  mayor  to read', '  ● imd-city  mayor  untouched' },
+  eq(rows(win), { '    demo-city  mayor  to read', '  ● demo-city  mayor  untouched' },
     'the refresh answer brings back neither the archived nor the unread copy of the read message')
 end)
 
@@ -2092,14 +2092,14 @@ end)
 test('r2a1: a count or action answer missing a field is said and changes nothing', function()
   preload()
   -- The check: a count without its total notifies nothing and is said once.
-  answer('count', { recipient = 'human', recipients = { 'human' }, total = 1, unread = 1 }, 'imd-city')
-  answer('count', { recipient = 'human', recipients = { 'human' }, total = 0, unread = 0 }, 'side city')
+  answer('count', { recipient = 'human', recipients = { 'human' }, total = 1, unread = 1 }, 'demo-city')
+  answer('count', { recipient = 'human', recipients = { 'human' }, total = 0, unread = 0 }, 'other city')
   mailbox().check_once()
   wait('first pass', function()
     return #mail_calls() == 2
   end)
   vim.wait(100)
-  answer('count', { recipient = 'human', recipients = { 'human' }, unread = 5 }, 'imd-city')
+  answer('count', { recipient = 'human', recipients = { 'human' }, unread = 5 }, 'demo-city')
   for _ = 1, 2 do
     mailbox().check_once()
     vim.wait(300)
@@ -2109,11 +2109,11 @@ test('r2a1: a count or action answer missing a field is said and changes nothing
   end, vim.tbl_map(function(n)
     return n.message
   end, notes)), {}, 'no new-mail notice from a malformed count')
-  eq(errors(), { 'gc-mail: gc mail count in imd-city printed something unexpected (no total and unread count)' }, 'said once')
+  eq(errors(), { 'gc-mail: gc mail count in demo-city printed something unexpected (no total and unread count)' }, 'said once')
   -- Actions: an answer without command and action, or with a negative count.
   notes = {}
-  inbox('imd-city', { msg('ic-wisp-a1', { subject = 'stays' }) })
-  inbox('side city', {})
+  inbox('demo-city', { msg('ic-wisp-a1', { subject = 'stays' }) })
+  inbox('other city', {})
   local win = mailbox().open()
   settled(win, 1)
   answer('mark-read', { id = 'ic-wisp-a1', ids = { 'ic-wisp-a1' }, count = 1 })
@@ -2124,33 +2124,33 @@ test('r2a1: a count or action answer missing a field is said and changes nothing
     return #errors() == 2
   end)
   vim.wait(100)
-  eq(rows(win), { '  ● imd-city  mayor  stays' }, 'still listed, still unread')
+  eq(rows(win), { '  ● demo-city  mayor  stays' }, 'still listed, still unread')
   eq(kept_files(), {}, 'no kept copy')
   local said = errors()
   table.sort(said)
   eq(said, {
-    'gc-mail: cannot archive "stays": gc mail archive in imd-city printed something unexpected (no count)',
-    'gc-mail: cannot mark "stays" read: gc mail mark-read in imd-city printed something unexpected (it is not a mark-read answer)',
+    'gc-mail: cannot archive "stays": gc mail archive in demo-city printed something unexpected (no count)',
+    'gc-mail: cannot mark "stays" read: gc mail mark-read in demo-city printed something unexpected (it is not a mark-read answer)',
   }, 'each said (in either order)')
   vim.api.nvim_feedkeys('q', 'x', false)
 end)
 
 test('r2a2: a thread id that is not one gc prints is refused, never passed to gc', function()
   preload()
-  inbox('imd-city', { msg('ic-wisp-a1', { subject = 'kept on screen' }) })
-  inbox('side city', {})
+  inbox('demo-city', { msg('ic-wisp-a1', { subject = 'kept on screen' }) })
+  inbox('other city', {})
   local win = mailbox().open()
   settled(win, 1)
   vim.api.nvim_feedkeys('q', 'x', false)
-  inbox('imd-city', { msg('ic-wisp-a1', { subject = 'kept on screen', thread_id = '--all' }) })
+  inbox('demo-city', { msg('ic-wisp-a1', { subject = 'kept on screen', thread_id = '--all' }) })
   notes = {}
   win = mailbox().open()
   wait('the inbox answered', function()
     return #errors() == 1
   end)
-  eq(errors(), { 'gc-mail: gc mail inbox in imd-city printed something unexpected (a message thread_id is not a gc thread id)' },
+  eq(errors(), { 'gc-mail: gc mail inbox in demo-city printed something unexpected (a message thread_id is not a gc thread id)' },
     'said')
-  eq(rows(win), { '  ● imd-city  mayor  kept on screen' }, 'the list on screen stays')
+  eq(rows(win), { '  ● demo-city  mayor  kept on screen' }, 'the list on screen stays')
   vim.api.nvim_feedkeys('t', 'x', false)
   vim.wait(200)
   for _, c in ipairs(mail_calls()) do
@@ -2178,8 +2178,8 @@ test('r3a1: a thread answer is a thread only when its thread_id is a gc thread i
   -- that id back is said, and no thread buffer opens.
   local alone = msg(id, { subject = 'kept on screen' })
   alone.thread_id = nil
-  inbox('imd-city', { alone })
-  inbox('side city', {})
+  inbox('demo-city', { alone })
+  inbox('other city', {})
   answer('thread', { thread_id = id, messages = { alone } })
   local win = mailbox().open()
   settled(win, 1)
@@ -2188,8 +2188,8 @@ test('r3a1: a thread answer is a thread only when its thread_id is a gc thread i
   wait('the thread answered', function()
     return #errors() == 1
   end)
-  eq(has_call(call('thread', '/srv/imd-city', id, '--json')), true, 'asked by the message id')
-  eq(errors(), { 'gc-mail: cannot show the thread of "kept on screen": gc mail thread in imd-city printed something '
+  eq(has_call(call('thread', '/srv/demo-city', id, '--json')), true, 'asked by the message id')
+  eq(errors(), { 'gc-mail: cannot show the thread of "kept on screen": gc mail thread in demo-city printed something '
     .. 'unexpected (no thread_id)' }, 'said')
   vim.wait(100)
   for _, buf in ipairs(vim.api.nvim_list_bufs()) do
@@ -2202,8 +2202,8 @@ test('r2a3 and I2: a read answer that arrives after an archive or delete never b
   for _, verb in ipairs({ 'archive', 'delete' }) do
     reset()
     preload()
-    inbox('imd-city', { msg('ic-wisp-a1', { subject = 'gone' }) })
-    inbox('side city', {})
+    inbox('demo-city', { msg('ic-wisp-a1', { subject = 'gone' }) })
+    inbox('other city', {})
     answer('read', { message = msg('ic-wisp-a1', { subject = 'gone', read = true }) })
     raw_answer('read', 'delay', '1')
     acted(verb, 'ic-wisp-a1')
@@ -2222,12 +2222,12 @@ test('r2a3 and I2: a read answer that arrives after an archive or delete never b
       end, notes) == 1
     end)
     wait('the read answered', function()
-      return has_call(call('read', '/srv/imd-city', 'ic-wisp-a1', '--json'))
+      return has_call(call('read', '/srv/demo-city', 'ic-wisp-a1', '--json'))
     end)
     vim.wait(1500) -- the read answers 1 s after it was made
     eq(kept_files(), {}, verb .. ': no kept copy recreated')
     vim.cmd('only')
-    inbox('imd-city', {})
+    inbox('demo-city', {})
     win = mailbox().open()
     settled(win, 1)
     vim.wait(200)
@@ -2238,11 +2238,11 @@ end)
 
 test('I2: action answers apply in the order their calls started, whatever order they arrive in', function()
   preload()
-  inbox('imd-city', {
+  inbox('demo-city', {
     msg('ic-wisp-a1', { subject = 'late read', created_at = '2026-10-07T13:00:00Z' }),
     msg('ic-wisp-a2', { subject = 'late archive', created_at = '2026-10-07T12:00:00Z' }),
   })
-  inbox('side city', {})
+  inbox('other city', {})
   local win = mailbox().open()
   settled(win, 2)
   -- A mark-read that answers after a later mark-unread is dropped.
@@ -2252,7 +2252,7 @@ test('I2: action answers apply in the order their calls started, whatever order 
   acted('mark-unread', 'ic-wisp-a1')
   vim.api.nvim_feedkeys('u', 'x', false)
   vim.wait(1500)
-  eq(rows(win)[1], '  ● imd-city  mayor  late read', 'unread, as the later call left it')
+  eq(rows(win)[1], '  ● demo-city  mayor  late read', 'unread, as the later call left it')
   eq(kept_files(), {}, 'and no copy kept by the dropped read')
   vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/mark-read.delay')
   -- A mark-read that answers first does not hold back a later archive.
@@ -2265,7 +2265,7 @@ test('I2: action answers apply in the order their calls started, whatever order 
   wait('archived', function()
     return #rows(win) == 1
   end, 3000)
-  eq(rows(win), { '  ● imd-city  mayor  late read' }, 'the archive applied after the read')
+  eq(rows(win), { '  ● demo-city  mayor  late read' }, 'the archive applied after the read')
   eq(kept_files(), {}, 'its kept copy went with it')
   vim.api.nvim_feedkeys('q', 'x', false)
 end)
@@ -2308,12 +2308,12 @@ local function two_messages(extra)
   preload()
   gc_mail.config.preview = true
   vim.o.columns = 200
-  inbox('imd-city', {
+  inbox('demo-city', {
     msg('ic-wisp-a1', vim.tbl_extend('force', { subject = 'newer subject', body = 'alpha one\nalpha two',
       created_at = '2026-10-07T13:00:00Z' }, extra or {})),
     msg('ic-wisp-a2', { subject = 'older subject', body = 'beta only', created_at = '2026-10-07T12:00:00Z' }),
   })
-  inbox('side city', {})
+  inbox('other city', {})
 end
 
 -- Waits until every inbox call of the open has answered and nothing else runs.
@@ -2381,7 +2381,7 @@ test('preview: updates make no gc call and mark nothing read', function()
   eq(#vim.tbl_filter(function(c)
     return c[4] == 'read' or c[4] == 'mark-read'
   end, mail_calls()), 0, 'no read or mark-read')
-  eq(rows(win), { '  ● imd-city  mayor  newer subject', '  ● imd-city  mayor  older subject' }, 'both still unread')
+  eq(rows(win), { '  ● demo-city  mayor  newer subject', '  ● demo-city  mayor  older subject' }, 'both still unread')
   eq(#kept_files(), 0, 'and no kept copy')
   vim.api.nvim_feedkeys('q', 'x', false)
 end)
@@ -2394,8 +2394,8 @@ test('preview: holding j redraws once after the debounce, not once per line', fu
   for i = 1, 4 do
     messages[i] = msg('ic-wisp-a' .. i, { body = 'body ' .. i, created_at = ('2026-10-07T1%d:00:00Z'):format(5 - i) })
   end
-  inbox('imd-city', messages)
-  inbox('side city', {})
+  inbox('demo-city', messages)
+  inbox('other city', {})
   local win = mailbox().open()
   settled(win, 4)
   pane_shows({ 'body 1' }, 'the first body')
@@ -2423,7 +2423,7 @@ test('preview: an empty body shows one dim line, a line that is no message clear
   eq(marks[1][4].line_hl_group, 'Comment', 'a dim line')
   vim.api.nvim_feedkeys('q', 'x', false)
   -- Nothing listed: the only row is "no mail", which is no message.
-  inbox('imd-city', {})
+  inbox('demo-city', {})
   vim.fn.delete(mailbox_dir, 'rf')
   mailbox().reset()
   win = mailbox().open()
@@ -2502,11 +2502,11 @@ test('preview: a refresh that removes the message under the cursor shows the nex
   settled(win, 2)
   pane_shows({ 'alpha one', 'alpha two' }, 'the first body')
   quiet()
-  inbox('imd-city', { msg('ic-wisp-a2', { subject = 'older subject', body = 'beta only',
+  inbox('demo-city', { msg('ic-wisp-a2', { subject = 'older subject', body = 'beta only',
     created_at = '2026-10-07T12:00:00Z' }) })
   vim.api.nvim_feedkeys('R', 'x', false)
   pane_shows({ 'beta only' }, 'the message now under the cursor')
-  inbox('imd-city', {})
+  inbox('demo-city', {})
   quiet()
   vim.api.nvim_feedkeys('R', 'x', false)
   pane_shows({ '' }, 'a cleared pane when nothing is under the cursor')
@@ -2528,7 +2528,7 @@ test('preview: a body that cannot be rendered is said once and clears the pane, 
     return n.message:find('cannot show the preview', 1, true)
   end, notes)
   eq(#said, 1, 'said once')
-  eq(rows(win), { '  ● imd-city  mayor  newer subject', '  ● imd-city  mayor  older subject' }, 'the list is as it was')
+  eq(rows(win), { '  ● demo-city  mayor  newer subject', '  ● demo-city  mayor  older subject' }, 'the list is as it was')
   vim.api.nvim_feedkeys('q', 'x', false)
 end)
 
@@ -2564,9 +2564,9 @@ end
 local function city_dirs()
   local base = ('%s/cities-%d'):format(scratch, run_id)
   local cities = {}
-  for _, dir in ipairs({ 'imd-city', 'side city' }) do
+  for _, dir in ipairs({ 'demo-city', 'other city' }) do
     vim.fn.mkdir(base .. '/' .. dir .. '/.gc', 'p')
-    cities[#cities + 1] = { name = dir == 'side city' and 'side-city' or dir, path = base .. '/' .. dir }
+    cities[#cities + 1] = { name = dir == 'other city' and 'other-city' or dir, path = base .. '/' .. dir }
   end
   write(vim.env.FAKE_GC_CITIES, cities_record(cities))
   preload()
@@ -2610,8 +2610,8 @@ end
 test('the panel opens below the current window without moving focus or the cursor, one per tab page', function()
   local cities, log = city_dirs()
   write(log, event('order.completed'))
-  inbox('imd-city', { msg('ic-wisp-a1', { subject = 'first' }) })
-  inbox('side city', {})
+  inbox('demo-city', { msg('ic-wisp-a1', { subject = 'first' }) })
+  inbox('other city', {})
   buffer({ 'line one', 'line two', 'line three' })
   vim.api.nvim_win_set_cursor(0, { 2, 3 })
   local origin = vim.api.nvim_get_current_win()
@@ -2631,15 +2631,15 @@ test('the panel opens below the current window without moving focus or the curso
     'its own unlisted nofile buffer')
   eq(vim.api.nvim_win_get_height(origin) < origin_height, true, 'the split took rows from the current window')
   settled(win, 1)
-  eq(rows(win), { '  ● imd-city  mayor  first' }, 'the mailbox lines')
+  eq(rows(win), { '  ● demo-city  mayor  first' }, 'the mailbox lines')
   -- A mail arriving changes the panel, not the focus.
-  inbox('imd-city', { msg('ic-wisp-a2', { subject = 'second', created_at = '2026-10-07T13:00:00Z' }),
+  inbox('demo-city', { msg('ic-wisp-a2', { subject = 'second', created_at = '2026-10-07T13:00:00Z' }),
     msg('ic-wisp-a1', { subject = 'first' }) })
   append(log, event('mail.sent'))
   wait('the new mail is shown', function()
     return #rows(win) == 2
   end)
-  eq(rows(win), { '  ● imd-city  mayor  second', '  ● imd-city  mayor  first' }, 'newest first')
+  eq(rows(win), { '  ● demo-city  mayor  second', '  ● demo-city  mayor  first' }, 'newest first')
   eq(vim.api.nvim_win_get_cursor(win)[1], 2, 'the panel cursor stays on the message it was on')
   eq(vim.api.nvim_get_current_win(), origin, 'still the same window')
   eq(vim.api.nvim_win_get_cursor(origin), { 2, 3 }, 'still the same cursor')
@@ -2667,11 +2667,11 @@ end)
 test('the panel lines equal the float\'s, and its keys act on the message under its cursor', function()
   local cities, log = city_dirs()
   write(log, '')
-  inbox('imd-city', {
+  inbox('demo-city', {
     msg('ic-wisp-a1', { subject = 'at noon', created_at = '2026-10-07T12:00:00Z' }),
     msg('ic-wisp-a2', { subject = 'at eleven', from = 'builder-1', created_at = '2026-10-07T11:00:00Z' }),
   })
-  inbox('side city', { msg('sc-wisp-b1', { subject = 'side', created_at = '2026-10-07T11:30:00Z' }) })
+  inbox('other city', { msg('sc-wisp-b1', { subject = 'side', created_at = '2026-10-07T11:30:00Z' }) })
   answer('read', { message = msg('ic-wisp-a1', { subject = 'at noon', read = true }) })
   local origin = vim.api.nvim_get_current_win()
   local pwin = panel().open()
@@ -2679,7 +2679,7 @@ test('the panel lines equal the float\'s, and its keys act on the message under 
   local fwin = mailbox().open()
   settled(fwin, 3)
   eq(rows(pwin), rows(fwin), 'the same lines')
-  eq(rows(pwin), { '  ● imd-city  mayor  at noon', '  ● side-city  mayor  side', '  ● imd-city  builder-1  at eleven' }, 'lines')
+  eq(rows(pwin), { '  ● demo-city  mayor  at noon', '  ● other-city  mayor  side', '  ● demo-city  builder-1  at eleven' }, 'lines')
   vim.api.nvim_feedkeys('q', 'x', false)
   -- <CR> in the panel opens the message in a window above it, never inside it.
   vim.api.nvim_win_set_cursor(pwin, { 1, 0 })
@@ -2692,7 +2692,7 @@ test('the panel lines equal the float\'s, and its keys act on the message under 
   eq(vim.bo[vim.api.nvim_win_get_buf(pwin)].filetype, 'gcmail-panel', 'the panel still shows the panel')
   eq(vim.api.nvim_win_get_height(pwin), 10, 'at its height')
   wait('marked read in both views', function()
-    return rows(pwin)[1] == '    imd-city  mayor  at noon'
+    return rows(pwin)[1] == '    demo-city  mayor  at noon'
   end)
   eq(has_call(call('read', cities[1].path, 'ic-wisp-a1', '--json')), true, 'gc mail read')
   -- m and u from the panel without entering it.
@@ -2700,7 +2700,7 @@ test('the panel lines equal the float\'s, and its keys act on the message under 
   acted('mark-read', 'sc-wisp-b1')
   panel_key(pwin, 'm')()
   wait('marked read', function()
-    return rows(pwin)[2] == '    side-city  mayor  side'
+    return rows(pwin)[2] == '    other-city  mayor  side'
   end)
   eq(has_call(call('mark-read', cities[2].path, 'sc-wisp-b1', '--json')), true, 'gc mail mark-read in its city')
   -- q in the panel closes it.
@@ -2713,8 +2713,8 @@ end)
 test('a mail line in a city event log lists that city once after the debounce; other lines list nothing', function()
   local cities, log = city_dirs()
   write(log, event('order.completed'))
-  inbox('imd-city', {})
-  inbox('side city', {})
+  inbox('demo-city', {})
+  inbox('other city', {})
   local win = panel().open()
   listed(cities)
   eq({ inbox_calls(cities[1].path), inbox_calls(cities[2].path) }, { 1, 1 }, 'one listing each on open')
@@ -2765,11 +2765,11 @@ end)
 test('at most one inbox call per city is in flight: mail during a call lists the city once more after it', function()
   local cities, log = city_dirs()
   write(log, '')
-  inbox('imd-city', {})
-  inbox('side city', {})
+  inbox('demo-city', {})
+  inbox('other city', {})
   panel().open()
   listed(cities)
-  raw_answer('inbox', 'delay', '3', 'imd-city')
+  raw_answer('inbox', 'delay', '3', 'demo-city')
   append(log, event('mail.sent'))
   wait('the first call started', function()
     return inbox_calls(cities[1].path) == 2
@@ -2780,7 +2780,7 @@ test('at most one inbox call per city is in flight: mail during a call lists the
   end
   vim.wait(200)
   eq(inbox_calls(cities[1].path), 2, 'no second call while one is in flight')
-  vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/inbox.imd-city.delay')
+  vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/inbox.demo-city.delay')
   wait('one more call after it', function()
     return inbox_calls(cities[1].path) == 3
   end, 5000)
@@ -2792,8 +2792,8 @@ test('a rotated or recreated event log is watched again; the old file no longer 
   panel().configure({ rearm_ms = 200 })
   local cities, log = city_dirs()
   write(log, event('order.completed'))
-  inbox('imd-city', {})
-  inbox('side city', {})
+  inbox('demo-city', {})
+  inbox('other city', {})
   panel().open()
   listed(cities)
   local n = inbox_calls(cities[1].path)
@@ -2832,8 +2832,8 @@ end)
 test('with no event log the fallback timer lists every city, and watches the log once it appears', function()
   panel().configure({ poll_ms = 300 }) -- under setup's 15 s floor, for the test only
   local cities, log = city_dirs()
-  inbox('imd-city', {})
-  inbox('side city', {})
+  inbox('demo-city', {})
+  inbox('other city', {})
   panel().open()
   wait('the fallback timer lists both cities again', function()
     return inbox_calls(cities[1].path) >= 3 and inbox_calls(cities[2].path) >= 3
@@ -2855,14 +2855,14 @@ test('after close no watcher or timer fires and no callback touches the closed p
   panel().configure({ poll_ms = 300, rearm_ms = 100 })
   local cities, log = city_dirs()
   write(log, '')
-  inbox('imd-city', {})
-  inbox('side city', {})
+  inbox('demo-city', {})
+  inbox('other city', {})
   local win = panel().open()
   listed(cities)
   local handles = panel().handles()
   eq(#handles >= 6, true, 'a timer, two debounce and two rearm timers and a watcher: ' .. #handles)
   -- A mail event whose debounce is still waiting, and an inbox call in flight.
-  raw_answer('inbox', 'delay', '0.5', 'side city')
+  raw_answer('inbox', 'delay', '0.5', 'other city')
   panel_key(win, 'R')()
   append(log, event('mail.sent'))
   vim.wait(50)
@@ -2885,11 +2885,11 @@ end)
 test('an archive from the panel also leaves the open float and survives a late inbox answer (I2)', function()
   local cities, log = city_dirs()
   write(log, '')
-  inbox('imd-city', {
+  inbox('demo-city', {
     msg('ic-wisp-a1', { subject = 'to archive', created_at = '2026-10-07T13:00:00Z' }),
     msg('ic-wisp-a2', { subject = 'stays', created_at = '2026-10-07T12:00:00Z' }),
   })
-  inbox('side city', {})
+  inbox('other city', {})
   local pwin = panel().open()
   settled(pwin, 2)
   listed(cities)
@@ -2897,7 +2897,7 @@ test('an archive from the panel also leaves the open float and survives a late i
   settled(fwin, 2)
   vim.wait(200)
   -- A panel refresh that answers late, with the message still in it.
-  raw_answer('inbox', 'delay', '1', 'imd-city')
+  raw_answer('inbox', 'delay', '1', 'demo-city')
   local n = inbox_calls(cities[1].path)
   append(log, event('mail.sent'))
   wait('the panel refresh started', function()
@@ -2910,11 +2910,11 @@ test('an archive from the panel also leaves the open float and survives a late i
     return #rows(pwin) == 1 and #rows(fwin) == 1
   end)
   eq(has_call(call('archive', cities[1].path, 'ic-wisp-a1', '--json')), true, 'gc mail archive')
-  eq(rows(pwin), { '  ● imd-city  mayor  stays' }, 'panel')
-  eq(rows(fwin), { '  ● imd-city  mayor  stays' }, 'float')
+  eq(rows(pwin), { '  ● demo-city  mayor  stays' }, 'panel')
+  eq(rows(fwin), { '  ● demo-city  mayor  stays' }, 'float')
   vim.wait(1500) -- the refresh answers 1 s after it was made
-  eq(rows(pwin), { '  ● imd-city  mayor  stays' }, 'the late answer does not bring it back to the panel')
-  eq(rows(fwin), { '  ● imd-city  mayor  stays' }, 'nor to the float')
+  eq(rows(pwin), { '  ● demo-city  mayor  stays' }, 'the late answer does not bring it back to the panel')
+  eq(rows(fwin), { '  ● demo-city  mayor  stays' }, 'nor to the float')
   eq(#floats(), 1, 'the float stayed open')
   vim.api.nvim_feedkeys('q', 'x', false)
 end)
@@ -2923,11 +2923,11 @@ test('preview: the panel shows the pane as a split right of the list, follows it
   local cities, log = city_dirs()
   write(log, '')
   gc_mail.config.preview = true
-  inbox('imd-city', {
+  inbox('demo-city', {
     msg('ic-wisp-a1', { subject = 'newer subject', body = 'alpha one', created_at = '2026-10-07T13:00:00Z' }),
     msg('ic-wisp-a2', { subject = 'older subject', body = 'beta only', created_at = '2026-10-07T12:00:00Z' }),
   })
-  inbox('side city', {})
+  inbox('other city', {})
   local origin = vim.api.nvim_get_current_win()
   local pwin = panel().open()
   settled(pwin, 2)
@@ -2961,16 +2961,16 @@ test('preview: a panel refresh that removes the message under the cursor updates
   local cities, log = city_dirs()
   write(log, '')
   gc_mail.config.preview = true
-  inbox('imd-city', {
+  inbox('demo-city', {
     msg('ic-wisp-a1', { subject = 'newer subject', body = 'alpha one', created_at = '2026-10-07T13:00:00Z' }),
     msg('ic-wisp-a2', { subject = 'older subject', body = 'beta only', created_at = '2026-10-07T12:00:00Z' }),
   })
-  inbox('side city', {})
+  inbox('other city', {})
   local pwin = panel().open()
   settled(pwin, 2)
   pane_shows({ 'alpha one' }, 'the first body')
   listed(cities)
-  inbox('imd-city', { msg('ic-wisp-a2', { subject = 'older subject', body = 'beta only',
+  inbox('demo-city', { msg('ic-wisp-a2', { subject = 'older subject', body = 'beta only',
     created_at = '2026-10-07T12:00:00Z' }) })
   append(log, event('mail.sent'))
   pane_shows({ 'beta only' }, 'the message now under the cursor')
@@ -2989,8 +2989,8 @@ test('preview: a panel too narrow for the pane keeps it hidden and the panel wor
   gc_mail.config.preview = true
   vim.cmd('vsplit')
   vim.cmd('vertical resize 50')
-  inbox('imd-city', { msg('ic-wisp-a1', { subject = 'newer subject', body = 'alpha one' }) })
-  inbox('side city', {})
+  inbox('demo-city', { msg('ic-wisp-a1', { subject = 'newer subject', body = 'alpha one' }) })
+  inbox('other city', {})
   local pwin = panel().open()
   eq(vim.api.nvim_win_get_width(pwin), 50, 'a panel 50 columns wide')
   settled(pwin, 1)
@@ -3078,7 +3078,7 @@ test('history.load runs the exact argv and returns the five good messages oldest
   }
 ]
 ]=]
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fixture)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fixture)
   local history = require('gc_mail.history')
   history.reset()
   notes = {}
@@ -3095,7 +3095,7 @@ test('history.load runs the exact argv and returns the five good messages oldest
   eq(#calls, 1, 'one bd list call')
   local argv = calls[1]
   eq(argv[1], '--city', '--city flag')
-  eq(argv[2], '/srv/imd-city', 'city path')
+  eq(argv[2], '/srv/demo-city', 'city path')
   eq(argv[3], 'bd', 'bd command')
   eq(argv[4], 'list', 'list subcommand')
   eq(argv[5], '--type', '--type flag')
@@ -3178,7 +3178,7 @@ end)
 test('a thread load runs -l thread:<id> and no --created-after; an id that is not a thread id runs nothing', function()
   local history = require('gc_mail.history')
   history.reset()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', '[]')
   local done, res_list, res_err
   history.load(TWO[1], { thread = 'thread-0a1b2c3d4e5f' }, function(list, err)
     done, res_list, res_err = true, list, err
@@ -3208,8 +3208,8 @@ test('a non-zero exit, a hung fake, a non-list answer and malformed JSON each gi
   eq(history.messages(TWO[1]), {}, 'cache empty initially')
 
   reset()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.exit', '1')
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.stderr', 'bd list: store failed\nline 2')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.exit', '1')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.stderr', 'bd list: store failed\nline 2')
   local done, res_list, res_err
   history.load(TWO[1], {}, function(l, e) done, res_list, res_err = true, l, e end)
   wait('non-zero exit finished', function() return done end)
@@ -3219,7 +3219,7 @@ test('a non-zero exit, a hung fake, a non-list answer and malformed JSON each gi
 
   reset()
   history.configure({ timeout_ms = 200 })
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.hang', '5')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.hang', '5')
   done, res_list, res_err = false, nil, nil
   history.load(TWO[1], {}, function(l, e) done, res_list, res_err = true, l, e end)
   wait('timeout finished', function() return done end, 5000)
@@ -3229,7 +3229,7 @@ test('a non-zero exit, a hung fake, a non-list answer and malformed JSON each gi
   history.configure({ timeout_ms = 10000 })
 
   reset()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '{"ok": true}')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', '{"ok": true}')
   done, res_list, res_err = false, nil, nil
   history.load(TWO[1], {}, function(l, e) done, res_list, res_err = true, l, e end)
   wait('non-list finished', function() return done end)
@@ -3238,7 +3238,7 @@ test('a non-zero exit, a hung fake, a non-list answer and malformed JSON each gi
   eq(history.messages(TWO[1]), {}, 'cache unchanged on non-list')
 
   reset()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '{ bad json')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', '{ bad json')
   done, res_list, res_err = false, nil, nil
   history.load(TWO[1], {}, function(l, e) done, res_list, res_err = true, l, e end)
   wait('malformed finished', function() return done end)
@@ -3250,8 +3250,8 @@ end)
 test('two loads at once make one gc call and both callbacks run', function()
   local history = require('gc_mail.history')
   history.reset()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.delay', '0.2')
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.delay', '0.2')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', '[]')
   local done1, done2 = false, false
   local list1, list2
   history.load(TWO[1], {}, function(l) done1, list1 = true, l end)
@@ -3308,15 +3308,15 @@ test('the thread view t in the mailbox renders every message of the thread, clos
   }
 ]
 ]=]
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fixture)
-  write(vim.env.FAKE_GC_MAIL .. '/inbox.imd-city.json', vim.json.encode({
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fixture)
+  write(vim.env.FAKE_GC_MAIL .. '/inbox.demo-city.json', vim.json.encode({
     schema_version = '1', ok = true, recipients = { 'human' },
     messages = {
       { id = 'ic-wisp-a1', from = 'mayor', to = 'human', subject = 'second thread message', body = 'body of second',
         created_at = '2026-10-07T11:00:00Z', read = false, thread_id = 'thread-0a1b2c3d4e5f' }
     }
   }))
-  write(vim.env.FAKE_GC_MAIL .. '/inbox.side-city.json', vim.json.encode({ schema_version = '1', ok = true, recipients = { 'human' }, messages = {} }))
+  write(vim.env.FAKE_GC_MAIL .. '/inbox.other-city.json', vim.json.encode({ schema_version = '1', ok = true, recipients = { 'human' }, messages = {} }))
 
   local win = require('gc_mail.mailbox').open()
   wait('mailbox filled', function()
@@ -3325,7 +3325,7 @@ test('the thread view t in the mailbox renders every message of the thread, clos
 
   vim.api.nvim_feedkeys('t', 'x', false)
   wait('thread scratch opened', function()
-    return #floats() == 0 and vim.api.nvim_buf_get_name(0):find('^gc%-mail://imd%-city/thread/thread%-0a1b2c3d4e5f') ~= nil
+    return #floats() == 0 and vim.api.nvim_buf_get_name(0):find('^gc%-mail://demo%-city/thread/thread%-0a1b2c3d4e5f') ~= nil
   end)
   local t_buf = vim.api.nvim_get_current_buf()
   local t_lines = vim.api.nvim_buf_get_lines(t_buf, 0, -1, false)
@@ -3341,15 +3341,15 @@ test('the thread view t in the mailbox renders every message of the thread, clos
 
   vim.cmd('silent! close')
   reset()
-  write(vim.env.FAKE_GC_MAIL .. '/inbox.imd-city.json', vim.json.encode({
+  write(vim.env.FAKE_GC_MAIL .. '/inbox.demo-city.json', vim.json.encode({
     schema_version = '1', ok = true, recipients = { 'human' },
     messages = {
       { id = 'ic-wisp-a2', from = 'mayor', to = 'human', subject = 'no thread id', body = 'body',
         created_at = '2026-10-07T12:00:00Z', read = false }
     }
   }))
-  write(vim.env.FAKE_GC_MAIL .. '/inbox.side-city.json', vim.json.encode({ schema_version = '1', ok = true, recipients = { 'human' }, messages = {} }))
-  write(vim.env.FAKE_GC_MAIL .. '/thread.imd-city.json', vim.json.encode({
+  write(vim.env.FAKE_GC_MAIL .. '/inbox.other-city.json', vim.json.encode({ schema_version = '1', ok = true, recipients = { 'human' }, messages = {} }))
+  write(vim.env.FAKE_GC_MAIL .. '/thread.demo-city.json', vim.json.encode({
     schema_version = '1', ok = true, thread_id = 'thread-112233445566',
     messages = {
       { id = 'ic-wisp-a2', from = 'mayor', to = 'human', subject = 'no thread id', body = 'body',
@@ -3362,7 +3362,7 @@ test('the thread view t in the mailbox renders every message of the thread, clos
   end)
   vim.api.nvim_feedkeys('t', 'x', false)
   wait('thread scratch opened for fallback', function()
-    return #floats() == 0 and vim.api.nvim_buf_get_name(0):find('^gc%-mail://imd%-city/thread/ic%-wisp%-a2') ~= nil
+    return #floats() == 0 and vim.api.nvim_buf_get_name(0):find('^gc%-mail://demo%-city/thread/ic%-wisp%-a2') ~= nil
   end)
   calls = mail_calls()
   thread_calls = vim.tbl_filter(function(c) return c[4] == 'thread' and c[5] == 'ic-wisp-a2' end, calls)
@@ -3587,8 +3587,8 @@ test('events.cities with a second city watches both; dropping the city from ever
   wait('both events received', function()
     return #rec == 2
   end)
-  eq(rec[1].city.name, 'imd-city')
-  eq(rec[2].city.name, 'side-city')
+  eq(rec[1].city.name, 'demo-city')
+  eq(rec[2].city.name, 'other-city')
 
   events.cities('multi_city', { cities[1] })
   wait('city2 handle closed', function()
@@ -3677,8 +3677,8 @@ local function watched(opts, unread)
   local log2 = cities[2].path .. '/.gc/events.jsonl'
   write(log, '')
   write(log2, '')
-  count_answer('imd-city', unread[1])
-  count_answer('side city', unread[2])
+  count_answer('demo-city', unread[1])
+  count_answer('other city', unread[2])
   gc_mail.setup(vim.tbl_extend('force', { keymap = false, mailbox_keymap = false, panel_keymap = false,
     state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY }, opts or {}))
   return cities, log, log2
@@ -3723,7 +3723,7 @@ test('a mail for you raises one notice and adds one; the same id again, other re
   append(log, mail_line('mail.sent', 'ic-wisp-a1', { subject = 'Build done', created_at = '2026-10-08T10:00:00Z' }))
   seeded(4)
   eq(#notes, 1, 'one notice')
-  eq(notes[1].message, 'gc-mail: mayor in imd-city: Build done', 'the notice')
+  eq(notes[1].message, 'gc-mail: mayor in demo-city: Build done', 'the notice')
   eq(notes[1].level, vim.log.levels.INFO, 'its level')
   append(log, mail_line('mail.sent', 'ic-wisp-a1', { subject = 'Build done' }))
   vim.wait(300)
@@ -3740,7 +3740,7 @@ test('a mail for you raises one notice and adds one; the same id again, other re
   eq({ #notes, gc_mail.status() }, { 1, ' 4' }, 'mail for others and from you')
   append(log, mail_line('mail.replied', 'ic-wisp-e5', { subject = 'Re: Build done' }))
   seeded(5)
-  eq(notes[2].message, 'gc-mail: mayor in imd-city: Re: Build done', 'a reply counts too')
+  eq(notes[2].message, 'gc-mail: mayor in demo-city: Re: Build done', 'a reply counts too')
   append(log, mail_line('mail.archived', 'ic-wisp-e5'))
   seeded(4)
   append(log, mail_line('mail.deleted', 'ic-wisp-a1'))
@@ -3754,7 +3754,7 @@ test('a notice is one line and the subject is cut at 72 characters', function()
   append(log, mail_line('mail.sent', 'ic-wisp-a1', { from = 'may\nor', subject = 'first\nsecond ' .. string.rep('x', 100) }))
   seeded(4)
   local subject = ('first / second ' .. string.rep('x', 100)):sub(1, 72)
-  eq(notes[1].message, 'gc-mail: may / or in imd-city: ' .. subject, 'one line, 72 characters of subject')
+  eq(notes[1].message, 'gc-mail: may / or in demo-city: ' .. subject, 'one line, 72 characters of subject')
 end)
 
 test('no notice while the chat of that city and sender is open and current; the count still grows', function()
@@ -3764,13 +3764,13 @@ test('no notice while the chat of that city and sender is open and current; the 
   package.loaded['gc_mail.chat'] = {
     is_current = function(city, with)
       asked[#asked + 1] = { city.name, with }
-      return city.name == 'imd-city' and with == 'mayor'
+      return city.name == 'demo-city' and with == 'mayor'
     end,
   }
   append(log, mail_line('mail.sent', 'ic-wisp-a1', { from = 'mayor' }))
   seeded(4)
   eq(#notes, 0, 'the chat shows it')
-  eq(asked, { { 'imd-city', 'mayor' } }, 'asked the chat once')
+  eq(asked, { { 'demo-city', 'mayor' } }, 'asked the chat once')
   append(log, mail_line('mail.sent', 'ic-wisp-b2', { from = 'planner' }))
   seeded(5)
   eq(#notes, 1, 'another sender still raises a notice')
@@ -3807,7 +3807,7 @@ test('an overflow or a recreated log counts that city again; the resync timer co
   wait('counted again after a recreated log', function()
     return count_calls(cities[1].path) == 3
   end)
-  count_answer('imd-city', 5)
+  count_answer('demo-city', 5)
   append(log, string.rep('x', 1024 * 1024 + 10) .. '\n')
   seeded(6)
   require('gc_mail.watch').configure({ resync_ms = 100 })
@@ -3821,7 +3821,7 @@ test('a mail counted by a recount is still taken off when it is read; a repeat o
   seeded(3)
   append(log, mail_line('mail.sent', 'ic-wisp-a1', { subject = 'Build done' }))
   seeded(4)
-  count_answer('imd-city', 3)
+  count_answer('demo-city', 3)
   append(log, string.rep('x', 1024 * 1024 + 10) .. '\n')
   wait('counted again after an overflow', function()
     return count_calls(cities[1].path) == 2
@@ -3848,8 +3848,8 @@ end)
 test('a failed count is said once and the count is kept', function()
   local cities, log = watched()
   seeded(3)
-  raw_answer('count', 'exit', '1', 'imd-city')
-  raw_answer('count', 'stderr', 'store unavailable\n', 'imd-city')
+  raw_answer('count', 'exit', '1', 'demo-city')
+  raw_answer('count', 'stderr', 'store unavailable\n', 'demo-city')
   for n = 2, 3 do
     append(log, string.rep('x', 1024 * 1024 + 10) .. '\n')
     wait('counted again', function()
@@ -3937,7 +3937,7 @@ test('history.load decodes recipient as metadata["gc.routed_to"] when assignee i
   }
 ]
 ]=]
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fixture)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fixture)
   local done, res_list, res_err, res_skipped
   history.load(TWO[1], function(list, err, skipped)
     done, res_list, res_err, res_skipped = true, list, err, skipped
@@ -4425,9 +4425,9 @@ local function conversation_fixture()
   return vim.json.encode(msgs), past, now - 1800, now - 900
 end
 
-test(':GcMailChat imd-city opens two windows to the right with expected geometry and markdown timeline', function()
+test(':GcMailChat demo-city opens two windows to the right with expected geometry and markdown timeline', function()
   local fix, past, t1, t2 = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
   preload()
 
@@ -4435,7 +4435,7 @@ test(':GcMailChat imd-city opens two windows to the right with expected geometry
   local origin_buf = vim.api.nvim_win_get_buf(origin_win)
   local origin_width_before = vim.api.nvim_win_get_width(origin_win)
 
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local compose_win = vim.api.nvim_get_current_win()
   assert(compose_win ~= origin_win, 'cursor in compose box')
   eq(vim.api.nvim_get_mode().mode, 'n', 'normal mode in compose box')
@@ -4459,8 +4459,8 @@ test(':GcMailChat imd-city opens two windows to the right with expected geometry
 
   local tl_buf = vim.api.nvim_win_get_buf(timeline_win)
   local cp_buf = vim.api.nvim_win_get_buf(compose_win)
-  eq(vim.api.nvim_buf_get_name(tl_buf):match('gc%-mail://imd%-city/chat/mayor$') ~= nil, true, 'timeline buf name')
-  eq(vim.api.nvim_buf_get_name(cp_buf):match('gc%-mail://imd%-city/compose/mayor$') ~= nil, true, 'compose buf name')
+  eq(vim.api.nvim_buf_get_name(tl_buf):match('gc%-mail://demo%-city/chat/mayor$') ~= nil, true, 'timeline buf name')
+  eq(vim.api.nvim_buf_get_name(cp_buf):match('gc%-mail://demo%-city/compose/mayor$') ~= nil, true, 'compose buf name')
 
   wait('timeline rendered', function()
     local lines = vim.api.nvim_buf_get_lines(tl_buf, 0, -1, false)
@@ -4508,7 +4508,7 @@ end
 
 test('chat full-window: the only empty buffer is taken over full-size, and q returns to it', function()
   local fix = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
   preload()
 
@@ -4517,7 +4517,7 @@ test('chat full-window: the only empty buffer is taken over full-size, and q ret
   local st_before = vim.api.nvim_get_option_value('statusline', { win = origin_win, scope = 'local' })
   local wfw_before = vim.api.nvim_get_option_value('winfixwidth', { win = origin_win, scope = 'local' })
 
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local compose_win = vim.api.nvim_get_current_win()
   assert(compose_win ~= origin_win, 'cursor in compose box')
   eq(vim.api.nvim_get_mode().mode, 'n', 'normal mode in compose box')
@@ -4532,8 +4532,8 @@ test('chat full-window: the only empty buffer is taken over full-size, and q ret
 
   local tl_buf = vim.api.nvim_win_get_buf(timeline_win)
   local cp_buf = vim.api.nvim_win_get_buf(compose_win)
-  eq(vim.api.nvim_buf_get_name(tl_buf):match('gc%-mail://imd%-city/chat/mayor$') ~= nil, true, 'timeline buf name')
-  eq(vim.api.nvim_buf_get_name(cp_buf):match('gc%-mail://imd%-city/compose/mayor$') ~= nil, true, 'compose buf name')
+  eq(vim.api.nvim_buf_get_name(tl_buf):match('gc%-mail://demo%-city/chat/mayor$') ~= nil, true, 'timeline buf name')
+  eq(vim.api.nvim_buf_get_name(cp_buf):match('gc%-mail://demo%-city/compose/mayor$') ~= nil, true, 'compose buf name')
   eq(vim.api.nvim_buf_is_valid(origin_buf), true, 'the empty buffer is kept')
   eq(vim.api.nvim_buf_get_name(origin_buf), '', 'the empty buffer is not renamed')
 
@@ -4564,12 +4564,12 @@ end)
 
 test('chat full-window: q with the taken buffer wiped falls back to a fresh empty buffer', function()
   local fix = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
   preload()
 
   local origin_win, origin_buf = only_empty_buffer()
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local compose_win = vim.api.nvim_get_current_win()
   local wins = vim.api.nvim_tabpage_list_wins(0)
   local timeline_win = wins[1] == compose_win and wins[2] or wins[1]
@@ -4594,12 +4594,12 @@ end)
 
 test('chat full-window: closing the timeline window directly leaves an empty buffer, not the compose scratch', function()
   local fix = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
   preload()
 
   local origin_win, origin_buf = only_empty_buffer()
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local compose_win = vim.api.nvim_get_current_win()
   local wins = vim.api.nvim_tabpage_list_wins(0)
   local timeline_win = wins[1] == compose_win and wins[2] or wins[1]
@@ -4632,7 +4632,7 @@ test('chat split: a named, textured, modified or second buffer keeps the three-w
   local function split_geometry(what)
     local origin_win = vim.api.nvim_get_current_win()
     local origin_buf = vim.api.nvim_win_get_buf(origin_win)
-    vim.cmd('GcMailChat imd-city')
+    vim.cmd('GcMailChat demo-city')
     local compose_win = vim.api.nvim_get_current_win()
     assert(compose_win ~= origin_win, what .. ': cursor in compose box')
     eq(vim.api.nvim_get_mode().mode, 'n', what .. ': normal mode in compose box')
@@ -4673,7 +4673,7 @@ test('chat split: a named, textured, modified or second buffer keeps the three-w
   for name, mutate in pairs(cases) do
     reset()
     local fix = conversation_fixture()
-    write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+    write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
     gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
     preload()
     only_empty_buffer()
@@ -4689,7 +4689,7 @@ test('chat split: an extra window keeps the split geometry, not full-size', func
     setup_extra()
     eq(#vim.api.nvim_tabpage_list_wins(0), 2, what .. ': two windows before open')
     vim.api.nvim_set_current_win(origin_win)
-    vim.cmd('GcMailChat imd-city')
+    vim.cmd('GcMailChat demo-city')
     local compose_win = vim.api.nvim_get_current_win()
     assert(compose_win ~= origin_win, what .. ': cursor in compose box')
     local wins = vim.api.nvim_tabpage_list_wins(0)
@@ -4729,7 +4729,7 @@ test('chat split: an extra window keeps the split geometry, not full-size', func
   for name, setup_extra in pairs(cases) do
     reset()
     local fix = conversation_fixture()
-    write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+    write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
     gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
     preload()
     only_empty_buffer()
@@ -4741,7 +4741,7 @@ end)
 -- takeover) with the conversation fixture and returns its windows.
 local function resize_chat(with, opts)
   local fix = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   gc_mail.setup(vim.tbl_extend('force', { state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY,
     chat_mark_read = false }, opts or {}))
   preload()
@@ -4758,7 +4758,7 @@ local function resize_chat(with, opts)
   vim.api.nvim_set_current_win(kept)
   buffer({ 'work in progress' })
   local origin_win = vim.api.nvim_get_current_win()
-  vim.cmd('GcMailChat imd-city' .. (with and (' ' .. with) or ''))
+  vim.cmd('GcMailChat demo-city' .. (with and (' ' .. with) or ''))
   local wins = { origin = origin_win, compose = vim.api.nvim_get_current_win() }
   for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
     if w ~= origin_win and w ~= wins.compose then
@@ -4794,7 +4794,7 @@ end)
 test('chat resize: an open beside another window clamps to the origin window, not the editor', function()
   vim.o.columns = 120
   local fix = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
   preload()
   vim.cmd('silent! tabonly!')
@@ -4813,7 +4813,7 @@ test('chat resize: an open beside another window clamps to the origin window, no
   vim.api.nvim_win_set_width(origin, 80)
   eq(vim.api.nvim_win_get_width(origin), 80, 'the origin starts at 80 of the 120 columns')
   vim.api.nvim_set_current_win(origin)
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local compose = vim.api.nvim_get_current_win()
   local timeline
   for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
@@ -4836,7 +4836,7 @@ end)
 local function resize_chat_left_of_other()
   vim.o.columns = 160
   local fix = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
   preload()
   vim.cmd('silent! tabonly!')
@@ -4853,7 +4853,7 @@ local function resize_chat_left_of_other()
   vim.cmd('vsplit')
   local origin = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_width(other, 40)
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local wins = { origin = origin, other = other, compose = vim.api.nvim_get_current_win() }
   for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
     if w ~= origin and w ~= other and w ~= wins.compose then
@@ -4969,7 +4969,7 @@ test('chat resize: the full-size open is unaffected by a remembered width', func
 
   local _, empty_buf = only_empty_buffer()
   local full_width = vim.api.nvim_win_get_width(vim.api.nvim_get_current_win())
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local compose_win = vim.api.nvim_get_current_win()
   local timeline_win = vim.api.nvim_tabpage_list_wins(0)[1] == compose_win
     and vim.api.nvim_tabpage_list_wins(0)[2] or vim.api.nvim_tabpage_list_wins(0)[1]
@@ -4997,7 +4997,7 @@ test('chat resize: a resized compose height is remembered in the split and full-
   close_chat(wins)
 
   only_empty_buffer()
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local compose_win = vim.api.nvim_get_current_win()
   eq(vim.api.nvim_win_get_height(compose_win), 6, 'the full-size chat reopens at the remembered height')
   vim.api.nvim_win_set_height(compose_win, 8)
@@ -5008,7 +5008,7 @@ test('chat resize: a resized compose height is remembered in the split and full-
   vim.api.nvim_feedkeys('q', 'x', false)
 
   only_empty_buffer()
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   eq(vim.api.nvim_win_get_height(vim.api.nvim_get_current_win()), 8, 'a full-size resize is remembered too')
   compose_win = vim.api.nvim_get_current_win()
   timeline_win = vim.api.nvim_tabpage_list_wins(0)[1] == compose_win
@@ -5020,11 +5020,11 @@ end)
 test('chat resize: closing the timeline of a full-size chat does not remember the expanded compose height', function()
   vim.o.columns = 120
   local fix = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
   preload()
   local _, origin_buf = only_empty_buffer()
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local compose_win = vim.api.nvim_get_current_win()
   eq(vim.api.nvim_win_get_height(compose_win), 3, 'opens at chat_compose_height')
   local wins = vim.api.nvim_tabpage_list_wins(0)
@@ -5036,7 +5036,7 @@ test('chat resize: closing the timeline of a full-size chat does not remember th
     return #ws == 1 and vim.api.nvim_win_get_buf(ws[1]) == origin_buf
   end)
 
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   compose_win = vim.api.nvim_get_current_win()
   eq(vim.api.nvim_win_get_height(compose_win), 3,
     'reopens at chat_compose_height, not the height the surviving compose window expanded to')
@@ -5100,11 +5100,11 @@ end)
 
 test('<Space>ms in normal mode queues to mayor; typing ms in insert mode, <C-s> and <CR> queue nothing', function()
   local fix = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY })
   preload()
 
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local compose_win = vim.api.nvim_get_current_win()
   local compose_buf = vim.api.nvim_win_get_buf(compose_win)
   local timeline_buf = nil
@@ -5156,10 +5156,10 @@ test('<Space>ms in normal mode queues to mayor; typing ms in insert mode, <C-s> 
     created_at = os.date('!%Y-%m-%dT%H:%M:%SZ', os.time()),
     labels = {},
   }
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', vim.json.encode(updated_fixture))
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', vim.json.encode(updated_fixture))
 
   wait('sent and drained', drained)
-  eq(recorded_argv(), { '--city', '/srv/imd-city', 'mail', 'send', 'mayor', '-s', 'hello mayor',
+  eq(recorded_argv(), { '--city', '/srv/demo-city', 'mail', 'send', 'mayor', '-s', 'hello mayor',
     '-m', 'hello mayor\nbody line', '--notify' }, 'exact argv sent')
 
   wait('sending… line gone and message shows once', function()
@@ -5191,10 +5191,10 @@ test('<Space>ms in normal mode queues to mayor; typing ms in insert mode, <C-s> 
     created_at = os.date('!%Y-%m-%dT%H:%M:%SZ', os.time()),
     labels = {},
   }
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', vim.json.encode(updated_fixture))
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', vim.json.encode(updated_fixture))
 
   wait('second sent and drained', drained)
-  eq(recorded_argv(), { '--city', '/srv/imd-city', 'mail', 'send', 'mayor', '-s', 'second test',
+  eq(recorded_argv(), { '--city', '/srv/demo-city', 'mail', 'send', 'mayor', '-s', 'second test',
     '-m', 'second test\nsecond body', '--notify' }, 'exact argv for second send')
 
   wait('second sending… line gone and message shows', function()
@@ -5205,11 +5205,11 @@ end)
 
 test('a failed send (FAKE_GC_FAIL_TIMES) shows ## you · queued during retries, and ## you · failed: after last retry', function()
   reset({ FAKE_GC_FAIL_TIMES = '1' })
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', '[]')
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = { 5000, 5000 } })
   preload()
 
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local compose_win = vim.api.nvim_get_current_win()
   local compose_buf = vim.api.nvim_win_get_buf(compose_win)
   local timeline_buf = nil
@@ -5234,10 +5234,10 @@ test('a failed send (FAKE_GC_FAIL_TIMES) shows ## you · queued during retries, 
   end)
 
   reset({ FAKE_GC_FAIL_TIMES = '99' })
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', '[]')
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = { 20 } })
   preload()
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
     local b = vim.api.nvim_win_get_buf(w)
     if vim.api.nvim_buf_get_name(b):match('/chat/') then
@@ -5261,13 +5261,13 @@ test('RS6: refused mark-read keeps dot, is called exactly once, and does not loo
   local history = require('gc_mail.history')
   history.reset()
   local fix = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   write(vim.env.FAKE_GC_MAIL .. '/mark-read.exit', '1\n')
   write(vim.env.FAKE_GC_MAIL .. '/mark-read.stderr', 'fake mark-read error\n')
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = true })
   preload()
 
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local timeline_buf = nil
   for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
     local b = vim.api.nvim_win_get_buf(w)
@@ -5332,14 +5332,14 @@ end
 
 test('RS4: u in the chat keeps the message unread with the default chat_mark_read until the chat is left', function()
   local fix, _, t1, t2 = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   acted('mark-read', 'tc-wisp-m2')
   acted('mark-unread', 'tc-wisp-m3')
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = true })
   preload()
 
   local chat_mod = require('gc_mail.chat')
-  local chat = chat_mod.open('imd-city', 'mayor')
+  local chat = chat_mod.open('demo-city', 'mayor')
   local win = chat.timeline_win
   local stamp = os.date('%H:%M', t2)
   wait('history rendered', function()
@@ -5381,14 +5381,14 @@ end)
 
 test('RS5: a load while a mark-read is pending keeps the local read value', function()
   local fix, _, t1 = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   acted('mark-read', 'tc-wisp-m2')
   write(vim.env.FAKE_GC_MAIL .. '/mark-read.delay', '0.8\n')
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = true })
   preload()
 
   local chat_mod = require('gc_mail.chat')
-  local chat = chat_mod.open('imd-city', 'mayor')
+  local chat = chat_mod.open('demo-city', 'mayor')
   local win = chat.timeline_win
   local stamp = os.date('%H:%M', t1)
   wait('mark-read started', function()
@@ -5407,14 +5407,14 @@ end)
 
 test('RS5 and RS6: a refused mark-read is not retried until a load shows the message read', function()
   local fix, _, t1 = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   write(vim.env.FAKE_GC_MAIL .. '/mark-read.exit', '1\n')
   write(vim.env.FAKE_GC_MAIL .. '/mark-read.stderr', 'fake mark-read error\n')
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = true })
   preload()
 
   local chat_mod = require('gc_mail.chat')
-  local chat = chat_mod.open('imd-city', 'mayor')
+  local chat = chat_mod.open('demo-city', 'mayor')
   local win = chat.timeline_win
   local stamp = os.date('%H:%M', t1)
   local function dot()
@@ -5437,7 +5437,7 @@ test('RS5 and RS6: a refused mark-read is not retried until a load shows the mes
       table.insert(m.labels, 'read')
     end
   end
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', vim.json.encode(read_fix))
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', vim.json.encode(read_fix))
   vim.api.nvim_feedkeys('R', 'x', false)
   wait('the dot is gone', function()
     return not dot()
@@ -5445,7 +5445,7 @@ test('RS5 and RS6: a refused mark-read is not retried until a load shows the mes
   eq(read_calls('tc-wisp-m2'), 1, 'still not retried')
   -- Unread again in gc: with the record gone it is passed once more
   vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/mark-read.exit')
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   vim.api.nvim_feedkeys('R', 'x', false)
   wait('passed again', function()
     return read_calls('tc-wisp-m2') == 2
@@ -5455,14 +5455,14 @@ end)
 
 test('RS4: u with a second chat open in another tab page keeps the message unread through window moves', function()
   local fix, _, _, t2 = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   acted('mark-read', 'tc-wisp-m2')
   acted('mark-unread', 'tc-wisp-m3')
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = true })
   preload()
 
   local chat_mod = require('gc_mail.chat')
-  local chat = chat_mod.open('imd-city', 'mayor')
+  local chat = chat_mod.open('demo-city', 'mayor')
   local win = chat.timeline_win
   local stamp = os.date('%H:%M', t2)
   wait('history rendered', function()
@@ -5473,7 +5473,7 @@ test('RS4: u with a second chat open in another tab page keeps the message unrea
   end)
 
   vim.cmd('tabnew')
-  local other = chat_mod.open('imd-city', 'planner')
+  local other = chat_mod.open('demo-city', 'planner')
   assert(other, 'second chat opened')
   vim.cmd('tabprevious')
   vim.api.nvim_set_current_win(win)
@@ -5509,7 +5509,7 @@ end)
 
 test('RS2: a u that a later read on the message made stale takes the state from gc', function()
   local fix, _, _, t2 = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   acted('mark-unread', 'tc-wisp-m3')
   write(vim.env.FAKE_GC_MAIL .. '/mark-unread.delay', '0.6\n')
   acted('mark-read', 'tc-wisp-m3')
@@ -5517,7 +5517,7 @@ test('RS2: a u that a later read on the message made stale takes the state from 
   preload()
 
   local chat_mod = require('gc_mail.chat')
-  local chat = chat_mod.open('imd-city', 'mayor')
+  local chat = chat_mod.open('demo-city', 'mayor')
   local win = chat.timeline_win
   local stamp = os.date('%H:%M', t2)
   wait('history rendered', function()
@@ -5541,7 +5541,7 @@ end)
 
 test('RS4 and RS2: a stale mark-unread answer after the chat was left drops the record', function()
   local fix, _, _, t2 = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   acted('mark-unread', 'tc-wisp-m3')
   write(vim.env.FAKE_GC_MAIL .. '/mark-unread.delay', '0.6\n')
   acted('mark-read', 'tc-wisp-m3')
@@ -5549,7 +5549,7 @@ test('RS4 and RS2: a stale mark-unread answer after the chat was left drops the 
   preload()
 
   local chat_mod = require('gc_mail.chat')
-  local chat = chat_mod.open('imd-city', 'mayor')
+  local chat = chat_mod.open('demo-city', 'mayor')
   local win = chat.timeline_win
   local stamp = os.date('%H:%M', t2)
   wait('history rendered', function()
@@ -5573,7 +5573,7 @@ test('RS4 and RS2: a stale mark-unread answer after the chat was left drops the 
       m.labels = {}
     end
   end
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', vim.json.encode(unread))
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', vim.json.encode(unread))
   vim.wait(1000)
   local before = read_calls('tc-wisp-m3')
   -- The stale unread record is gone: entering the chat passes the message
@@ -5602,12 +5602,12 @@ end
 
 test('RS6: a refused u on a message that was unread keeps its dot, with chat_mark_read false', function()
   local fix, _, t1 = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   refuse_unread()
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
   preload()
 
-  local chat = require('gc_mail.chat').open('imd-city', 'mayor')
+  local chat = require('gc_mail.chat').open('demo-city', 'mayor')
   local win = chat.timeline_win
   local stamp = os.date('%H:%M', t1)
   local function dot()
@@ -5632,7 +5632,7 @@ test('RS6: a refused u on a message that was unread keeps its dot, with chat_mar
       table.insert(m.labels, 'read')
     end
   end
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', vim.json.encode(read_fix))
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', vim.json.encode(read_fix))
   vim.api.nvim_feedkeys('R', 'x', false)
   wait('the load decides again', function()
     return not dot()
@@ -5643,13 +5643,13 @@ end)
 
 test('RS6: a refused u on a message that was read shows it read with no extra mark-read call', function()
   local fix, _, _, t2 = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   acted('mark-read', 'tc-wisp-m2')
   refuse_unread()
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = true })
   preload()
 
-  local chat = require('gc_mail.chat').open('imd-city', 'mayor')
+  local chat = require('gc_mail.chat').open('demo-city', 'mayor')
   local win = chat.timeline_win
   local stamp = os.date('%H:%M', t2)
   wait('history rendered and tc-wisp-m2 marked read', function()
@@ -5672,13 +5672,13 @@ end)
 
 test('RS6: with chat_mark_read true a refused u on a message that was unread keeps its dot and is not marked read', function()
   local fix, _, _, t2 = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   acted('mark-read', 'tc-wisp-m2')
   acted('mark-unread', 'tc-wisp-m3')
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = true })
   preload()
 
-  local chat = require('gc_mail.chat').open('imd-city', 'mayor')
+  local chat = require('gc_mail.chat').open('demo-city', 'mayor')
   local win = chat.timeline_win
   local stamp = os.date('%H:%M', t2)
   local function dot()
@@ -5718,13 +5718,13 @@ end)
 
 test('RS4 and RS6: a refusal that arrives after the chat was left leaves no record', function()
   local fix, _, _, t2 = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   refuse_unread()
   raw_answer('mark-unread', 'delay', '0.6\n')
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
   preload()
 
-  local chat = require('gc_mail.chat').open('imd-city', 'mayor')
+  local chat = require('gc_mail.chat').open('demo-city', 'mayor')
   local win = chat.timeline_win
   local stamp = os.date('%H:%M', t2)
   local function dot()
@@ -5748,8 +5748,8 @@ test('RS4 and RS6: a refusal that arrives after the chat was left leaves no reco
       m.labels = {}
     end
   end
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', vim.json.encode(unread))
-  raw_answer('bd-list', 'delay', '1\n', 'imd-city')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', vim.json.encode(unread))
+  raw_answer('bd-list', 'delay', '1\n', 'demo-city')
   vim.api.nvim_set_current_win(win)
   vim.api.nvim_feedkeys('R', 'x', false)
   vim.api.nvim_set_current_win(chat.origin)
@@ -5762,14 +5762,14 @@ end)
 
 test('RS5: the load after a send keeps a pending mark-read from bringing the dot back', function()
   local fix, _, t1 = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   acted('mark-read', 'tc-wisp-m2')
   write(vim.env.FAKE_GC_MAIL .. '/mark-read.delay', '1.0\n')
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = true })
   preload()
 
   local chat_mod = require('gc_mail.chat')
-  local chat = chat_mod.open('imd-city', 'mayor')
+  local chat = chat_mod.open('demo-city', 'mayor')
   local win = chat.timeline_win
   local stamp = os.date('%H:%M', t1)
   local function dot()
@@ -5800,13 +5800,13 @@ end)
 
 test('RS5: a u during a load that a later R joined is not undone by the older snapshot', function()
   local fix, _, _, t2 = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   acted('mark-unread', 'tc-wisp-m3')
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
   preload()
 
   local chat_mod = require('gc_mail.chat')
-  local chat = chat_mod.open('imd-city', 'mayor')
+  local chat = chat_mod.open('demo-city', 'mayor')
   local win = chat.timeline_win
   local stamp = os.date('%H:%M', t2)
   wait('history rendered', function()
@@ -5819,7 +5819,7 @@ test('RS5: a u during a load that a later R joined is not undone by the older sn
     return list_calls() == 1
   end)
   vim.wait(300)
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.delay', '0.8\n')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.delay', '0.8\n')
   local loads = list_calls()
   vim.api.nvim_set_current_win(chat.compose_win)
   vim.api.nvim_buf_set_lines(chat.compose_buf, 0, -1, false, { 'hello', 'body' })
@@ -5863,7 +5863,7 @@ end)
 
 test('RS1: a mark-read answer that a later u made stale leaves the message unread', function()
   local fix, _, t1 = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   acted('mark-read', 'tc-wisp-m2')
   write(vim.env.FAKE_GC_MAIL .. '/mark-read.delay', '0.6\n')
   acted('mark-unread', 'tc-wisp-m2')
@@ -5871,7 +5871,7 @@ test('RS1: a mark-read answer that a later u made stale leaves the message unrea
   preload()
 
   local chat_mod = require('gc_mail.chat')
-  local chat = chat_mod.open('imd-city', 'mayor')
+  local chat = chat_mod.open('demo-city', 'mayor')
   local win = chat.timeline_win
   local stamp = os.date('%H:%M', t1)
   wait('history rendered', function()
@@ -5892,13 +5892,13 @@ end)
 
 test('RS5: a message marked unread outside the chat is passed again on the next reload', function()
   local fix = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   acted('mark-read', 'tc-wisp-m2')
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = true })
   preload()
 
   local chat_mod = require('gc_mail.chat')
-  local chat = chat_mod.open('imd-city', 'mayor')
+  local chat = chat_mod.open('demo-city', 'mayor')
   wait('marked read', function()
     return read_calls('tc-wisp-m2') == 1
   end)
@@ -5915,16 +5915,16 @@ test('RS5: a message marked unread outside the chat is passed again on the next 
 end)
 
 test('two drafts of one chat kept from two tab pages both come back', function()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', '[]')
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
   preload()
   local chat_mod = require('gc_mail.chat')
 
   vim.cmd('tabnew')
-  local chat1 = chat_mod.open('imd-city', 'mayor')
+  local chat1 = chat_mod.open('demo-city', 'mayor')
   vim.api.nvim_buf_set_lines(chat1.compose_buf, 0, -1, false, { 'draft one' })
   vim.cmd('tabnew')
-  local chat2 = chat_mod.open('imd-city', 'mayor')
+  local chat2 = chat_mod.open('demo-city', 'mayor')
   assert(chat2.compose_buf ~= chat1.compose_buf, 'own compose buffer per tab page')
   vim.api.nvim_buf_set_lines(chat2.compose_buf, 0, -1, false, { 'draft two' })
   chat_mod.close(chat1)
@@ -5934,10 +5934,10 @@ test('two drafts of one chat kept from two tab pages both come back', function()
 
   local seen = {}
   vim.cmd('tabnew')
-  local chat3 = chat_mod.open('imd-city', 'mayor')
+  local chat3 = chat_mod.open('demo-city', 'mayor')
   seen[#seen + 1] = vim.api.nvim_buf_get_lines(chat3.compose_buf, 0, -1, false)[1]
   vim.cmd('tabnew')
-  local chat4 = chat_mod.open('imd-city', 'mayor')
+  local chat4 = chat_mod.open('demo-city', 'mayor')
   seen[#seen + 1] = vim.api.nvim_buf_get_lines(chat4.compose_buf, 0, -1, false)[1]
   table.sort(seen)
   eq(seen, { 'draft one', 'draft two' }, 'each reopening gets a kept draft')
@@ -5949,13 +5949,13 @@ test('two drafts of one chat kept from two tab pages both come back', function()
 end)
 
 test('chat opened in a second tab does not share compose buffer or close first tab windows', function()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', '[]')
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY })
   preload()
 
   vim.cmd('tabnew')
   local tab1 = vim.api.nvim_get_current_tabpage()
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local tab1_wins = #vim.api.nvim_tabpage_list_wins(tab1)
   eq(tab1_wins, 3, 'tab1 has 3 windows')
 
@@ -5968,13 +5968,13 @@ test('chat opened in a second tab does not share compose buffer or close first t
     end
   end
   vim.api.nvim_feedkeys('q', 'x', false)
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   eq(vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win()), kept_buf, 'kept draft comes back in tab 1')
   eq(#vim.api.nvim_tabpage_list_wins(tab1), 3, 'tab1 has 3 windows again')
 
   vim.cmd('tabnew')
   local tab2 = vim.api.nvim_get_current_tabpage()
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local tab2_wins = #vim.api.nvim_tabpage_list_wins(tab2)
   eq(tab2_wins, 3, 'tab2 has 3 windows')
   assert(vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win()) ~= kept_buf, 'tab 2 has its own compose buffer')
@@ -5996,11 +5996,11 @@ test('chat opened in a second tab does not share compose buffer or close first t
 end)
 
 test('all chat compose and timeline buffer mappings have desc', function()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', '[]')
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY })
   preload()
 
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local compose_win = vim.api.nvim_get_current_win()
   local compose_buf = vim.api.nvim_win_get_buf(compose_win)
   local timeline_buf = nil
@@ -6060,12 +6060,12 @@ end)
 
 test('RS3: with chat_mark_read true the unread message is marked read once when current, not twice; with false, no call', function()
   local fix = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   acted('mark-read', 'tc-wisp-m2')
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = true })
   preload()
 
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local timeline_buf = nil
   for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
     local b = vim.api.nvim_win_get_buf(w)
@@ -6097,7 +6097,7 @@ test('RS3: with chat_mark_read true the unread message is marked read once when 
     return text:find('●', 1, true) == nil
   end)
 
-  require('gc_mail.chat').render(require('gc_mail.chat').open('imd-city', 'mayor'))
+  require('gc_mail.chat').render(require('gc_mail.chat').open('demo-city', 'mayor'))
   vim.wait(100)
   mark_calls = 0
   for _, call in ipairs(mail_calls()) do
@@ -6108,10 +6108,10 @@ test('RS3: with chat_mark_read true the unread message is marked read once when 
   eq(mark_calls, 1, 'not called twice on re-render')
 
   reset()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
   preload()
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   vim.wait(200)
   mark_calls = 0
   for _, call in ipairs(mail_calls()) do
@@ -6123,11 +6123,11 @@ test('RS3: with chat_mark_read true the unread message is marked read once when 
 end)
 
 test('q closes both windows and keeps non-empty compose text for next open; <Space>mc reopens last chat', function()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', '[]')
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY })
   preload()
 
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local compose_win = vim.api.nvim_get_current_win()
   local compose_buf = vim.api.nvim_win_get_buf(compose_win)
   local timeline_win = nil
@@ -6166,12 +6166,12 @@ test('q closes both windows and keeps non-empty compose text for next open; <Spa
 end)
 
 test('chat focus: q from the compose box closes both windows like q in the timeline and keeps the draft', function()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', '[]')
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY })
   preload()
 
   local origin_win = vim.api.nvim_get_current_win()
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local compose_win = vim.api.nvim_get_current_win()
   local compose_buf = vim.api.nvim_win_get_buf(compose_win)
   local timeline_win = nil
@@ -6191,7 +6191,7 @@ test('chat focus: q from the compose box closes both windows like q in the timel
   eq(vim.api.nvim_win_is_valid(compose_win), false, 'compose window closed from compose q')
   eq(vim.api.nvim_get_current_win(), origin_win, 'focus back in the origin window')
 
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local new_compose_buf = vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win())
   eq(vim.api.nvim_buf_get_lines(new_compose_buf, 0, -1, false), { 'draft from compose', 'line 2' }, 'non-empty draft returns on reopen')
 
@@ -6214,14 +6214,14 @@ end)
 
 test('chat focus: <C-j>/<C-k> move between timeline and compose and a u-held id stays held across those moves (RS4)', function()
   local fix, _, _, t2 = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   acted('mark-read', 'tc-wisp-m2')
   acted('mark-unread', 'tc-wisp-m3')
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = true })
   preload()
 
   local chat_mod = require('gc_mail.chat')
-  local chat = chat_mod.open('imd-city', 'mayor')
+  local chat = chat_mod.open('demo-city', 'mayor')
   local win = chat.timeline_win
   local stamp = os.date('%H:%M', t2)
   wait('history rendered', function()
@@ -6274,12 +6274,12 @@ end)
 
 test('chat navigation: ]m/[m walk the three message headings and stop at the ends; G jumps to latest and follows', function()
   local fix = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
   preload()
 
   local chat_mod = require('gc_mail.chat')
-  local chat = chat_mod.open('imd-city', 'mayor')
+  local chat = chat_mod.open('demo-city', 'mayor')
   local win = chat.timeline_win
   wait('three messages rendered', function()
     local n = 0
@@ -6325,11 +6325,11 @@ test('chat navigation: ]m/[m walk the three message headings and stop at the end
 end)
 
 test('chat compose: a configured send key keeps sending where it meets a close or focus key', function()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', '[]')
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_send_keys = { '<C-j>' } })
   preload()
 
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local compose_win = vim.api.nvim_get_current_win()
   local compose_buf = vim.api.nvim_win_get_buf(compose_win)
 
@@ -6346,11 +6346,11 @@ test('chat compose: a configured send key keeps sending where it meets a close o
 
   -- A send key on the close key: q in the compose box sends and the chat stays open.
   reset()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', '[]')
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_send_keys = { 'q' } })
   preload()
 
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   compose_win = vim.api.nvim_get_current_win()
   compose_buf = vim.api.nvim_win_get_buf(compose_win)
   local timeline_win = nil
@@ -6377,11 +6377,11 @@ test('chat compose: a configured send key keeps sending where it meets a close o
   -- A send key that starts with a shared key: the shared mapping is skipped
   -- so the longer send key stays reachable.
   reset()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', '[]')
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_send_keys = { 'qs' } })
   preload()
 
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   compose_win = vim.api.nvim_get_current_win()
   compose_buf = vim.api.nvim_win_get_buf(compose_win)
   timeline_win = nil
@@ -6408,11 +6408,11 @@ test('chat compose: a configured send key keeps sending where it meets a close o
 end)
 
 test('chat compose: the statusline only advertises close and focus keys that are actually mapped', function()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', '[]')
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY })
   preload()
 
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local compose_win = vim.api.nvim_get_current_win()
   local st = vim.wo[compose_win].statusline
   assert(st:find('q close', 1, true), 'the default statusline advertises q close: ' .. st)
@@ -6420,11 +6420,11 @@ test('chat compose: the statusline only advertises close and focus keys that are
 
   -- A send key on the close key: the statusline stops advertising q close.
   reset()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', '[]')
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_send_keys = { 'q' } })
   preload()
 
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   compose_win = vim.api.nvim_get_current_win()
   st = vim.wo[compose_win].statusline
   assert(st:find('q send', 1, true), 'the send key stays advertised: ' .. st)
@@ -6433,11 +6433,11 @@ test('chat compose: the statusline only advertises close and focus keys that are
 
   -- A send key starting with a focus key: only the other half is advertised.
   reset()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', '[]')
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_send_keys = { '<C-j>s' } })
   preload()
 
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   compose_win = vim.api.nvim_get_current_win()
   st = vim.wo[compose_win].statusline
   assert(st:find('q close', 1, true), 'q close stays advertised: ' .. st)
@@ -6446,11 +6446,11 @@ test('chat compose: the statusline only advertises close and focus keys that are
 end)
 
 test('chat compose: G keeps Vim its own motion in the draft and never leaves the compose box', function()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', '[]')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', '[]')
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY })
   preload()
 
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local compose_win = vim.api.nvim_get_current_win()
   local compose_buf = vim.api.nvim_win_get_buf(compose_win)
 
@@ -6466,12 +6466,12 @@ end)
 
 test('timeline keys: <CR> opens message, t opens thread, u marks unread, R reloads', function()
   local fix, past, t1, t2 = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   acted('mark-unread', 'tc-wisp-m3')
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
   preload()
 
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local timeline_win = nil
   for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
     local b = vim.api.nvim_win_get_buf(w)
@@ -6489,7 +6489,7 @@ test('timeline keys: <CR> opens message, t opens thread, u marks unread, R reloa
   vim.api.nvim_feedkeys(vim.keycode('<CR>'), 'x', false)
   wait('message view opened', function()
     local b = vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win())
-    return vim.api.nvim_buf_get_name(b):match('gc%-mail://imd%-city/tc%-wisp%-m1$') ~= nil
+    return vim.api.nvim_buf_get_name(b):match('gc%-mail://demo%-city/tc%-wisp%-m1$') ~= nil
   end)
   vim.cmd('close')
 
@@ -6498,7 +6498,7 @@ test('timeline keys: <CR> opens message, t opens thread, u marks unread, R reloa
   vim.api.nvim_feedkeys('t', 'x', false)
   wait('thread view opened', function()
     local b = vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win())
-    return vim.api.nvim_buf_get_name(b):match('gc%-mail://imd%-city/thread/thread%-1a2b3c$') ~= nil
+    return vim.api.nvim_buf_get_name(b):match('gc%-mail://demo%-city/thread/thread%-1a2b3c$') ~= nil
   end)
   vim.cmd('close')
 
@@ -6547,20 +6547,20 @@ local function id_line(kind, id)
   return vim.json.encode({ seq = 1, type = kind, ts = '2026-10-08T10:00:00Z', actor = 'human', subject = id }) .. '\n'
 end
 
--- A chat with mayor in imd-city (a real directory with an empty event log, or
+-- A chat with mayor in demo-city (a real directory with an empty event log, or
 -- none with `no_log`), opened on the conversation fixture, after its first
 -- history load. No background watch; nothing is marked read unless `opts` says so.
 local function live_chat(opts, no_log)
   require('gc_mail.history').reset()
   local fix, past, t1, t2 = conversation_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   gc_mail.setup(vim.tbl_extend('force', { state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY,
     chat_mark_read = false, watch = false }, opts or {}))
   local cities, log = city_dirs()
   if not no_log then
     write(log, '')
   end
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local chat = { cities = cities, log = log, compose_win = vim.api.nvim_get_current_win(), past = past, t1 = t1, t2 = t2,
     fix = fix }
   for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
@@ -6775,7 +6775,7 @@ test('chat reopen: closing scrolled-up reopens with the same message at the top'
   wait('closed', function()
     return not vim.api.nvim_win_is_valid(chat.timeline_win)
   end)
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local win = reopened_timeline()
   assert(win, 'reopened')
   wait('the anchor is back at the top', function()
@@ -6804,8 +6804,8 @@ test('chat reopen: closing at the end reopens following the new end', function()
   local list = vim.json.decode(chat.fix)
   list[#list + 1] = { id = 'tc-wisp-new1', title = 'new arrival', sender = 'mayor', assignee = 'human',
     status = 'open', description = 'new arrival\nfresh body', created_at = os.date('!%Y-%m-%dT%H:%M:%SZ'), labels = {} }
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', vim.json.encode(list))
-  vim.cmd('GcMailChat imd-city')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', vim.json.encode(list))
+  vim.cmd('GcMailChat demo-city')
   local win = reopened_timeline()
   assert(win, 'reopened')
   wait('the new message shows', function()
@@ -6839,8 +6839,8 @@ test('chat reopen: a gone anchor reopens at the end', function()
       kept[#kept + 1] = entry
     end
   end
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', vim.json.encode(kept))
-  vim.cmd('GcMailChat imd-city')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', vim.json.encode(kept))
+  vim.cmd('GcMailChat demo-city')
   local win = reopened_timeline()
   assert(win, 'reopened')
   wait('the anchor is gone', function()
@@ -6879,7 +6879,7 @@ test('chat reopen: closing the timeline window itself keeps the place, with no s
   vim.api.nvim_set_current_win(chat.timeline_win)
   vim.cmd('q')
   wait_chat_closed()
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local win = reopened_timeline()
   assert(win, 'reopened')
   wait('the anchor is back at the top', function()
@@ -6902,7 +6902,7 @@ test('chat reopen: closing the timeline window itself keeps the place, with no s
   end)
   vim.cmd('q')
   wait_chat_closed()
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local win2 = reopened_timeline()
   assert(win2, 'reopened again')
   wait('following the end', function()
@@ -6934,13 +6934,13 @@ test('chat reopen: restoring with scrolloff keeps the same top across reopenings
   local heading = lines_of(chat.timeline_win)[anchor]
   assert(heading:match('^## ') ~= nil, 'an anchor heading')
   -- The open's load is slow, so the scrolloff is set before it answers.
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.delay', '1\n')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.delay', '1\n')
   vim.api.nvim_set_current_win(chat.timeline_win)
   vim.api.nvim_feedkeys('q', 'x', false)
   wait('closed', function()
     return not vim.api.nvim_win_is_valid(chat.timeline_win)
   end)
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local win = reopened_timeline()
   assert(win, 'reopened')
   vim.wo[win].scrolloff = 3
@@ -6960,7 +6960,7 @@ test('chat reopen: restoring with scrolloff keeps the same top across reopenings
   wait('closed again', function()
     return not vim.api.nvim_win_is_valid(win)
   end)
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local win2 = reopened_timeline()
   assert(win2, 'reopened again')
   vim.wo[win2].scrolloff = 3
@@ -6992,13 +6992,13 @@ test('chat reopen: restoring with a huge scrolloff keeps the anchor at the top',
   assert(heading:match('^## ') ~= nil, 'an anchor heading')
   -- The open's load is slow, so the short height and scrolloff are set before
   -- it answers (Neovim clamps scrolloff=999 to half the 6-row height).
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.delay', '1\n')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.delay', '1\n')
   vim.api.nvim_set_current_win(chat.timeline_win)
   vim.api.nvim_feedkeys('q', 'x', false)
   wait('closed', function()
     return not vim.api.nvim_win_is_valid(chat.timeline_win)
   end)
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local win = reopened_timeline()
   assert(win, 'reopened')
   vim.api.nvim_win_set_height(win, 6)
@@ -7021,7 +7021,7 @@ test('chat reopen: restoring with a huge scrolloff keeps the anchor at the top',
   wait('closed again', function()
     return not vim.api.nvim_win_is_valid(win)
   end)
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local win2 = reopened_timeline()
   assert(win2, 'reopened again')
   vim.api.nvim_win_set_height(win2, 6)
@@ -7059,7 +7059,7 @@ test('chat reopen: a scrolloff of half an even height keeps the last heading at 
   for round = 1, 2 do
     -- The open's load is slow, so the short height and scrolloff are set
     -- before it answers.
-    write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.delay', '1\n')
+    write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.delay', '1\n')
     local closing = vim.api.nvim_get_current_win()
     if round == 1 then
       closing = chat.timeline_win
@@ -7069,7 +7069,7 @@ test('chat reopen: a scrolloff of half an even height keeps the last heading at 
     wait('closed', function()
       return not vim.api.nvim_win_is_valid(closing)
     end)
-    vim.cmd('GcMailChat imd-city')
+    vim.cmd('GcMailChat demo-city')
     local win = reopened_timeline()
     assert(win, 'reopened')
     vim.api.nvim_win_set_height(win, 6)
@@ -7101,8 +7101,8 @@ test('chat reopen: moving during a slow open load keeps the view instead of yank
     return not vim.api.nvim_win_is_valid(chat.timeline_win)
   end)
   -- The open's load takes a second: move before it answers.
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.delay', '1\n')
-  vim.cmd('GcMailChat imd-city')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.delay', '1\n')
+  vim.cmd('GcMailChat demo-city')
   local win = reopened_timeline()
   assert(win, 'reopened')
   vim.api.nvim_win_set_height(win, 6)
@@ -7133,9 +7133,9 @@ test('chat reopen: a failed open load drops the anchor, so the next load stays a
   wait('closed', function()
     return not vim.api.nvim_win_is_valid(chat.timeline_win)
   end)
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.exit', '1\n')
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.stderr', 'store unavailable\n')
-  vim.cmd('GcMailChat imd-city')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.exit', '1\n')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.stderr', 'store unavailable\n')
+  vim.cmd('GcMailChat demo-city')
   local win = reopened_timeline()
   assert(win, 'reopened')
   wait('the open load failed', function()
@@ -7144,8 +7144,8 @@ test('chat reopen: a failed open load drops the anchor, so the next load stays a
   local failed_view = view_of_win(win)
   eq({ failed_view.cursor, failed_view.bottom }, { failed_view.last, failed_view.last }, 'at the end meanwhile')
   -- The next successful load (a manual reload) must not yank back.
-  vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.exit')
-  vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.stderr')
+  vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.exit')
+  vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.stderr')
   vim.api.nvim_set_current_win(win)
   vim.api.nvim_feedkeys('R', 'x', false)
   wait('reloaded', function()
@@ -7173,10 +7173,10 @@ test('chat reopen: mail that arrived while closed counts as newer below the rest
   local list = vim.json.decode(chat.fix)
   list[#list + 1] = { id = 'tc-wisp-new1', title = 'new arrival', sender = 'mayor', assignee = 'human',
     status = 'open', description = 'new arrival\nfresh body', created_at = os.date('!%Y-%m-%dT%H:%M:%SZ'), labels = {} }
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', vim.json.encode(list))
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', vim.json.encode(list))
   -- The open's load is slow, so the short height is set before it answers.
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.delay', '1\n')
-  vim.cmd('GcMailChat imd-city')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.delay', '1\n')
+  vim.cmd('GcMailChat demo-city')
   local win = reopened_timeline()
   assert(win, 'reopened')
   vim.api.nvim_win_set_height(win, 6)
@@ -7240,11 +7240,11 @@ test('chat live: after q nothing runs and the watcher stops; an open panel keeps
   eq(require('gc_mail.history').cache[path].by_id['tc-wisp-late'], nil, 'and nothing cached')
 
   -- The panel's subscription outlives the chat's.
-  inbox('imd-city', {})
-  inbox('side city', {})
+  inbox('demo-city', {})
+  inbox('other city', {})
   panel().open()
   listed(chat.cities)
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   wait('the chat loaded', function()
     return bd_list_calls(path) >= 2
   end)
@@ -7273,7 +7273,7 @@ test('chat live: a failing load is said once over every fallback tick and shown,
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false, watch = false })
   local cities, log = city_dirs()
   write(log, '')
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   wait('three failed loads', function()
     return bd_list_calls(cities[1].path) >= 3
   end, 2000)
@@ -7295,7 +7295,7 @@ end)
 local function relist(chat, change)
   local list = vim.json.decode(chat.fix)
   change(list)
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', vim.json.encode(list))
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', vim.json.encode(list))
 end
 
 test('chat live: a load that began before an event never takes back what the event showed', function()
@@ -7304,7 +7304,7 @@ test('chat live: a load that began before an event never takes back what the eve
   local m2 = '## mayor · ' .. os.date('%H:%M', chat.t1)
   local m3 = '## mayor · ' .. os.date('%H:%M', chat.t2)
   -- The answer is read before the events are logged and given a second later
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.delay', '1\n')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.delay', '1\n')
   vim.api.nvim_set_current_win(chat.timeline_win)
   vim.api.nvim_feedkeys('R', 'x', false)
   wait('the slow load started', function()
@@ -7326,7 +7326,7 @@ test('chat live: a load that began before an event never takes back what the eve
     .. table.concat(lines_of(chat.timeline_win), '|'))
 
   -- A load that began after the events lists them: no duplicate
-  vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.delay')
+  vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.delay')
   relist(chat, function(list)
     list[2].labels[#list[2].labels + 1] = 'read'
     list[3].status = 'closed'
@@ -7343,7 +7343,7 @@ test('chat live: a load that began before an event never takes back what the eve
   eq(current(), true, 'as gc lists it')
 
   -- After that, gc's list decides again
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', chat.fix)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', chat.fix)
   vim.api.nvim_feedkeys('R', 'x', false)
   wait('a later load takes gc\'s flags', function()
     return lines_of(chat.timeline_win)[7] == m2 .. ' ●'
@@ -7375,7 +7375,7 @@ for _, case in ipairs({
         end
       end
     end
-    write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.delay', '1\n')
+    write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.delay', '1\n')
     vim.api.nvim_set_current_win(chat.timeline_win)
     vim.api.nvim_feedkeys('R', 'x', false)
     wait('the slow load started', function()
@@ -7431,8 +7431,8 @@ end)
 test('chat live: a failed load after a delivered send is said as an error', function()
   local chat = live_chat()
   local path = chat.cities[1].path
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.exit', '1\n')
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.stderr', 'store unavailable\n')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.exit', '1\n')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.stderr', 'store unavailable\n')
   vim.api.nvim_buf_set_lines(vim.api.nvim_win_get_buf(chat.compose_win), 0, -1, false, { 'my question' })
   vim.api.nvim_set_current_win(chat.compose_win)
   vim.api.nvim_feedkeys(vim.keycode('<Space>ms'), 'x', false)
@@ -7458,12 +7458,12 @@ test('chat status: correspondent, city, liveness and unread count; a narrow wind
   local status = function()
     return vim.wo[chat.timeline_win].statusline
   end
-  eq(status(), ' mayor in imd-city · live · 1 unread ', 'idle, one unread')
+  eq(status(), ' mayor in demo-city · live · 1 unread ', 'idle, one unread')
   eq(vim.wo[chat.compose_win].statusline, ' <Space>ms send · q close · <C-j>/<C-k> focus · above: <CR…',
     'the keys, cut at the chat width')
   append(chat.log, message_line('mail.replied', { id = 'tc-wisp-live1', subject = 'later', body = 'later' }))
   wait('the arrival counts', function()
-    return status() == ' mayor in imd-city · live · 2 unread '
+    return status() == ' mayor in demo-city · live · 2 unread '
   end, 1000)
 
   -- A new width cuts again; neither the timeline nor a cursor moves
@@ -7473,7 +7473,7 @@ test('chat status: correspondent, city, liveness and unread count; a narrow wind
   vim.api.nvim_win_set_width(chat.timeline_win, 24)
   vim.api.nvim_exec_autocmds('WinResized', {})
   wait('cut to 24 columns', function()
-    return status() == ' mayor in imd-city · li…'
+    return status() == ' mayor in demo-city · l…'
   end, 1000)
   eq(vim.api.nvim_buf_get_changedtick(vim.api.nvim_win_get_buf(chat.timeline_win)), tick, 'the timeline was not rendered')
   eq({ vim.api.nvim_win_get_cursor(chat.timeline_win), vim.api.nvim_win_get_cursor(chat.compose_win) }, cursors,
@@ -7481,12 +7481,12 @@ test('chat status: correspondent, city, liveness and unread count; a narrow wind
   vim.api.nvim_win_set_width(chat.timeline_win, 12)
   vim.api.nvim_exec_autocmds('WinResized', {})
   wait('the correspondent stays first', function()
-    return status() == ' mayor in i…'
+    return status() == ' mayor in d…'
   end, 1000)
 
   -- A % in the correspondent shows as itself
-  local other = require('gc_mail.chat').open('imd-city', '50%off')
-  eq(vim.wo[other.timeline_win].statusline, ' 50%%off in imd-city · live ', 'escaped for the statusline')
+  local other = require('gc_mail.chat').open('demo-city', '50%off')
+  eq(vim.wo[other.timeline_win].statusline, ' 50%%off in demo-city · live ', 'escaped for the statusline')
 end)
 
 test('chat status: a send shows sending…, then queued while it retries, then failed', function()
@@ -7501,10 +7501,10 @@ test('chat status: a send shows sending…, then queued while it retries, then f
   vim.api.nvim_set_current_win(chat.compose_win)
   vim.api.nvim_feedkeys(vim.keycode('<Space>ms'), 'x', false)
   wait('sending', function()
-    return status() == ' mayor in imd-city · sending… · live · 1 unread '
+    return status() == ' mayor in demo-city · sending… · live · 1 unread '
   end)
   wait('queued for a retry', function()
-    return status() == ' mayor in imd-city · queued · live · 1 unread '
+    return status() == ' mayor in demo-city · queued · live · 1 unread '
   end)
 
   vim.env.FAKE_GC_FAIL_TIMES = '99'
@@ -7514,9 +7514,9 @@ test('chat status: a send shows sending…, then queued while it retries, then f
   vim.api.nvim_feedkeys(vim.keycode('<Space>ms'), 'x', false)
   -- The send's state outranks liveness and the counts: a long error cuts them
   wait('failed', function()
-    return status():find('^ mayor in imd%-city · failed: ') ~= nil
+    return status():find('^ mayor in demo%-city · failed: ') ~= nil
   end)
-  eq(status(), ' mayor in imd-city · failed: exit 1: gc mail send: store u…', 'the first error line')
+  eq(status(), ' mayor in demo-city · failed: exit 1: gc mail send: store …', 'the first error line')
 end)
 
 test('chat status: a failed load shows stale until a load succeeds', function()
@@ -7525,16 +7525,16 @@ test('chat status: a failed load shows stale until a load succeeds', function()
   local status = function()
     return vim.wo[chat.timeline_win].statusline
   end
-  eq(status(), ' mayor in imd-city · live · 1 unread ', 'live')
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.exit', '1\n')
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.stderr', 'store unavailable\n')
+  eq(status(), ' mayor in demo-city · live · 1 unread ', 'live')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.exit', '1\n')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.stderr', 'store unavailable\n')
   wait('stale', function()
-    return status() == ' mayor in imd-city · stale · 1 unread '
+    return status() == ' mayor in demo-city · stale · 1 unread '
   end, 2000)
-  os.remove(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.exit')
-  os.remove(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.stderr')
+  os.remove(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.exit')
+  os.remove(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.stderr')
   wait('live again', function()
-    return status() == ' mayor in imd-city · live · 1 unread '
+    return status() == ' mayor in demo-city · live · 1 unread '
   end, 2000)
 end)
 
@@ -7547,16 +7547,16 @@ test('chat status: a city with no event log is polling, live once its log is wat
   local status = function()
     return vim.wo[chat.timeline_win].statusline
   end
-  eq(status(), ' mayor in imd-city · polling · 1 unread ', 'no event log to watch')
+  eq(status(), ' mayor in demo-city · polling · 1 unread ', 'no event log to watch')
   local calls = #mail_calls()
   write(chat.log, '')
   require('gc_mail.events').rearm()
   wait('live once the log is armed', function()
-    return status() == ' mayor in imd-city · live · 1 unread '
+    return status() == ' mayor in demo-city · live · 1 unread '
   end, 1000)
   os.remove(chat.log)
   wait('polling once the log is gone', function()
-    return status() == ' mayor in imd-city · polling · 1 unread '
+    return status() == ' mayor in demo-city · polling · 1 unread '
   end, 1000)
   vim.wait(100)
   eq(bd_list_calls(path), 1, 'no history load moved it')
@@ -7575,7 +7575,7 @@ test('chat status: an unreadable queue file shows in the timeline but is no send
   wait('the unreadable file shows', function()
     return shown(chat):find('## you · failed: not a gc-mail message: not JSON', 1, true) ~= nil
   end)
-  eq(status(), ' mayor in imd-city · live · 1 unread ', 'no send state')
+  eq(status(), ' mayor in demo-city · live · 1 unread ', 'no send state')
 
   -- A failed send of the chat is its last send, though the unreadable file sorts after it
   vim.env.FAKE_GC_FAIL_TIMES = '99'
@@ -7585,17 +7585,17 @@ test('chat status: an unreadable queue file shows in the timeline but is no send
   vim.api.nvim_set_current_win(chat.compose_win)
   vim.api.nvim_feedkeys(vim.keycode('<Space>ms'), 'x', false)
   wait('failed', function()
-    return status() == ' mayor in imd-city · failed: exit 1: gc mail send: store u…'
+    return status() == ' mayor in demo-city · failed: exit 1: gc mail send: store …'
   end)
 end)
 
 test('chat is_current: only the current chat of that city and correspondent in this tab page; the watch keeps quiet only then', function()
   local cities, log = watched({ chat_mark_read = false })
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', (conversation_fixture()))
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', (conversation_fixture()))
   seeded(3)
   local chat = require('gc_mail.chat')
   local origin = vim.api.nvim_get_current_win()
-  vim.cmd('GcMailChat imd-city')
+  vim.cmd('GcMailChat demo-city')
   local function notices()
     return #vim.tbl_filter(function(note)
       return note.level == vim.log.levels.INFO
@@ -7651,24 +7651,24 @@ local function bd_mail(id, sender, assignee, title, ago, read)
     created_at = os.date('!%Y-%m-%dT%H:%M:%SZ', os.time() - ago), labels = read and { 'read' } or {}, issue_type = 'message' }
 end
 
--- imd-city: a conversation with the mayor of three messages, two unread, and
--- one with the planner; side-city has no mail at all.
+-- demo-city: a conversation with the mayor of three messages, two unread, and
+-- one with the planner; other-city has no mail at all.
 local function chats_fixture()
   local cities = city_dirs()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', vim.json.encode({
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', vim.json.encode({
     bd_mail('ic-wisp-c1', 'human', 'mayor', 'Deploy question', 3 * 3600, true),
     bd_mail('ic-wisp-c2', 'mayor', 'human', 'Re: Deploy question', 2 * 3600, false),
     bd_mail('ic-wisp-c3', 'mayor', 'human', 'Plan update', 1800, false),
     bd_mail('ic-wisp-c4', 'human', 'planner', 'Plan check', 5 * 3600, true),
   }))
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.side city.json', '[]')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.other city.json', '[]')
   return cities
 end
 
 local CHAT_LINES = {
-  '  2  imd-city  mayor  Plan update  30m ',
-  '     imd-city  planner  Plan check  5h ',
-  '     side-city  mayor  no messages yet ',
+  '  2  demo-city  mayor  Plan update  30m ',
+  '     demo-city  planner  Plan check  5h ',
+  '     other-city  mayor  no messages yet ',
 }
 
 local function chat_timeline_names()
@@ -7685,7 +7685,7 @@ end
 test(':GcMailChats opens at once with loading…, then lists every conversation newest first, one bd list per city', function()
   local cities = chats_fixture()
   vim.env.FAKE_GC_DELAY = nil
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.delay', '0.4\n')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.delay', '0.4\n')
   vim.cmd('GcMailChats')
   local win = vim.api.nvim_get_current_win()
   eq(#floats(), 1, 'the float is open')
@@ -7720,7 +7720,7 @@ test('<CR> in the conversations list closes it and opens the chat of that line',
   vim.api.nvim_win_set_cursor(win, { 2, 0 })
   vim.api.nvim_feedkeys(vim.keycode('<CR>'), 'x', false)
   eq(#floats(), 0, 'the float is closed')
-  eq(chat_timeline_names(), { 'imd-city/chat/planner' }, 'the chat of the planner in imd-city')
+  eq(chat_timeline_names(), { 'demo-city/chat/planner' }, 'the chat of the planner in demo-city')
   vim.cmd('only')
   vim.api.nvim_feedkeys(vim.keycode('<Esc>'), 'x', false)
 
@@ -7732,21 +7732,21 @@ test('<CR> in the conversations list closes it and opens the chat of that line',
   end)
   vim.api.nvim_win_set_cursor(win, { 3, 0 })
   vim.api.nvim_feedkeys(vim.keycode('<CR>'), 'x', false)
-  eq(vim.tbl_contains(chat_timeline_names(), 'side-city/chat/mayor'), true, 'the first chat with side-city mayor')
+  eq(vim.tbl_contains(chat_timeline_names(), 'other-city/chat/mayor'), true, 'the first chat with other-city mayor')
 end)
 
 test('a failed load for one city is said once and the other city still lists', function()
   local cities = chats_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.side city.exit', '1\n')
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.side city.stderr', 'store unavailable\n')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.other city.exit', '1\n')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.other city.stderr', 'store unavailable\n')
   vim.cmd('GcMailChats')
   local win = vim.api.nvim_get_current_win()
   wait('both answered', function()
     return bd_list_calls(cities[1].path) == 1 and bd_list_calls(cities[2].path) == 1 and #lines_of(win) == 3
   end)
   vim.wait(300)
-  eq(lines_of(win), { CHAT_LINES[1], CHAT_LINES[2], '     side-city  cannot load the history ' },
-    'imd-city lists, side-city says it could not load')
+  eq(lines_of(win), { CHAT_LINES[1], CHAT_LINES[2], '     other-city  cannot load the history ' },
+    'demo-city lists, other-city says it could not load')
   local errors = vim.tbl_filter(function(note)
     return note.level == vim.log.levels.ERROR
   end, notes)
@@ -7758,27 +7758,27 @@ end)
 
 test('c in the mailbox float opens the chat with the sender in its city and closes the float', function()
   chats_fixture()
-  inbox('imd-city', { msg('ic-wisp-a1', { from = 'planner', subject = 'from the planner' }) })
-  inbox('side city', {})
+  inbox('demo-city', { msg('ic-wisp-a1', { from = 'planner', subject = 'from the planner' }) })
+  inbox('other city', {})
   local win = mailbox().open()
   settled(win, 1)
   vim.api.nvim_feedkeys('c', 'x', false)
   eq(#floats(), 0, 'the float is closed')
-  eq(chat_timeline_names(), { 'imd-city/chat/planner' }, 'the chat with the sender, in the message city')
+  eq(chat_timeline_names(), { 'demo-city/chat/planner' }, 'the chat with the sender, in the message city')
   -- A message from human opens the chat with its recipient
   vim.cmd('only')
-  local entry = { city = { name = 'imd-city', path = '/srv/imd-city' }, message = msg('ic-wisp-a9', { from = 'human', to = 'builder' }) }
+  local entry = { city = { name = 'demo-city', path = '/srv/demo-city' }, message = msg('ic-wisp-a9', { from = 'human', to = 'builder' }) }
   mailbox().actions.chat(entry)
-  eq(vim.tbl_contains(chat_timeline_names(), 'imd-city/chat/builder'), true, 'a message from human: its recipient')
+  eq(vim.tbl_contains(chat_timeline_names(), 'demo-city/chat/builder'), true, 'a message from human: its recipient')
 end)
 
 test('preview: closing the mailbox over an open chat removes the pane and keeps the chat', function()
   chats_fixture()
-  inbox('imd-city', { msg('ic-wisp-a1', { subject = 'only subject', body = 'only body' }) })
-  inbox('side city', {})
+  inbox('demo-city', { msg('ic-wisp-a1', { subject = 'only subject', body = 'only body' }) })
+  inbox('other city', {})
   gc_mail.config.preview = true
   gc_mail.config.chat_mark_read = false
-  local chat = require('gc_mail.chat').open('imd-city', 'mayor')
+  local chat = require('gc_mail.chat').open('demo-city', 'mayor')
   assert(chat, 'the chat opened')
   local chat_win, chat_buf = chat.compose_win, chat.compose_buf
   local chat_cursor = vim.api.nvim_win_get_cursor(chat_win)
@@ -7820,8 +7820,8 @@ end)
 
 test('c in the panel opens the chat beside its origin window and the panel stays', function()
   local cities = chats_fixture()
-  inbox('imd-city', { msg('ic-wisp-a1', { subject = 'first' }) })
-  inbox('side city', {})
+  inbox('demo-city', { msg('ic-wisp-a1', { subject = 'first' }) })
+  inbox('other city', {})
   buffer({ 'one', 'two' })
   local origin = vim.api.nvim_get_current_win()
   local win = panel().open()
@@ -7829,7 +7829,7 @@ test('c in the panel opens the chat beside its origin window and the panel stays
   settled(win, 1)
   vim.api.nvim_set_current_win(win)
   vim.api.nvim_feedkeys('c', 'x', false)
-  eq(chat_timeline_names(), { 'imd-city/chat/mayor' }, 'the chat with the sender')
+  eq(chat_timeline_names(), { 'demo-city/chat/mayor' }, 'the chat with the sender')
   eq(vim.api.nvim_win_is_valid(win), true, 'the panel stays')
   local timeline
   for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
@@ -7845,17 +7845,17 @@ end)
 
 test('c in the message view opens the chat and keeps the view', function()
   chats_fixture()
-  inbox('imd-city', { msg('ic-wisp-a1', { subject = 'first' }) })
-  inbox('side city', {})
+  inbox('demo-city', { msg('ic-wisp-a1', { subject = 'first' }) })
+  inbox('other city', {})
   acted('read', 'ic-wisp-a1')
   local win = mailbox().open()
   settled(win, 1)
   vim.api.nvim_feedkeys(vim.keycode('<CR>'), 'x', false)
   local view_win = vim.api.nvim_get_current_win()
   local view_buf = vim.api.nvim_win_get_buf(view_win)
-  eq(vim.api.nvim_buf_get_name(view_buf):match('gc%-mail://imd%-city/ic%-wisp%-a1') ~= nil, true, 'the message view')
+  eq(vim.api.nvim_buf_get_name(view_buf):match('gc%-mail://demo%-city/ic%-wisp%-a1') ~= nil, true, 'the message view')
   vim.api.nvim_feedkeys('c', 'x', false)
-  eq(chat_timeline_names(), { 'imd-city/chat/mayor' }, 'the chat opened')
+  eq(chat_timeline_names(), { 'demo-city/chat/mayor' }, 'the chat opened')
   eq(vim.api.nvim_win_is_valid(view_win) and vim.api.nvim_win_get_buf(view_win) == view_buf, true, 'the view stays')
 end)
 
@@ -7880,8 +7880,8 @@ test('every mapping the conversations list and the c key add carries a gc-mail: 
   vim.cmd('GcMailChats')
   every_desc(vim.api.nvim_get_current_buf(), { '<CR>', 'q', '<Esc>' })
   vim.api.nvim_feedkeys('q', 'x', false)
-  inbox('imd-city', { msg('ic-wisp-a1', { subject = 'first' }) })
-  inbox('side city', {})
+  inbox('demo-city', { msg('ic-wisp-a1', { subject = 'first' }) })
+  inbox('other city', {})
   local win = mailbox().open()
   settled(win, 1)
   every_desc(vim.api.nvim_win_get_buf(win), { '<CR>', 'r', 't', 'c', 'm', 'u', 'a', 'd', 'p', 'R', 'q' })
@@ -7912,11 +7912,11 @@ local function found_mail(id, sender, assignee, title, body, ago)
     created_at = os.date('!%Y-%m-%dT%H:%M:%SZ', os.time() - ago), labels = {}, issue_type = 'message' }
 end
 
--- Hits for "markdown": side-city by subject (upper case), imd-city by subject,
+-- Hits for "markdown": other-city by subject (upper case), demo-city by subject,
 -- by sender and by body; one more sent by human, to the reviewer.
 local function search_fixture()
   local cities = city_dirs()
-  local imd = {
+  local demo = {
     found_mail('ic-wisp-s1', 'mayor', 'human', 'Markdown renderer ready', 'it is done', 3600),
     found_mail('ic-wisp-s3', 'markdown-bot', 'human', 'Nightly', 'all green', 2 * 3600),
     found_mail('ic-wisp-s2', 'builder', 'human', 'Weekly build', 'the changelog is in markdown', 3 * 3600),
@@ -7926,17 +7926,17 @@ local function search_fixture()
     found_mail('ic-wisp-s5', 'planner', 'human', 'MARKDOWN spec', 'draft', 1800),
     found_mail('ic-wisp-s6', 'human', 'reviewer', 'A question', 'is the Markdown table fine?', 5 * 3600),
   }
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', vim.json.encode(imd))
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.side city.json', vim.json.encode(side))
-  return cities, imd
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', vim.json.encode(demo))
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.other city.json', vim.json.encode(side))
+  return cities, demo
 end
 
 local SEARCH_LINES = {
-  ' side-city  planner→you  MARKDOWN spec  30m ',
-  ' imd-city  mayor→you  Markdown renderer ready  1h ',
-  ' imd-city  markdown-bot→you  Nightly  2h ',
-  ' imd-city  builder→you  Weekly build  3h ',
-  ' side-city  you→reviewer  A question  5h ',
+  ' other-city  planner→you  MARKDOWN spec  30m ',
+  ' demo-city  mayor→you  Markdown renderer ready  1h ',
+  ' demo-city  markdown-bot→you  Nightly  2h ',
+  ' demo-city  builder→you  Weekly build  3h ',
+  ' other-city  you→reviewer  A question  5h ',
 }
 
 -- The results float for `text`, once it shows `count` lines (the hits arrive city by city).
@@ -7951,7 +7951,7 @@ end
 
 test(':GcMailSearch lists the hits across cities newest first, one bd list per city, case-insensitive', function()
   local cities = search_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.delay', '0.4\n')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.delay', '0.4\n')
   vim.cmd('GcMailSearch markdown')
   local win = vim.api.nvim_get_current_win()
   eq(#floats(), 1, 'the float is open')
@@ -7993,16 +7993,16 @@ test(':GcMailSearch without text is refused', function()
 end)
 
 test('<CR> on a hit shows the message in the render-only view, with no gc mail read', function()
-  local _, imd = search_fixture()
+  local _, demo = search_fixture()
   local win = search_open('markdown')
   vim.api.nvim_win_set_cursor(win, { 2, 0 })
   vim.api.nvim_feedkeys(vim.keycode('<CR>'), 'x', false)
   eq(#floats(), 0, 'the float is closed')
   local buf = vim.api.nvim_get_current_buf()
-  eq(vim.api.nvim_buf_get_name(buf):match('gc%-mail://imd%-city/ic%-wisp%-s1') ~= nil, true, 'the message view')
+  eq(vim.api.nvim_buf_get_name(buf):match('gc%-mail://demo%-city/ic%-wisp%-s1') ~= nil, true, 'the message view')
   local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
   eq(lines[1], '# Markdown renderer ready', 'the title')
-  eq(lines[3], '**From** mayor · **To** human · **City** imd-city · ' .. imd[1].created_at, 'the sender line')
+  eq(lines[3], '**From** mayor · **To** human · **City** demo-city · ' .. demo[1].created_at, 'the sender line')
   eq(lines[#lines], 'it is done', 'the body verbatim')
   eq(vim.bo[buf].filetype, 'markdown', 'a markdown view')
   vim.wait(300)
@@ -8027,12 +8027,12 @@ test('c on a hit opens the chat with its correspondent, the recipient for a mess
   vim.api.nvim_win_set_cursor(win, { 2, 0 })
   vim.api.nvim_feedkeys('c', 'x', false)
   eq(#floats(), 0, 'the float is closed')
-  eq(chat_timeline_names(), { 'imd-city/chat/mayor' }, 'the chat with the sender')
+  eq(chat_timeline_names(), { 'demo-city/chat/mayor' }, 'the chat with the sender')
   vim.cmd('silent! only')
   win = search_open('markdown')
   vim.api.nvim_win_set_cursor(win, { 5, 0 })
   vim.api.nvim_feedkeys('c', 'x', false)
-  eq(vim.tbl_contains(chat_timeline_names(), 'side-city/chat/reviewer'), true, 'the recipient of a message from you')
+  eq(vim.tbl_contains(chat_timeline_names(), 'other-city/chat/reviewer'), true, 'the recipient of a message from you')
   vim.cmd('silent! only')
   -- Without the chat module: said, and the float stays
   package.loaded['gc_mail.chat'] = nil
@@ -8051,8 +8051,8 @@ end)
 
 test('s in the mailbox float and in the panel asks for the text and opens the same results', function()
   local cities = search_fixture()
-  inbox('imd-city', { msg('ic-wisp-a1', { subject = 'first' }) })
-  inbox('side city', {})
+  inbox('demo-city', { msg('ic-wisp-a1', { subject = 'first' }) })
+  inbox('other city', {})
   local asked = {}
   local answer
   local real_input = vim.ui.input
@@ -8097,15 +8097,15 @@ end)
 
 test('a failed load for one city is said once and the other city\'s hits still list', function()
   local cities = search_fixture()
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.side city.exit', '1\n')
-  write(vim.env.FAKE_GC_MAIL .. '/bd-list.side city.stderr', 'store unavailable\n')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.other city.exit', '1\n')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.other city.stderr', 'store unavailable\n')
   vim.cmd('GcMailSearch markdown')
   local win = vim.api.nvim_get_current_win()
   wait('both answered', function()
     return bd_list_calls(cities[1].path) == 1 and bd_list_calls(cities[2].path) == 1 and #lines_of(win) == 4
   end)
   vim.wait(300)
-  eq(lines_of(win), { SEARCH_LINES[2], SEARCH_LINES[3], SEARCH_LINES[4], ' side-city  cannot load the history ' },
+  eq(lines_of(win), { SEARCH_LINES[2], SEARCH_LINES[3], SEARCH_LINES[4], ' other-city  cannot load the history ' },
     'the other city lists, the failed one says so')
   local errors = vim.tbl_filter(function(note)
     return note.level == vim.log.levels.ERROR
@@ -8148,8 +8148,8 @@ end)
 
 test('every mapping of the search results and of the s key carries a gc-mail: desc', function()
   search_fixture()
-  inbox('imd-city', { msg('ic-wisp-a1', { subject = 'first' }) })
-  inbox('side city', { msg('sc-wisp-b1', { subject = 'second' }) })
+  inbox('demo-city', { msg('ic-wisp-a1', { subject = 'first' }) })
+  inbox('other city', { msg('sc-wisp-b1', { subject = 'second' }) })
   local win = search_open('markdown')
   for _, lhs in ipairs({ '<CR>', 'c', 'q', '<Esc>' }) do
     local desc
@@ -8221,30 +8221,30 @@ local function mark_rows(win, list)
   end
 end
 
--- imd-city's inbox: one unread message. Its history: that one, a read one,
--- a closed one, and one Nick sent; side city's history: a read one.
+-- demo-city's inbox: one unread message. Its history: that one, a read one,
+-- a closed one, and one Nick sent; other city's history: a read one.
 local function all_mail_fixture()
   local cities, log = city_dirs()
   write(log, '')
-  inbox('imd-city', { msg('ic-wisp-u1', { subject = 'unread', created_at = '2026-10-07T13:00:00Z' }) })
-  inbox('side city', {})
-  bd_list('imd-city', {
+  inbox('demo-city', { msg('ic-wisp-u1', { subject = 'unread', created_at = '2026-10-07T13:00:00Z' }) })
+  inbox('other city', {})
+  bd_list('demo-city', {
     bead('ic-wisp-u1', { title = 'unread', created_at = '2026-10-07T13:00:00Z' }),
     bead('ic-wisp-r1', { title = 'was read', created_at = '2026-10-07T12:00:00Z', labels = { 'read' } }),
     bead('ic-wisp-c1', { title = 'closed', created_at = '2026-10-07T11:00:00Z', status = 'closed' }),
     bead('ic-wisp-o1', { title = 'to the mayor', sender = 'human', assignee = 'mayor',
       created_at = '2026-10-07T10:00:00Z' }),
   })
-  bd_list('side city', { bead('sc-wisp-r2', { title = 'side read', created_at = '2026-10-07T11:30:00Z',
+  bd_list('other city', { bead('sc-wisp-r2', { title = 'side read', created_at = '2026-10-07T11:30:00Z',
     labels = { 'read' } }) })
   return cities
 end
 
 local ALL_MAIL = {
-  '  ● imd-city  mayor  unread',
-  '    imd-city  mayor  was read',
-  '    side-city  mayor  side read',
-  '  × imd-city  mayor  closed',
+  '  ● demo-city  mayor  unread',
+  '    demo-city  mayor  was read',
+  '    other-city  mayor  side read',
+  '  × demo-city  mayor  closed',
 }
 
 test('H lists read and closed mail to human from the history in both views, one bd list per city; H again lists today\'s set', function()
@@ -8254,7 +8254,7 @@ test('H lists read and closed mail to human from the history in both views, one 
   listed(cities)
   local fwin = mailbox().open()
   settled(fwin, 1)
-  eq(rows(fwin), { '  ● imd-city  mayor  unread' }, 'today\'s set: the unread inbox')
+  eq(rows(fwin), { '  ● demo-city  mayor  unread' }, 'today\'s set: the unread inbox')
   eq(title_of(fwin):find('all mail', 1, true), nil, 'the title does not say all mail')
   press('H')
   wait('all mail in the float', function()
@@ -8269,8 +8269,8 @@ test('H lists read and closed mail to human from the history in both views, one 
   eq({ bd_list_calls(cities[1].path), bd_list_calls(cities[2].path) }, { 1, 1 }, 'one bd list call per city')
   -- H in the panel turns it off for both views.
   panel_key(pwin, 'H')()
-  eq(rows(fwin), { '  ● imd-city  mayor  unread' }, 'the float lists today\'s set again')
-  eq(rows(pwin), { '  ● imd-city  mayor  unread' }, 'and the panel')
+  eq(rows(fwin), { '  ● demo-city  mayor  unread' }, 'the float lists today\'s set again')
+  eq(rows(pwin), { '  ● demo-city  mayor  unread' }, 'and the panel')
   eq(title_of(fwin):find('all mail', 1, true), nil, 'the title too')
   -- On again: the history already loaded, no second load; R in the mode loads it again.
   press('H')
@@ -8288,14 +8288,14 @@ end)
 
 test('a failed history load is said once and all mail shows what the mailbox has', function()
   local cities = all_mail_fixture()
-  raw_answer('bd-list', 'exit', '1', 'side city')
-  raw_answer('bd-list', 'stderr', 'store unavailable\n', 'side city')
+  raw_answer('bd-list', 'exit', '1', 'other city')
+  raw_answer('bd-list', 'stderr', 'store unavailable\n', 'other city')
   preload()
   local fwin = mailbox().open()
   settled(fwin, 1)
   vim.wait(100)
   press('H')
-  wait('imd-city history listed', function()
+  wait('demo-city history listed', function()
     return #rows(fwin) == 3
   end)
   wait('the failure said', function()
@@ -8315,12 +8315,12 @@ end)
 test('x marks lines in both views; a archives exactly the marked ones in one call; a late inbox answer does not bring them back', function()
   local cities, log = city_dirs()
   write(log, '')
-  inbox('imd-city', {
+  inbox('demo-city', {
     msg('ic-wisp-a1', { subject = 'first', created_at = '2026-10-07T13:00:00Z' }),
     msg('ic-wisp-a2', { subject = 'second', created_at = '2026-10-07T12:00:00Z' }),
     msg('ic-wisp-a3', { subject = 'third', created_at = '2026-10-07T11:00:00Z' }),
   })
-  inbox('side city', {})
+  inbox('other city', {})
   local pwin = panel().open()
   settled(pwin, 3)
   listed(cities)
@@ -8328,11 +8328,11 @@ test('x marks lines in both views; a archives exactly the marked ones in one cal
   settled(fwin, 3)
   vim.wait(200)
   mark_rows(fwin, { 1, 3 })
-  local marked = { 'x ● imd-city  mayor  first', '  ● imd-city  mayor  second', 'x ● imd-city  mayor  third' }
+  local marked = { 'x ● demo-city  mayor  first', '  ● demo-city  mayor  second', 'x ● demo-city  mayor  third' }
   eq(rows(fwin), marked, 'x in the first column of the marked lines')
   eq(rows(pwin), marked, 'the panel shows the same marks')
   -- A refresh that answers late, with both messages still in it.
-  raw_answer('inbox', 'delay', '1', 'imd-city')
+  raw_answer('inbox', 'delay', '1', 'demo-city')
   local n = inbox_calls(cities[1].path)
   press('R')
   wait('the refresh started', function()
@@ -8346,11 +8346,11 @@ test('x marks lines in both views; a archives exactly the marked ones in one cal
   end)
   eq(calls_of('archive'), { call('archive', cities[1].path, 'ic-wisp-a1', 'ic-wisp-a3', '--json') },
     'one archive call with exactly the marked ids, in list order')
-  eq(rows(fwin), { '  ● imd-city  mayor  second' }, 'the float')
-  eq(rows(pwin), { '  ● imd-city  mayor  second' }, 'the panel')
+  eq(rows(fwin), { '  ● demo-city  mayor  second' }, 'the float')
+  eq(rows(pwin), { '  ● demo-city  mayor  second' }, 'the panel')
   vim.wait(1500) -- the refresh answers 1 s after it was made
-  eq(rows(fwin), { '  ● imd-city  mayor  second' }, 'the late answer does not bring them back to the float')
-  eq(rows(pwin), { '  ● imd-city  mayor  second' }, 'nor to the panel')
+  eq(rows(fwin), { '  ● demo-city  mayor  second' }, 'the late answer does not bring them back to the float')
+  eq(rows(pwin), { '  ● demo-city  mayor  second' }, 'nor to the panel')
   -- The marks went with their messages: a now acts on the line under the cursor.
   acted('archive', 'ic-wisp-a2')
   press('a')
@@ -8364,13 +8364,13 @@ end)
 
 test('V over three lines then m marks each read with its own call, in order, one at a time; u likewise', function()
   preload()
-  inbox('imd-city', {
+  inbox('demo-city', {
     msg('ic-wisp-a1', { subject = 'one', created_at = '2026-10-07T13:00:00Z' }),
     msg('ic-wisp-a2', { subject = 'two', created_at = '2026-10-07T12:00:00Z' }),
     msg('ic-wisp-a3', { subject = 'three', created_at = '2026-10-07T11:00:00Z' }),
     msg('ic-wisp-a4', { subject = 'four', created_at = '2026-10-07T10:00:00Z' }),
   })
-  inbox('side city', {})
+  inbox('other city', {})
   local win = mailbox().open()
   settled(win, 4)
   vim.wait(200)
@@ -8399,16 +8399,16 @@ test('V over three lines then m marks each read with its own call, in order, one
   end
   through('mark-read', 'm')
   wait('all three read', function()
-    return rows(win)[3] == '    imd-city  mayor  three'
+    return rows(win)[3] == '    demo-city  mayor  three'
   end)
-  eq(rows(win), { '    imd-city  mayor  one', '    imd-city  mayor  two', '    imd-city  mayor  three',
-    '  ● imd-city  mayor  four' }, 'the selected three are read, the fourth is not')
+  eq(rows(win), { '    demo-city  mayor  one', '    demo-city  mayor  two', '    demo-city  mayor  three',
+    '  ● demo-city  mayor  four' }, 'the selected three are read, the fourth is not')
   eq(#kept_files(), 3, 'each read one is kept')
   through('mark-unread', 'u')
   wait('all three unread', function()
-    return rows(win)[3] == '  ● imd-city  mayor  three'
+    return rows(win)[3] == '  ● demo-city  mayor  three'
   end)
-  eq(rows(win)[1], '  ● imd-city  mayor  one', 'unread again')
+  eq(rows(win)[1], '  ● demo-city  mayor  one', 'unread again')
   vim.wait(400)
   eq(#calls_of('mark-unread'), 3, 'nothing more ran')
   eq(errors(), {}, 'nothing said')
@@ -8417,12 +8417,12 @@ end)
 
 test('d with marks asks once and deletes them in one call; No deletes nothing', function()
   preload()
-  inbox('imd-city', {
+  inbox('demo-city', {
     msg('ic-wisp-a1', { subject = 'one', created_at = '2026-10-07T13:00:00Z' }),
     msg('ic-wisp-a2', { subject = 'two', created_at = '2026-10-07T12:00:00Z' }),
     msg('ic-wisp-a3', { subject = 'three', created_at = '2026-10-07T11:00:00Z' }),
   })
-  inbox('side city', {})
+  inbox('other city', {})
   local win = mailbox().open()
   settled(win, 3)
   vim.wait(200)
@@ -8438,7 +8438,7 @@ test('d with marks asks once and deletes them in one call; No deletes nothing', 
   vim.wait(300)
   eq(asked, { 'Delete 2 messages?' }, 'asks once for all of them')
   eq(calls_of('delete'), {}, 'No deletes nothing')
-  eq(rows(win)[1], 'x ● imd-city  mayor  one', 'the marks stay')
+  eq(rows(win)[1], 'x ● demo-city  mayor  one', 'the marks stay')
   vim.fn.confirm = function(question)
     asked[#asked + 1] = question
     return 1
@@ -8449,18 +8449,18 @@ test('d with marks asks once and deletes them in one call; No deletes nothing', 
     return #rows(win) == 1
   end)
   eq(#asked, 2, 'asked once more, for the second d')
-  eq(calls_of('delete'), { call('delete', '/srv/imd-city', 'ic-wisp-a1', 'ic-wisp-a2', '--json') }, 'one delete call')
-  eq(rows(win), { '  ● imd-city  mayor  three' }, 'the unmarked one stays')
+  eq(calls_of('delete'), { call('delete', '/srv/demo-city', 'ic-wisp-a1', 'ic-wisp-a2', '--json') }, 'one delete call')
+  eq(rows(win), { '  ● demo-city  mayor  three' }, 'the unmarked one stays')
   press('q')
 end)
 
 test('an archive answer that names only one of two ids is refused, said once, and nothing changes', function()
   preload()
-  inbox('imd-city', {
+  inbox('demo-city', {
     msg('ic-wisp-a1', { subject = 'one', created_at = '2026-10-07T13:00:00Z' }),
     msg('ic-wisp-a2', { subject = 'two', created_at = '2026-10-07T12:00:00Z' }),
   })
-  inbox('side city', {})
+  inbox('other city', {})
   local win = mailbox().open()
   settled(win, 2)
   vim.wait(200)
@@ -8474,30 +8474,30 @@ test('an archive answer that names only one of two ids is refused, said once, an
   local said = errors()
   eq(#said, 1, 'said once')
   assert(said[1]:find('ic-wisp-a1 ic-wisp-a2', 1, true) and said[1]:find('did not name ic-wisp-a2', 1, true), said[1])
-  eq(rows(win), { 'x ● imd-city  mayor  one', 'x ● imd-city  mayor  two' }, 'both lines and marks stay')
+  eq(rows(win), { 'x ● demo-city  mayor  one', 'x ● demo-city  mayor  two' }, 'both lines and marks stay')
   eq(#calls_of('archive'), 1, 'one call, never retried')
   press('q')
 end)
 
 test('a failed archive of one city\'s set leaves every line of it; the other city\'s set is archived in its own call', function()
   preload()
-  inbox('imd-city', {
+  inbox('demo-city', {
     msg('ic-wisp-a1', { subject = 'one', created_at = '2026-10-07T13:00:00Z' }),
     msg('ic-wisp-a2', { subject = 'two', created_at = '2026-10-07T12:00:00Z' }),
   })
-  inbox('side city', {
+  inbox('other city', {
     msg('sc-wisp-b1', { subject = 'side one', created_at = '2026-10-07T12:30:00Z' }),
     msg('sc-wisp-b2', { subject = 'side two', created_at = '2026-10-07T11:30:00Z' }),
   })
-  raw_answer('archive', 'exit', '1', 'imd-city')
-  raw_answer('archive', 'stderr', 'gc mail archive: message is closed\n', 'imd-city')
+  raw_answer('archive', 'exit', '1', 'demo-city')
+  raw_answer('archive', 'stderr', 'gc mail archive: message is closed\n', 'demo-city')
   acted_many('archive', { 'sc-wisp-b1', 'sc-wisp-b2' })
   local win = mailbox().open()
   settled(win, 4)
   vim.wait(200)
   mark_rows(win, { 1, 2, 3, 4 })
   press('a')
-  wait('the side city set archived', function()
+  wait('the other city set archived', function()
     return #rows(win) == 2
   end)
   vim.wait(200)
@@ -8506,10 +8506,10 @@ test('a failed archive of one city\'s set leaves every line of it; the other cit
     return a[2] < b[2]
   end)
   eq(archives, {
-    call('archive', '/srv/imd-city', 'ic-wisp-a1', 'ic-wisp-a2', '--json'),
-    call('archive', '/srv/side city', 'sc-wisp-b1', 'sc-wisp-b2', '--json'),
+    call('archive', '/srv/demo-city', 'ic-wisp-a1', 'ic-wisp-a2', '--json'),
+    call('archive', '/srv/other city', 'sc-wisp-b1', 'sc-wisp-b2', '--json'),
   }, 'one call per city')
-  eq(rows(win), { 'x ● imd-city  mayor  one', 'x ● imd-city  mayor  two' }, 'every line of the failed city stays')
+  eq(rows(win), { 'x ● demo-city  mayor  one', 'x ● demo-city  mayor  two' }, 'every line of the failed city stays')
   local said = errors()
   eq(#said, 1, 'said once')
   assert(said[1]:find('ic-wisp-a1 ic-wisp-a2', 1, true) and said[1]:find('message is closed', 1, true), said[1])
@@ -8518,32 +8518,32 @@ end)
 
 test('a bulk archive that fails while a refresh runs leaves every line: the refresh answer does not drop them (I2)', function()
   preload()
-  inbox('imd-city', {
+  inbox('demo-city', {
     msg('ic-wisp-a1', { subject = 'one', created_at = '2026-10-07T13:00:00Z' }),
     msg('ic-wisp-a2', { subject = 'two', created_at = '2026-10-07T12:00:00Z' }),
   })
-  inbox('side city', {})
+  inbox('other city', {})
   local win = mailbox().open()
   settled(win, 2)
   vim.wait(200)
   mark_rows(win, { 1, 2 })
   -- The refresh answers after 0.5 s, while the archive (1 s) still runs; then the archive fails.
-  raw_answer('inbox', 'delay', '0.5', 'imd-city')
-  local n = inbox_calls('/srv/imd-city')
+  raw_answer('inbox', 'delay', '0.5', 'demo-city')
+  local n = inbox_calls('/srv/demo-city')
   press('R')
   wait('the refresh started', function()
-    return inbox_calls('/srv/imd-city') == n + 1
+    return inbox_calls('/srv/demo-city') == n + 1
   end)
-  raw_answer('archive', 'delay', '1', 'imd-city')
-  raw_answer('archive', 'exit', '1', 'imd-city')
-  raw_answer('archive', 'stderr', 'gc mail archive: store unavailable\n', 'imd-city')
+  raw_answer('archive', 'delay', '1', 'demo-city')
+  raw_answer('archive', 'exit', '1', 'demo-city')
+  raw_answer('archive', 'stderr', 'gc mail archive: store unavailable\n', 'demo-city')
   press('a')
   wait('the archive failure said', function()
     return #errors_matching('cannot archive 2 messages') == 1
   end)
   vim.wait(200)
   eq(#calls_of('archive'), 1, 'one archive call')
-  eq(rows(win), { 'x ● imd-city  mayor  one', 'x ● imd-city  mayor  two' }, 'both lines and their marks stay')
+  eq(rows(win), { 'x ● demo-city  mayor  one', 'x ● demo-city  mayor  two' }, 'both lines and their marks stay')
   eq(#errors_matching('cannot archive'), 1, 'said once')
   press('q')
 end)
@@ -8568,27 +8568,27 @@ end)
 
 test('X clears every mark; a mark on a message that leaves the list is dropped', function()
   preload()
-  inbox('imd-city', {
+  inbox('demo-city', {
     msg('ic-wisp-a1', { subject = 'one', created_at = '2026-10-07T13:00:00Z' }),
     msg('ic-wisp-a2', { subject = 'two', created_at = '2026-10-07T12:00:00Z' }),
   })
-  inbox('side city', {})
+  inbox('other city', {})
   local win = mailbox().open()
   settled(win, 2)
   vim.wait(200)
   mark_rows(win, { 1, 2 })
-  eq(rows(win), { 'x ● imd-city  mayor  one', 'x ● imd-city  mayor  two' }, 'marked')
+  eq(rows(win), { 'x ● demo-city  mayor  one', 'x ● demo-city  mayor  two' }, 'marked')
   press('X')
-  eq(rows(win), { '  ● imd-city  mayor  one', '  ● imd-city  mayor  two' }, 'X clears them')
+  eq(rows(win), { '  ● demo-city  mayor  one', '  ● demo-city  mayor  two' }, 'X clears them')
   mark_rows(win, { 2, 1, 1 })
-  eq(rows(win), { '  ● imd-city  mayor  one', 'x ● imd-city  mayor  two' }, 'x again unmarks')
+  eq(rows(win), { '  ● demo-city  mayor  one', 'x ● demo-city  mayor  two' }, 'x again unmarks')
   -- two leaves the inbox (read elsewhere and closed), then comes back unread.
-  inbox('imd-city', { msg('ic-wisp-a1', { subject = 'one', created_at = '2026-10-07T13:00:00Z' }) })
+  inbox('demo-city', { msg('ic-wisp-a1', { subject = 'one', created_at = '2026-10-07T13:00:00Z' }) })
   press('R')
   wait('two left', function()
     return #rows(win) == 1
   end)
-  inbox('imd-city', {
+  inbox('demo-city', {
     msg('ic-wisp-a1', { subject = 'one', created_at = '2026-10-07T13:00:00Z' }),
     msg('ic-wisp-a2', { subject = 'two', created_at = '2026-10-07T12:00:00Z' }),
   })
@@ -8597,7 +8597,7 @@ test('X clears every mark; a mark on a message that leaves the list is dropped',
   wait('two is back', function()
     return #rows(win) == 2
   end)
-  eq(rows(win), { '  ● imd-city  mayor  one', '  ● imd-city  mayor  two' }, 'without its old mark')
+  eq(rows(win), { '  ● demo-city  mayor  one', '  ● demo-city  mayor  two' }, 'without its old mark')
   press('q')
 end)
 
@@ -8611,8 +8611,8 @@ test('all mail: history-only messages are archived like any other and come back 
     return #rows(fwin) == 4
   end)
   mark_rows(fwin, { 2, 3 })
-  acted_many('archive', { 'ic-wisp-r1' }, 'imd-city')
-  acted_many('archive', { 'sc-wisp-r2' }, 'side city')
+  acted_many('archive', { 'ic-wisp-r1' }, 'demo-city')
+  acted_many('archive', { 'sc-wisp-r2' }, 'other city')
   press('a')
   wait('archived', function()
     return #rows(fwin) == 2
@@ -8625,25 +8625,25 @@ test('all mail: history-only messages are archived like any other and come back 
   eq(archives, { call('archive', cities[1].path, 'ic-wisp-r1', '--json'),
     call('archive', cities[2].path, 'sc-wisp-r2', '--json') }, 'one call per city, both through gc')
   -- gc closed them; the next history load lists them closed.
-  bd_list('imd-city', {
+  bd_list('demo-city', {
     bead('ic-wisp-u1', { title = 'unread', created_at = '2026-10-07T13:00:00Z' }),
     bead('ic-wisp-r1', { title = 'was read', created_at = '2026-10-07T12:00:00Z', status = 'closed' }),
     bead('ic-wisp-c1', { title = 'closed', created_at = '2026-10-07T11:00:00Z', status = 'closed' }),
   })
-  bd_list('side city', { bead('sc-wisp-r2', { title = 'side read', created_at = '2026-10-07T11:30:00Z',
+  bd_list('other city', { bead('sc-wisp-r2', { title = 'side read', created_at = '2026-10-07T11:30:00Z',
     status = 'closed' }) })
-  local closed_now = { ALL_MAIL[1], '  × imd-city  mayor  was read', '  × side-city  mayor  side read', ALL_MAIL[4] }
+  local closed_now = { ALL_MAIL[1], '  × demo-city  mayor  was read', '  × other-city  mayor  side read', ALL_MAIL[4] }
   press('R')
   wait('listed closed', function()
     return vim.deep_equal(rows(fwin), closed_now)
   end)
   -- A closed message gc refuses to archive stays, said once. Only the
   -- refusal is counted: R's inbox calls may still be running.
-  raw_answer('archive', 'exit', '1', 'imd-city')
-  raw_answer('archive', 'stderr', 'message is closed\n', 'imd-city')
+  raw_answer('archive', 'exit', '1', 'demo-city')
+  raw_answer('archive', 'stderr', 'message is closed\n', 'demo-city')
   vim.api.nvim_win_set_cursor(fwin, { 2, 0 })
   press('a')
-  local refusal = 'cannot archive "was read": gc mail archive in imd-city failed: message is closed'
+  local refusal = 'cannot archive "was read": gc mail archive in demo-city failed: message is closed'
   wait('refused', function()
     return #errors_matching(refusal) == 1
   end)
@@ -8656,8 +8656,8 @@ end)
 test('every mailbox mapping this view adds carries a gc-mail: desc, in normal and visual mode', function()
   local cities, log = city_dirs()
   write(log, '')
-  inbox('imd-city', { msg('ic-wisp-a1') })
-  inbox('side city', {})
+  inbox('demo-city', { msg('ic-wisp-a1') })
+  inbox('other city', {})
   local pwin = panel().open()
   settled(pwin, 1)
   listed(cities)

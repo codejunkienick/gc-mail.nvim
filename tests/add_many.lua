@@ -12,7 +12,7 @@ assert(vim.wait(5000, function()
 end, 1), 'no go file')
 local taken = 0
 for i = 1, n do
-  if queue.add({ name = 'imd-city', path = '/srv/imd-city' }, { subject = 's' .. i, body = 'b' }) then
+  if queue.add({ name = 'demo-city', path = '/srv/demo-city' }, { subject = 's' .. i, body = 'b' }) then
     taken = taken + 1
   end
 end
