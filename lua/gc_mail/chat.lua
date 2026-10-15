@@ -47,6 +47,22 @@ local saved_compose = {}
 -- (or was none).
 local saved_place = {}
 
+-- Session size memory, in memory only and never written to disk:
+-- key (city.path .. '\0' .. with) -> { width = <timeline columns a user
+-- resize gave this chat>, compose_height = <compose rows a user resize
+-- gave this chat> }. A chat with no entry opens at chat_width and
+-- chat_compose_height; a new session starts from those again. Full-size
+-- chats record no width.
+local saved_size = {}
+
+-- The origin window keeps at least this many text columns when a split
+-- chat opens, is resized, or the editor changes size.
+local ORIGIN_MIN_WIDTH = 20
+
+-- The timeline keeps at least this many rows when the compose box opens
+-- or is resized.
+local TIMELINE_MIN_HEIGHT = 5
+
 -- Read state, one record per message id (no record = idle):
 -- reads[id] = { phase = 'reading' | 'read' | 'refused' | 'unreading',
 --   seq = <number>, owner = <chat that pressed u>, answered = <hrtime> }
@@ -113,6 +129,266 @@ local function valid_chat(chat)
     and vim.api.nvim_win_is_valid(chat.compose_win)
     and vim.api.nvim_buf_is_valid(chat.timeline_buf)
     and vim.api.nvim_buf_is_valid(chat.compose_buf)
+end
+
+-- The width `wanted` clamped to `combined` columns (the editor width
+-- where a caller has no better measure): the origin keeps
+-- ORIGIN_MIN_WIDTH text columns, or all but one column of a still
+-- narrower combined width.
+local function clamp_width(wanted, combined)
+  local max_width = combined - ORIGIN_MIN_WIDTH - 1
+  if max_width < 1 then
+    max_width = 1
+  end
+  return math.max(1, math.min(wanted, max_width))
+end
+
+-- The compose height `wanted` clamped to `combined` rows (timeline rows
+-- plus compose rows): the timeline keeps TIMELINE_MIN_HEIGHT rows, or
+-- all but one row of a still shorter combined height.
+local function clamp_compose_height(wanted, combined)
+  local max_height = combined - TIMELINE_MIN_HEIGHT
+  if max_height < 1 then
+    max_height = 1
+  end
+  return math.max(1, math.min(wanted, max_height))
+end
+
+local function win_width(win)
+  local ok, width = pcall(vim.api.nvim_win_get_width, win)
+  return ok and width or nil
+end
+
+local function win_height(win)
+  local ok, height = pcall(vim.api.nvim_win_get_height, win)
+  return ok and height or nil
+end
+
+local function apply_width(chat, width)
+  chat.applying_size = true
+  pcall(vim.api.nvim_win_set_width, chat.timeline_win, width)
+  chat.applying_size = false
+  chat.applied_width = win_width(chat.timeline_win) or width
+end
+
+local function apply_compose_height(chat, height)
+  chat.applying_size = true
+  pcall(vim.api.nvim_win_set_height, chat.compose_win, height)
+  chat.applying_size = false
+  chat.applied_compose_height = win_height(chat.compose_win) or height
+end
+
+-- A user resize of the compose box: its clamped height is this chat's
+-- remembered height, and no other chat's. A compose box left spanning
+-- the rows the timeline gave up when its window closed (the timeline
+-- of a full-size chat closed directly) shows a layout height, not a
+-- user resize, so nothing is remembered then either.
+local function remember_compose_height(chat)
+  if not chat.timeline_win or not vim.api.nvim_win_is_valid(chat.timeline_win) then
+    return
+  end
+  local height = win_height(chat.compose_win)
+  local timeline = win_height(chat.timeline_win)
+  if not height then
+    return
+  end
+  if timeline then
+    local clamped = clamp_compose_height(height, timeline + height)
+    if clamped ~= height then
+      apply_compose_height(chat, clamped)
+      height = clamped
+    end
+  end
+  chat.want_compose_height = height
+  chat.applied_compose_height = height
+  local key = chat.city.path .. '\0' .. chat.with
+  local entry = saved_size[key] or {}
+  entry.compose_height = height
+  saved_size[key] = entry
+end
+
+local function layout_contains(node, win)
+  if node[1] == 'leaf' then
+    return node[2] == win
+  end
+  for _, child in ipairs(node[2]) do
+    if layout_contains(child, win) then
+      return true
+    end
+  end
+  return false
+end
+
+local function layout_width(node)
+  if node[1] == 'leaf' then
+    return win_width(node[2]) or 0
+  end
+  if node[1] == 'col' then
+    return layout_width(node[2][1])
+  end
+  local total = 0
+  for i, child in ipairs(node[2]) do
+    if i > 1 then
+      total = total + 1
+    end
+    total = total + layout_width(child)
+  end
+  return total
+end
+
+-- Columns of the timeline's row that no window in it holds (zero in a
+-- row that fills the editor, as a real editor resize leaves it).
+local function row_slack(win)
+  local ok, layout = pcall(vim.fn.winlayout)
+  if not ok or type(layout) ~= 'table' or layout[1] ~= 'row' or not layout_contains(layout, win) then
+    return 0
+  end
+  local slack = vim.o.columns - layout_width(layout)
+  return slack > 0 and slack or 0
+end
+
+-- Gives a split chat's origin window its floor back the way M.open does:
+-- widening the origin itself makes Neovim take the columns from its
+-- neighbour in the row, the timeline, wherever other windows sit, where
+-- shrinking the timeline could hand the freed columns to a window right
+-- of the chat and leave the origin short. A no-op once the origin is at
+-- the floor.
+local function restore_origin(chat)
+  if chat.fullsize or not chat.origin or not vim.api.nvim_win_is_valid(chat.origin) then
+    return
+  end
+  local origin = win_width(chat.origin)
+  if not origin or origin >= ORIGIN_MIN_WIDTH then
+    return
+  end
+  chat.applying_size = true
+  pcall(vim.api.nvim_win_set_width, chat.origin, ORIGIN_MIN_WIDTH)
+  chat.applying_size = false
+  chat.applied_width = win_width(chat.timeline_win) or chat.applied_width
+end
+
+-- The width the timeline may have while the origin window keeps its
+-- floor: the timeline and the origin share their row, so the timeline
+-- may hold at most its current width plus the row's unused columns and
+-- the origin's columns above the floor (and must give the shortfall
+-- back when the origin is still below it, as only a row too narrow for
+-- restore_origin leaves it); any smaller width stands (the caller
+-- already clamped it to the editor width).
+local function width_at_floor(chat, width)
+  local origin = chat.origin and win_width(chat.origin)
+  local timeline = win_width(chat.timeline_win)
+  if origin and timeline then
+    return math.max(1, math.min(width, timeline + row_slack(chat.timeline_win) + origin - ORIGIN_MIN_WIDTH))
+  end
+  return width
+end
+
+-- A user resize of the timeline: its clamped width is this chat's
+-- remembered width, and no other chat's. Full-size chats have no width.
+-- A split chat whose origin window is gone spans whatever width the
+-- layout leaves it; that width is the layout's, not a user resize, so
+-- nothing is remembered (and a later close captures nothing either).
+local function remember_width(chat)
+  if chat.fullsize then
+    return
+  end
+  if not chat.origin or not vim.api.nvim_win_is_valid(chat.origin) then
+    return
+  end
+  restore_origin(chat)
+  local width = win_width(chat.timeline_win)
+  if not width then
+    return
+  end
+  local clamped = width_at_floor(chat, clamp_width(width, vim.o.columns))
+  if clamped ~= width then
+    apply_width(chat, clamped)
+    width = clamped
+  end
+  chat.want_width = width
+  chat.applied_width = width
+  local key = chat.city.path .. '\0' .. chat.with
+  local entry = saved_size[key] or {}
+  entry.width = width
+  saved_size[key] = entry
+end
+
+-- Records a resize no WinResized callback observed (a window set and the
+-- chat closed at once): a size still differing from the one last applied
+-- or observed counts as the user's.
+local function capture_size(chat)
+  if not chat.want_compose_height then
+    return
+  end
+  local height = chat.compose_win and win_height(chat.compose_win)
+  if height and height ~= chat.applied_compose_height then
+    remember_compose_height(chat)
+  end
+  if not chat.fullsize then
+    local width = chat.timeline_win and win_width(chat.timeline_win)
+    if width and width ~= chat.applied_width then
+      remember_width(chat)
+    end
+  end
+end
+
+-- Restores the wanted sizes under the current editor size, clamped, with
+-- no memory written: the answer to VimResized and equalisation, which
+-- must never leave the origin narrower than ORIGIN_MIN_WIDTH while a
+-- split chat is open, nor the timeline shorter than TIMELINE_MIN_HEIGHT.
+local function enforce_size(chat)
+  if not valid_chat(chat) then
+    return
+  end
+  chat.seen_columns, chat.seen_lines = vim.o.columns, vim.o.lines
+  local height = win_height(chat.compose_win)
+  local timeline_height = win_height(chat.timeline_win)
+  if height and timeline_height and chat.want_compose_height then
+    local clamped = clamp_compose_height(chat.want_compose_height, timeline_height + height)
+    if clamped ~= height then
+      apply_compose_height(chat, clamped)
+    else
+      chat.applied_compose_height = height
+    end
+  end
+  if chat.fullsize or not chat.want_width then
+    return
+  end
+  restore_origin(chat)
+  local width = win_width(chat.timeline_win)
+  if width then
+    local clamped = width_at_floor(chat, clamp_width(chat.want_width, vim.o.columns))
+    if clamped ~= width then
+      apply_width(chat, clamped)
+    else
+      chat.applied_width = width
+    end
+  end
+end
+
+-- A WinResized answer: an editor-size change is enforced, anything else
+-- that moved a chat window is a user resize and is remembered.
+local function observe_size(chat)
+  if chat.applying_size or not valid_chat(chat) then
+    return
+  end
+  if vim.o.columns ~= chat.seen_columns or vim.o.lines ~= chat.seen_lines then
+    return enforce_size(chat)
+  end
+  local height = win_height(chat.compose_win)
+  if height and height ~= chat.applied_compose_height then
+    remember_compose_height(chat)
+  end
+  if not chat.fullsize then
+    local width = win_width(chat.timeline_win)
+    if width and width ~= chat.applied_width then
+      remember_width(chat)
+    else
+      -- A resize that left the timeline alone can still have narrowed
+      -- the origin (a separator on its other side)
+      restore_origin(chat)
+    end
+  end
 end
 
 local function body_lines(text)
@@ -1171,6 +1447,7 @@ function M.close(chat)
   if not capture_place(chat) and not chat.place_captured then
     saved_place[compose_key] = nil
   end
+  capture_size(chat)
 
   if vim.api.nvim_buf_is_valid(chat.compose_buf) then
     local lines = vim.api.nvim_buf_get_lines(chat.compose_buf, 0, -1, false)
@@ -1470,6 +1747,11 @@ function M.open(city_arg, with_arg)
 
   local chat_width = gc_mail.config.chat_width or 60
   local compose_height = gc_mail.config.chat_compose_height or 3
+  -- The session memory of this chat, else the configured defaults. A
+  -- full-size chat takes no width from it and leaves it untouched.
+  local remembered = saved_size[compose_key] or {}
+  local want_width = remembered.width or chat_width
+  local want_compose_height = remembered.compose_height or compose_height
 
   -- The empty buffer is kept, not wiped or renamed: it waits, hidden, until
   -- the chat closes.
@@ -1483,11 +1765,22 @@ function M.open(city_arg, with_arg)
     vim.api.nvim_win_set_buf(origin, timeline_buf)
   else
     timeline_win = vim.api.nvim_open_win(timeline_buf, false, {
-      split = 'right', win = origin, width = chat_width,
+      split = 'right', win = origin,
+      width = clamp_width(want_width, vim.o.columns),
     })
+    -- The split is sized inside the origin window's frame, so a width
+    -- the editor as a whole could carry can still leave the origin
+    -- below its floor when other windows share the row: give the origin
+    -- its floor back before anything reads the new geometry.
+    if vim.api.nvim_win_get_width(origin) < ORIGIN_MIN_WIDTH then
+      pcall(vim.api.nvim_win_set_width, origin, ORIGIN_MIN_WIDTH)
+    end
   end
+  -- The compose split adds its statusline row, so the two text heights
+  -- together keep one row less than the timeline window now shows.
   local compose_win = vim.api.nvim_open_win(compose_buf, true, {
-    split = 'below', win = timeline_win, height = compose_height,
+    split = 'below', win = timeline_win,
+    height = clamp_compose_height(want_compose_height, vim.api.nvim_win_get_height(timeline_win) - 1),
   })
 
   local wo_tl = vim.wo[timeline_win]
@@ -1526,6 +1819,18 @@ function M.open(city_arg, with_arg)
     -- unread count and the last pending send's state (nil for none)
     unread = 0,
     last_send = nil,
+    -- The wanted sizes (the remembered ones, else the configured
+    -- defaults; no width for a full-size chat), the sizes last applied
+    -- or observed, the editor size last seen, and the guard against
+    -- observing a size this chat applied itself
+    want_width = taken_buf and nil or want_width,
+    want_compose_height = want_compose_height,
+    applied_width = taken_buf and nil or vim.api.nvim_win_get_width(timeline_win),
+    applied_compose_height = vim.api.nvim_win_get_height(compose_win),
+    seen_columns = vim.o.columns,
+    seen_lines = vim.o.lines,
+    applying_size = false,
+    size_scheduled = false,
   }
 
   local anchor = saved_place[compose_key]
@@ -1618,6 +1923,7 @@ function M.open(city_arg, with_arg)
     buffer = timeline_buf,
     callback = function()
       capture_place(chat)
+      capture_size(chat)
     end,
   })
 
@@ -1657,11 +1963,26 @@ function M.open(city_arg, with_arg)
       update_below(chat)
     end,
   })
-  -- A new width cuts the statuslines again (each is set only when it changed)
+  -- A new width cuts the statuslines again (each is set only when it changed).
+  -- The size itself is observed once the resizing settles: a multi-window
+  -- change (equalisation, an editor resize) resizes window by window, and
+  -- answering an intermediate size would fight the change in progress.
+  local function schedule_observe()
+    if chat.size_scheduled then
+      return
+    end
+    chat.size_scheduled = true
+    vim.schedule(function()
+      chat.size_scheduled = false
+      observe_size(chat)
+    end)
+  end
+
   vim.api.nvim_create_autocmd('WinResized', {
     group = group,
     callback = function()
       if valid_chat(chat) then
+        schedule_observe()
         update_status(chat)
         update_keys(chat)
         if chat.pending_place ~= nil and chat.place_view ~= nil then
@@ -1671,6 +1992,23 @@ function M.open(city_arg, with_arg)
           if ok_v and v and v.view and v.view.topline and following(v) then
             chat.place_view = { lnum = v.view.lnum, topline = v.view.topline, bottom = v.bottom }
           end
+        end
+      end
+    end,
+  })
+
+  -- An editor resize restores the wanted sizes clamped to the new
+  -- editor, with no memory written; equalisation that moved a chat
+  -- window against winfixwidth/winfixheight is answered the same way
+  -- when it surfaces as a resize of a chat window.
+  vim.api.nvim_create_autocmd('VimResized', {
+    group = group,
+    callback = function()
+      if valid_chat(chat) then
+        enforce_size(chat)
+        if valid_chat(chat) then
+          update_status(chat)
+          update_keys(chat)
         end
       end
     end,
@@ -1933,6 +2271,7 @@ function M.reset()
   end
   saved_compose = {}
   saved_place = {}
+  saved_size = {}
   reads = {}
   if queue_subscribed then
     queue.subscribe('chat', nil)

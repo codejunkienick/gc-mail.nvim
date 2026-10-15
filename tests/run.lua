@@ -4451,10 +4451,10 @@ test(':GcMailChat imd-city opens two windows to the right with expected geometry
   end
   assert(timeline_win, 'timeline window exists')
 
-  eq(vim.api.nvim_win_get_width(timeline_win), 60, 'timeline width 60')
-  eq(vim.api.nvim_win_get_width(compose_win), 60, 'compose width 60')
+  eq(vim.api.nvim_win_get_width(timeline_win), 59, 'timeline width 59: the origin keeps 20 columns')
+  eq(vim.api.nvim_win_get_width(compose_win), 59, 'compose width 59')
   eq(vim.api.nvim_win_get_height(compose_win), 3, 'compose height 3')
-  eq(vim.api.nvim_win_get_width(origin_win), origin_width_before - 60 - 1, 'origin window unchanged except for split')
+  eq(vim.api.nvim_win_get_width(origin_win), origin_width_before - 59 - 1, 'origin keeps 20 columns beside the split')
   eq(vim.api.nvim_win_get_buf(origin_win), origin_buf, 'origin buffer unchanged')
 
   local tl_buf = vim.api.nvim_win_get_buf(timeline_win)
@@ -4645,8 +4645,8 @@ test('chat split: a named, textured, modified or second buffer keeps the three-w
       end
     end
     assert(timeline_win, what .. ': timeline window exists')
-    eq(vim.api.nvim_win_get_width(timeline_win), 60, what .. ': timeline width 60')
-    eq(vim.api.nvim_win_get_width(compose_win), 60, what .. ': compose width 60')
+    eq(vim.api.nvim_win_get_width(timeline_win), 59, what .. ': timeline width 59: the origin keeps 20 columns')
+    eq(vim.api.nvim_win_get_width(compose_win), 59, what .. ': compose width 59')
     eq(vim.api.nvim_win_get_height(compose_win), 3, what .. ': compose height 3')
     eq(vim.api.nvim_win_get_buf(origin_win), origin_buf, what .. ': origin buffer unchanged')
     vim.api.nvim_set_current_win(timeline_win)
@@ -4705,7 +4705,10 @@ test('chat split: an extra window keeps the split geometry, not full-size', func
     end
     assert(timeline_win, what .. ': timeline window exists')
     assert(timeline_win ~= origin_win, what .. ': the origin window is not taken over')
-    eq(vim.api.nvim_win_get_width(timeline_win), 60, what .. ': timeline width 60')
+    -- Beside a vertical neighbour the split as opened would leave the
+    -- origin below 20 columns, so the timeline gives the shortfall back
+    eq(vim.api.nvim_win_get_width(timeline_win), what == 'same_buffer' and 55 or 59, what .. ': timeline width: the origin keeps 20 columns')
+    eq(vim.api.nvim_win_get_width(origin_win) >= 20, true, what .. ': the origin keeps at least 20 columns')
     eq(vim.api.nvim_win_get_buf(origin_win), origin_buf, what .. ': origin buffer unchanged')
     vim.api.nvim_set_current_win(timeline_win)
     vim.api.nvim_feedkeys('q', 'x', false)
@@ -4732,6 +4735,367 @@ test('chat split: an extra window keeps the split geometry, not full-size', func
     only_empty_buffer()
     split_not_fullsize(name, setup_extra)
   end
+end)
+
+-- Opens a split chat (the current buffer carries text, so no full-size
+-- takeover) with the conversation fixture and returns its windows.
+local function resize_chat(with, opts)
+  local fix = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  gc_mail.setup(vim.tbl_extend('force', { state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY,
+    chat_mark_read = false }, opts or {}))
+  preload()
+  -- One normal origin window, whatever an earlier test left behind
+  vim.cmd('silent! tabonly!')
+  vim.cmd('silent! only!')
+  local kept = vim.api.nvim_get_current_win()
+  vim.wo[kept].winfixwidth, vim.wo[kept].winfixheight = false, false
+  -- The headless screen keeps the last layout's total until a window is
+  -- resized: widen the kept window beside a temporary split, then drop it
+  vim.cmd('vsplit')
+  pcall(vim.api.nvim_win_set_width, kept, vim.o.columns)
+  pcall(vim.api.nvim_win_close, vim.api.nvim_get_current_win(), true)
+  vim.api.nvim_set_current_win(kept)
+  buffer({ 'work in progress' })
+  local origin_win = vim.api.nvim_get_current_win()
+  vim.cmd('GcMailChat imd-city' .. (with and (' ' .. with) or ''))
+  local wins = { origin = origin_win, compose = vim.api.nvim_get_current_win() }
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if w ~= origin_win and w ~= wins.compose then
+      wins.timeline = w
+    end
+  end
+  assert(wins.timeline, 'timeline window exists')
+  return wins
+end
+
+local function close_chat(wins)
+  vim.api.nvim_set_current_win(wins.timeline)
+  vim.api.nvim_feedkeys('q', 'x', false)
+end
+
+test('chat resize: a narrow editor opens clamped so the origin keeps 20 columns', function()
+  vim.o.columns = 70
+  local wins = resize_chat()
+  eq(vim.api.nvim_win_get_width(wins.timeline), 49, 'timeline clamped to 70 - 20 - 1 separator')
+  eq(vim.api.nvim_win_get_width(wins.origin) >= 20, true, 'the origin keeps at least 20 columns')
+  eq(vim.api.nvim_win_get_width(wins.compose), 49, 'compose as wide as the timeline')
+  close_chat(wins)
+
+  -- Below winwidth's own floor for the current window, so the clamp shows
+  vim.o.columns, vim.o.winwidth = 30, 1
+  wins = resize_chat()
+  eq(vim.api.nvim_win_get_width(wins.timeline), 9, 'timeline clamped to 30 - 20 - 1 separator')
+  eq(vim.api.nvim_win_get_width(wins.origin) >= 20, true, 'the origin still keeps at least 20 columns')
+  close_chat(wins)
+  vim.o.winwidth = 20
+end)
+
+test('chat resize: an open beside another window clamps to the origin window, not the editor', function()
+  vim.o.columns = 120
+  local fix = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
+  preload()
+  vim.cmd('silent! tabonly!')
+  vim.cmd('silent! only!')
+  buffer({ 'work in progress' })
+  local origin = vim.api.nvim_get_current_win()
+  -- The headless screen keeps the last layout's total until a window is
+  -- resized: widen the origin beside a temporary split, then drop it
+  vim.cmd('vsplit')
+  pcall(vim.api.nvim_win_set_width, origin, vim.o.columns)
+  pcall(vim.api.nvim_win_close, vim.api.nvim_get_current_win(), true)
+  vim.api.nvim_set_current_win(origin)
+  vim.cmd('vsplit')
+  local other = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_width(other, 39)
+  vim.api.nvim_win_set_width(origin, 80)
+  eq(vim.api.nvim_win_get_width(origin), 80, 'the origin starts at 80 of the 120 columns')
+  vim.api.nvim_set_current_win(origin)
+  vim.cmd('GcMailChat imd-city')
+  local compose = vim.api.nvim_get_current_win()
+  local timeline
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if w ~= origin and w ~= other and w ~= compose then
+      timeline = w
+    end
+  end
+  assert(timeline, 'timeline window exists')
+  eq(vim.api.nvim_win_get_width(timeline), 59, 'timeline clamped to the 80-column origin, not the editor')
+  eq(vim.api.nvim_win_get_width(origin), 20, 'the origin keeps 20 columns')
+  vim.api.nvim_exec_autocmds('VimResized', {})
+  eq(vim.api.nvim_win_get_width(timeline), 59, 'an editor resize does not regrow the timeline past the origin floor')
+  eq(vim.api.nvim_win_get_width(origin), 20, 'an editor resize keeps the origin at 20 columns')
+  vim.api.nvim_set_current_win(timeline)
+  vim.api.nvim_feedkeys('q', 'x', false)
+end)
+
+-- Opens a split chat at a 160-column editor laid out origin | chat |
+-- other as 58 | 60 | 40 and returns its windows.
+local function resize_chat_left_of_other()
+  vim.o.columns = 160
+  local fix = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
+  preload()
+  vim.cmd('silent! tabonly!')
+  vim.cmd('silent! only!')
+  buffer({ 'work in progress' })
+  local other = vim.api.nvim_get_current_win()
+  vim.wo[other].winfixwidth, vim.wo[other].winfixheight = false, false
+  -- The headless screen keeps the last layout's total until a window is
+  -- resized: widen the window beside a temporary split, then drop it
+  vim.cmd('vsplit')
+  pcall(vim.api.nvim_win_set_width, other, vim.o.columns)
+  pcall(vim.api.nvim_win_close, vim.api.nvim_get_current_win(), true)
+  vim.api.nvim_set_current_win(other)
+  vim.cmd('vsplit')
+  local origin = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_width(other, 40)
+  vim.cmd('GcMailChat imd-city')
+  local wins = { origin = origin, other = other, compose = vim.api.nvim_get_current_win() }
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if w ~= origin and w ~= other and w ~= wins.compose then
+      wins.timeline = w
+    end
+  end
+  assert(wins.timeline, 'timeline window exists')
+  return wins
+end
+
+local function widths(wins)
+  return {
+    vim.api.nvim_win_get_width(wins.origin),
+    vim.api.nvim_win_get_width(wins.timeline),
+    vim.api.nvim_win_get_width(wins.other),
+  }
+end
+
+test('chat resize: a window right of the chat keeps its width when the origin floor is restored', function()
+  local wins = resize_chat_left_of_other()
+  eq(widths(wins), { 58, 60, 40 }, 'origin | chat | other opens as 58 | 60 | 40')
+
+  -- A separator drag narrows the origin and widens the timeline
+  vim.api.nvim_win_set_width(wins.origin, 10)
+  vim.api.nvim_exec_autocmds('WinResized', {})
+  wait('the origin gets its floor back once the resize settles', function()
+    return vim.api.nvim_win_get_width(wins.origin) == 20
+  end)
+  eq(widths(wins), { 20, 98, 40 }, 'the timeline gives the shortfall back; the other window keeps 40')
+  vim.api.nvim_exec_autocmds('VimResized', {})
+  vim.api.nvim_exec_autocmds('VimResized', {})
+  vim.api.nvim_exec_autocmds('WinResized', {})
+  vim.wait(50)
+  eq(widths(wins), { 20, 98, 40 }, 'further editor resizes change no width')
+  close_chat(wins)
+
+  -- A timeline widened past the origin's floor takes the other window's
+  -- columns first, then the origin's
+  require('gc_mail.chat').reset()
+  wins = resize_chat_left_of_other()
+  eq(widths(wins), { 58, 60, 40 }, 'reopens as 58 | 60 | 40 in a new session')
+  vim.api.nvim_win_set_width(wins.timeline, 140)
+  eq(vim.api.nvim_win_get_width(wins.origin) < 20, true, 'the widened timeline leaves the origin short')
+  local other_width = vim.api.nvim_win_get_width(wins.other)
+  vim.api.nvim_exec_autocmds('WinResized', {})
+  wait('the origin gets its floor back once the resize settles', function()
+    return vim.api.nvim_win_get_width(wins.origin) == 20
+  end)
+  local settled = widths(wins)
+  eq(settled[3], other_width, 'the other window keeps its width')
+  vim.api.nvim_exec_autocmds('VimResized', {})
+  vim.api.nvim_exec_autocmds('VimResized', {})
+  vim.wait(50)
+  eq(widths(wins), settled, 'further editor resizes change no width')
+  close_chat(wins)
+end)
+
+test('chat resize: closing the origin window does not make the spanned width the remembered one', function()
+  vim.o.columns = 200
+  local wins = resize_chat()
+  eq(vim.api.nvim_win_get_width(wins.timeline), 60, 'opens at chat_width')
+  vim.api.nvim_win_close(wins.origin, true)
+  eq(vim.api.nvim_win_get_width(wins.timeline), 200, 'the timeline spans the editor once the origin is gone')
+  vim.api.nvim_exec_autocmds('WinResized', {})
+  close_chat(wins)
+  -- The close leaves a chat window behind in the tab (its origin is
+  -- gone); give it a plain buffer before reopening
+  vim.cmd('enew!')
+
+  wins = resize_chat()
+  eq(vim.api.nvim_win_get_width(wins.timeline), 60, 'reopens at chat_width, not the spanned width')
+  close_chat(wins)
+end)
+
+test('chat resize: a resized timeline width is remembered for that chat only', function()
+  local wins = resize_chat(nil, { chat_width = 40 })
+  eq(vim.api.nvim_win_get_width(wins.timeline), 40, 'opens at chat_width')
+  vim.api.nvim_win_set_width(wins.timeline, 52)
+  vim.api.nvim_exec_autocmds('WinResized', {})
+  eq(vim.api.nvim_win_get_width(wins.timeline), 52, 'the wider user width stays')
+  close_chat(wins)
+
+  wins = resize_chat(nil, { chat_width = 40 })
+  eq(vim.api.nvim_win_get_width(wins.timeline), 52, 'reopens at the remembered width')
+  close_chat(wins)
+
+  wins = resize_chat('planner', { chat_width = 40 })
+  eq(vim.api.nvim_win_get_width(wins.timeline), 40, 'another chat still opens at chat_width')
+  close_chat(wins)
+
+  -- A new session (a fresh chat module) starts from chat_width again
+  require('gc_mail.chat').reset()
+  wins = resize_chat(nil, { chat_width = 40 })
+  eq(vim.api.nvim_win_get_width(wins.timeline), 40, 'no width is remembered across sessions')
+  close_chat(wins)
+end)
+
+test('chat resize: a wide editor with no user resize reopens at chat_width', function()
+  vim.o.columns = 120
+  local wins = resize_chat()
+  eq(vim.api.nvim_win_get_width(wins.timeline), 60, 'opens at chat_width')
+  close_chat(wins)
+  wins = resize_chat()
+  eq(vim.api.nvim_win_get_width(wins.timeline), 60, 'reopens at chat_width')
+  close_chat(wins)
+end)
+
+test('chat resize: the full-size open is unaffected by a remembered width', function()
+  local wins = resize_chat(nil, { chat_width = 40 })
+  vim.api.nvim_win_set_width(wins.timeline, 52)
+  vim.api.nvim_exec_autocmds('WinResized', {})
+  close_chat(wins)
+
+  local _, empty_buf = only_empty_buffer()
+  local full_width = vim.api.nvim_win_get_width(vim.api.nvim_get_current_win())
+  vim.cmd('GcMailChat imd-city')
+  local compose_win = vim.api.nvim_get_current_win()
+  local timeline_win = vim.api.nvim_tabpage_list_wins(0)[1] == compose_win
+    and vim.api.nvim_tabpage_list_wins(0)[2] or vim.api.nvim_tabpage_list_wins(0)[1]
+  eq(vim.api.nvim_win_get_width(timeline_win), full_width, 'full-size timeline spans the editor, not the remembered width')
+  assert(vim.api.nvim_win_get_buf(timeline_win) ~= empty_buf, 'the timeline took over the empty window')
+  vim.api.nvim_set_current_win(timeline_win)
+  vim.api.nvim_feedkeys('q', 'x', false)
+
+  wins = resize_chat(nil, { chat_width = 40 })
+  eq(vim.api.nvim_win_get_width(wins.timeline), 52, 'the remembered width survived the full-size open')
+  close_chat(wins)
+end)
+
+test('chat resize: a resized compose height is remembered in the split and full-size layouts', function()
+  vim.o.columns = 120
+  local wins = resize_chat()
+  eq(vim.api.nvim_win_get_height(wins.compose), 3, 'opens at chat_compose_height')
+  vim.api.nvim_win_set_height(wins.compose, 6)
+  vim.api.nvim_exec_autocmds('WinResized', {})
+  eq(vim.api.nvim_win_get_height(wins.compose), 6, 'the user height stays')
+  close_chat(wins)
+
+  wins = resize_chat()
+  eq(vim.api.nvim_win_get_height(wins.compose), 6, 'the split reopens at the remembered height')
+  close_chat(wins)
+
+  only_empty_buffer()
+  vim.cmd('GcMailChat imd-city')
+  local compose_win = vim.api.nvim_get_current_win()
+  eq(vim.api.nvim_win_get_height(compose_win), 6, 'the full-size chat reopens at the remembered height')
+  vim.api.nvim_win_set_height(compose_win, 8)
+  vim.api.nvim_exec_autocmds('WinResized', {})
+  local timeline_win = vim.api.nvim_tabpage_list_wins(0)[1] == compose_win
+    and vim.api.nvim_tabpage_list_wins(0)[2] or vim.api.nvim_tabpage_list_wins(0)[1]
+  vim.api.nvim_set_current_win(timeline_win)
+  vim.api.nvim_feedkeys('q', 'x', false)
+
+  only_empty_buffer()
+  vim.cmd('GcMailChat imd-city')
+  eq(vim.api.nvim_win_get_height(vim.api.nvim_get_current_win()), 8, 'a full-size resize is remembered too')
+  compose_win = vim.api.nvim_get_current_win()
+  timeline_win = vim.api.nvim_tabpage_list_wins(0)[1] == compose_win
+    and vim.api.nvim_tabpage_list_wins(0)[2] or vim.api.nvim_tabpage_list_wins(0)[1]
+  vim.api.nvim_set_current_win(timeline_win)
+  vim.api.nvim_feedkeys('q', 'x', false)
+end)
+
+test('chat resize: closing the timeline of a full-size chat does not remember the expanded compose height', function()
+  vim.o.columns = 120
+  local fix = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.imd-city.json', fix)
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
+  preload()
+  local _, origin_buf = only_empty_buffer()
+  vim.cmd('GcMailChat imd-city')
+  local compose_win = vim.api.nvim_get_current_win()
+  eq(vim.api.nvim_win_get_height(compose_win), 3, 'opens at chat_compose_height')
+  local wins = vim.api.nvim_tabpage_list_wins(0)
+  local timeline_win = wins[1] == compose_win and wins[2] or wins[1]
+  vim.api.nvim_set_current_win(timeline_win)
+  vim.cmd('q')
+  wait('compose window given the empty buffer back', function()
+    local ws = vim.api.nvim_tabpage_list_wins(0)
+    return #ws == 1 and vim.api.nvim_win_get_buf(ws[1]) == origin_buf
+  end)
+
+  vim.cmd('GcMailChat imd-city')
+  compose_win = vim.api.nvim_get_current_win()
+  eq(vim.api.nvim_win_get_height(compose_win), 3,
+    'reopens at chat_compose_height, not the height the surviving compose window expanded to')
+  wins = vim.api.nvim_tabpage_list_wins(0)
+  timeline_win = wins[1] == compose_win and wins[2] or wins[1]
+  vim.api.nvim_set_current_win(timeline_win)
+  vim.api.nvim_feedkeys('q', 'x', false)
+end)
+
+test('chat resize: with no user resize the compose box opens at chat_compose_height', function()
+  vim.o.columns = 120
+  local wins = resize_chat()
+  eq(vim.api.nvim_win_get_height(wins.compose), 3, 'opens at chat_compose_height')
+  close_chat(wins)
+  wins = resize_chat()
+  eq(vim.api.nvim_win_get_height(wins.compose), 3, 'reopens at chat_compose_height')
+  close_chat(wins)
+end)
+
+test('chat resize: the compose box is clamped so the timeline keeps 5 rows', function()
+  vim.o.columns = 120
+  local wins = resize_chat()
+  vim.api.nvim_win_set_height(wins.compose, 30)
+  vim.api.nvim_exec_autocmds('WinResized', {})
+  wait('the compose height is clamped once the resize settles', function()
+    return vim.api.nvim_win_get_height(wins.compose) == 16
+  end)
+  eq(vim.api.nvim_win_get_height(wins.timeline), 5, 'the timeline keeps 5 rows')
+  eq(vim.api.nvim_win_get_height(wins.compose), 16, 'compose clamped to the rows above that floor')
+  close_chat(wins)
+  wins = resize_chat()
+  eq(vim.api.nvim_win_get_height(wins.compose), 16, 'the clamped height is what reopens')
+  close_chat(wins)
+end)
+
+test('chat resize: an editor resize restores the wanted sizes at the floors', function()
+  vim.o.columns = 120
+  local wins = resize_chat()
+  eq(vim.api.nvim_win_get_width(wins.timeline), 60, 'opens at chat_width')
+
+  vim.o.columns = 70
+  vim.api.nvim_exec_autocmds('VimResized', {})
+  eq(vim.api.nvim_win_get_width(wins.timeline), 49, 'a narrower editor clamps the timeline')
+  eq(vim.api.nvim_win_get_width(wins.origin) >= 20, true, 'the origin keeps at least 20 columns')
+
+  vim.api.nvim_set_current_win(wins.origin)
+  vim.cmd('wincmd =')
+  vim.api.nvim_exec_autocmds('WinResized', {})
+  eq(vim.api.nvim_win_get_width(wins.timeline), 49, 'equalisation does not move the timeline')
+  eq(vim.api.nvim_win_get_width(wins.origin) >= 20, true, 'equalisation keeps the origin floor')
+
+  vim.o.columns = 120
+  vim.api.nvim_exec_autocmds('VimResized', {})
+  eq(vim.api.nvim_win_get_width(wins.timeline), 60, 'a wider editor restores chat_width')
+  close_chat(wins)
+
+  wins = resize_chat()
+  eq(vim.api.nvim_win_get_width(wins.timeline), 60, 'the editor resize wrote no width memory')
+  close_chat(wins)
 end)
 
 test('<Space>ms in normal mode queues to mayor; typing ms in insert mode, <C-s> and <CR> queue nothing', function()
@@ -7095,7 +7459,7 @@ test('chat status: correspondent, city, liveness and unread count; a narrow wind
     return vim.wo[chat.timeline_win].statusline
   end
   eq(status(), ' mayor in imd-city · live · 1 unread ', 'idle, one unread')
-  eq(vim.wo[chat.compose_win].statusline, ' <Space>ms send · q close · <C-j>/<C-k> focus · above: <CR>…',
+  eq(vim.wo[chat.compose_win].statusline, ' <Space>ms send · q close · <C-j>/<C-k> focus · above: <CR…',
     'the keys, cut at the chat width')
   append(chat.log, message_line('mail.replied', { id = 'tc-wisp-live1', subject = 'later', body = 'later' }))
   wait('the arrival counts', function()
@@ -7152,7 +7516,7 @@ test('chat status: a send shows sending…, then queued while it retries, then f
   wait('failed', function()
     return status():find('^ mayor in imd%-city · failed: ') ~= nil
   end)
-  eq(status(), ' mayor in imd-city · failed: exit 1: gc mail send: store un…', 'the first error line')
+  eq(status(), ' mayor in imd-city · failed: exit 1: gc mail send: store u…', 'the first error line')
 end)
 
 test('chat status: a failed load shows stale until a load succeeds', function()
@@ -7221,7 +7585,7 @@ test('chat status: an unreadable queue file shows in the timeline but is no send
   vim.api.nvim_set_current_win(chat.compose_win)
   vim.api.nvim_feedkeys(vim.keycode('<Space>ms'), 'x', false)
   wait('failed', function()
-    return status() == ' mayor in imd-city · failed: exit 1: gc mail send: store un…'
+    return status() == ' mayor in imd-city · failed: exit 1: gc mail send: store u…'
   end)
 end)
 

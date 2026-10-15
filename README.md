@@ -57,8 +57,8 @@ unchanged; the mailbox lists mail only when you open it.
 | `markdown` | `true` | the opened message and the thread are markdown buffers; `false` keeps the plain text layout |
 | `chat_keymap` | `'<Space>mc'` | normal-mode mapping that opens the last chat; `false` sets none |
 | `chats_keymap` | `'<Space>ml'` | normal-mode mapping that opens the conversations list; `false` sets none |
-| `chat_width` | `60` | columns of the chat window (whole number of at least 20) |
-| `chat_compose_height` | `3` | rows of the chat compose box (whole number of at least 1) |
+| `chat_width` | `60` | columns of the chat window (whole number of at least 20); the opening width, before any session width remembered for that chat (see Resizing in The chat) |
+| `chat_compose_height` | `3` | rows of the chat compose box (whole number of at least 1); the opening height, before any session height remembered for that chat (see Resizing in The chat) |
 | `chat_send_keys` | `{ '<Space>ms' }` | keys mapped in normal mode of the compose box that send the message; a send key never loses to a close or focus key on the same key (`false` maps none) |
 | `chat_mark_read` | `true` | `true`: unread mail to human in the rendered conversation is marked read when viewed; `false` marks nothing |
 | `chat_poll_ms` | `60000` | while a chat is open, its city's history is loaded again this often (ms, at least `15000`) |
@@ -400,7 +400,8 @@ set statusline+=%{v:lua.require('gc_mail').status()}
 `<Space>mc` (configured via `chat_keymap`, `false` for none, default `'<Space>mc'`)
 or `:GcMailChat [city] [with]` opens a two-window conversation view
 beside the current window: a vertical split of `chat_width` columns (default 60,
-`winfixwidth`) on the right for the timeline, and a split below of
+`winfixwidth`, clamped and remembered as Resizing below says) on the right for
+the timeline, and a split below of
 `chat_compose_height` rows (default 3, `winfixheight`) for the compose box,
 placing the cursor in the compose box in normal mode. When the current window
 is the tab's only window, a normal window holding the session's only listed
@@ -449,6 +450,37 @@ window holding the empty buffer, keeping any compose draft.
   top with the same following state; a first open, or one whose message is gone,
   opens at the end as before. Mail that arrived while the chat was closed and
   sits below the restored view keeps its `↓ <n> newer below (G)` count.
+- **Resizing.** The chat remembers, per conversation and for the session
+  only (nothing is written to disk, and a new session starts from the
+  options again), the width a resize of the timeline window gives it and
+  the height a resize of the compose window gives it. Reopening a chat in
+  the same session opens at the remembered width and compose height
+  instead of `chat_width` and `chat_compose_height`; another conversation
+  is unaffected. The width is clamped so the origin window keeps at
+  least 20 text columns: the effective width is the wanted width cut to
+  `columns - 21` (the 20 columns and their separator), and to 1 column
+  on an editor narrower than that; when other windows share the row and
+  the split as opened would still leave the origin below 20 columns,
+  the timeline gives the shortfall back. A resize that narrows the
+  origin below 20 columns is answered the same way, and a window on the
+  chat's far side keeps its width. Closing the origin window
+  while a split chat is open leaves the timeline spanning the editor;
+  that layout width is not a resize and is never remembered. Closing
+  the timeline window likewise leaves the compose box spanning the
+  rows it gave up; that layout height is not a resize and is never
+  remembered either. The
+  compose height is clamped so the
+  timeline keeps at least 5 rows: the effective height is the wanted
+  height cut to the two windows' combined rows minus 5, and to 1 row on
+  a shorter editor. A clamped size, not the wanted one, is what a resize
+  remembers. An editor resize (`VimResized`) and equalisation restore
+  the wanted width and compose height under those clamps without
+  writing the memory, so the origin never drops below 20 columns (and
+  the timeline never below 5 rows) while a chat is open; the chat
+  windows keep their `winfixwidth` and `winfixheight` throughout. A
+  full-size chat (above) has no width and records none — it neither
+  takes a remembered width nor replaces one — while its compose height
+  is remembered and restored like any other chat's.
 - **Statuslines.** The timeline's statusline says the state of the conversation,
   ` <with> in <city> · <last send> · <liveness> · <n> unread · ↓ <n> newer below (G) `,
   from what the chat already holds (no gc call):
