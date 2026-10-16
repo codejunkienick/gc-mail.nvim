@@ -93,11 +93,6 @@ local function fresh()
   if package.loaded['gc_mail.panel'] then
     package.loaded['gc_mail.panel'].close_all()
   end
-  -- The new-mail check is a uv timer an unload would not stop; its answers
-  -- would land in a later test's fake log.
-  if package.loaded['gc_mail.mailbox'] then
-    package.loaded['gc_mail.mailbox'].stop_check()
-  end
   for name in pairs(package.loaded) do
     if name:match('^gc_mail') then
       package.loaded[name] = nil
@@ -276,7 +271,6 @@ test('nothing runs at load time and setup maps <Space>mm, <Space>mi, <Space>mp a
   end)
   eq(gc_mail.cached_cities(), TWO, 'preloaded cities')
   eq(mail_calls(), {}, 'startup listed mail')
-  eq(require('gc_mail.mailbox').checking(), false, 'a new-mail timer runs by default')
   vim.keymap.del('n', '<Space>mm')
   vim.keymap.del('n', '<Space>mi')
   vim.keymap.del('n', '<Space>mp')
@@ -2285,46 +2279,15 @@ test('subject_prefix and subject_suffix label every sent subject once, within 72
   -- Empty options leave the subject as it is.
   eq(gc_mail.label('Re: x', { subject_prefix = '', subject_suffix = '' }), 'Re: x', 'no label')
   for _, bad in ipairs({ { subject_prefix = 'a\nb' }, { subject_suffix = 3 }, { subject_prefix = string.rep('p', 41) },
-    { check_ms = 1000 }, { check_ms = 'often' }, { panel_poll_ms = 14999 }, { panel_poll_ms = false },
+    { panel_poll_ms = 14999 }, { panel_poll_ms = false },
     { panel_height = 0 }, { panel_height = 2.5 } }) do
     eq(pcall(gc_mail.setup, bad), false, 'refused: ' .. vim.inspect(bad))
   end
 end)
 
-test('the opt-in new-mail check: no timer by default, one count per city while focused, a notice when unread grows', function()
+test('an old check_ms option is ignored: setup() still succeeds', function()
   preload()
-  eq(mailbox().checking(), false, 'no timer')
-  answer('count', { recipient = 'human', recipients = { 'human' }, total = 3, unread = 1 }, 'demo-city')
-  answer('count', { recipient = 'human', recipients = { 'human' }, total = 0, unread = 0 }, 'other city')
-  mailbox().start_check(1000)
-  eq(mailbox().checking(), true, 'started')
-  mailbox().check_once()
-  wait('one count per city', function()
-    return #mail_calls() == 2
-  end)
-  vim.wait(100)
-  eq(#notes, 0, 'the first pass only learns the counts')
-  answer('count', { recipient = 'human', recipients = { 'human' }, total = 4, unread = 2 }, 'demo-city')
-  mailbox().check_once()
-  wait('second pass', function()
-    return #notes == 1
-  end)
-  eq(notes[1].message, 'gc-mail: 2 unread mail in demo-city; <Space>mi opens the mailbox', 'notice')
-  eq(has_call(call('count', '/srv/demo-city', 'human', '--json')), true, 'count argv')
-  vim.api.nvim_exec_autocmds('FocusLost', {})
-  mailbox().check_once()
-  vim.wait(200)
-  eq(#mail_calls(), 4, 'nothing runs without focus')
-  vim.api.nvim_exec_autocmds('FocusGained', {})
-  mailbox().stop_check()
-  eq(mailbox().checking(), false, 'stopped')
-  gc_mail.setup({ keymap = false, mailbox_keymap = false, state_dir = vim.fs.dirname(queue_dir), check_ms = 60000, watch = false })
-  wait('started after startup', mailbox().checking)
-  -- setup() again with check_ms = false stops it at once.
-  gc_mail.setup({ keymap = false, mailbox_keymap = false, state_dir = vim.fs.dirname(queue_dir), check_ms = false, watch = false })
-  eq(mailbox().checking(), false, 'check_ms = false stops a running check')
-  vim.wait(200)
-  eq(mailbox().checking(), false, 'and nothing starts it again after startup')
+  eq(pcall(gc_mail.setup, { keymap = false, mailbox_keymap = false, state_dir = vim.fs.dirname(queue_dir), check_ms = 60000, watch = false }), true, 'old check_ms still loads')
 end)
 
 test('an outdated inbox answer never brings back what a later call, a read or an archive changed', function()
@@ -2447,25 +2410,17 @@ end)
 
 test('r2a1: a count or action answer missing a field is said and changes nothing', function()
   preload()
-  -- The check: a count without its total notifies nothing and is said once.
-  answer('count', { recipient = 'human', recipients = { 'human' }, total = 1, unread = 1 }, 'demo-city')
-  answer('count', { recipient = 'human', recipients = { 'human' }, total = 0, unread = 0 }, 'other city')
-  mailbox().check_once()
-  wait('first pass', function()
-    return #mail_calls() == 2
-  end)
-  vim.wait(100)
+  -- A count without its total fails its decoder and changes nothing.
   answer('count', { recipient = 'human', recipients = { 'human' }, unread = 5 }, 'demo-city')
-  for _ = 1, 2 do
-    mailbox().check_once()
-    vim.wait(300)
-  end
-  eq(vim.tbl_filter(function(m)
-    return m:find('unread mail in') ~= nil
-  end, vim.tbl_map(function(n)
-    return n.message
-  end, notes)), {}, 'no new-mail notice from a malformed count')
-  eq(errors(), { 'gc-mail: gc mail count in demo-city printed something unexpected (no total and unread count)' }, 'said once')
+  local done, value, err = false, nil, nil
+  mailbox().run(TWO[1], 'count', 'human', function(v, e)
+    done, value, err = true, v, e
+  end)
+  wait('malformed count answered', function()
+    return done
+  end)
+  eq(value, nil, 'no count')
+  assert(err and err:find('no total and unread count', 1, true), 'reason: ' .. tostring(err))
   -- Actions: an answer without command and action, or with a negative count.
   notes = {}
   inbox('demo-city', { msg('ic-wisp-a1', { subject = 'stays' }) })

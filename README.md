@@ -45,7 +45,6 @@ unchanged; the mailbox lists mail only when you open it.
 | `mailbox_keymap` | `'<Space>mi'` | normal-mode mapping that opens the mailbox; `false` sets none |
 | `subject_prefix` | `''` | text put before the subject of every message the plugin sends, e.g. `'[Nick] '` |
 | `subject_suffix` | `''` | text put after it, e.g. `' (nvim)'` |
-| `check_ms` | `false` | `false`: no timer. A number of ms, at least `60000`: the older new-mail check below; use `watch` instead |
 | `watch` | `true` | the background watch below, on without any configuration; `false` turns it off |
 | `watch_resync_ms` | `300000` | while the watch runs, every city's unread mail is counted again this often (ms, at least `60000`) |
 | `panel_keymap` | `'<Space>mp'` | normal-mode mapping that opens or closes the mail panel; `false` sets none |
@@ -64,8 +63,7 @@ unchanged; the mailbox lists mail only when you open it.
 | `chat_poll_ms` | `60000` | while a chat is open, its city's history is loaded again this often (ms, at least `15000`) |
 
 `setup()` refuses (raises an error) a prefix or suffix with a control
-character, the two together over 40 characters, a `check_ms` that is
-neither `false` nor at least a minute, a `watch` that is not `true` or
+character, the two together over 40 characters, a `watch` that is not `true` or
 `false`, a `watch_resync_ms` under a minute, a `panel_poll_ms` under 15 seconds,
 an `events_rearm_ms` under 15 seconds, a `preview` that is not `true` or
 `false`, a `panel_height` that is not a
@@ -265,14 +263,6 @@ copy.
 **Replies** go through the send queue like any message: the reply is on disk
 before its buffer is cleared, failed sends are retried, `:GcMailQueue` lists
 it as `<city> <sender>`, and the reply buffer stops being one once queued.
-
-**New-mail check.** The older, polling way, off by default: no timer runs.
-With `check_ms` set (at least 60000), every `check_ms` while Neovim has focus
-(`FocusGained` and `FocusLost`) it runs one
-`gc --city <path> mail count human --json` per city and says
-`<n> unread mail in <city>` when a city's unread count grows. The background
-watch below does this without polling and also keeps the count for a
-statusline: `watch` is the one to use. The two can run together.
 
 ## The mail panel
 

@@ -30,9 +30,6 @@ local defaults = {
   -- replies, exactly once and within the 72-character limit; '' adds nothing.
   subject_prefix = '',
   subject_suffix = '',
-  -- false: no timer. A number of ms (at least 60000): while Neovim has focus,
-  -- one `gc mail count` per city that often, and a notice when unread mail grows.
-  check_ms = false,
   -- true: after startup, watch every city's event log: a notice when mail for
   -- you arrives and an unread count for require('gc_mail').status(). false: no
   -- watch.
@@ -538,12 +535,11 @@ function M.open_queue()
 end
 
 -- One rule per checked option, in the order refusals are reported:
--- { key, 'bool' }, { key, 'ms', min [, false is allowed] },
+-- { key, 'bool' }, { key, 'ms', min },
 -- { key, 'whole', min [, unit] } and { key, 'keymap' }. The three keymap
 -- options keymap, mailbox_keymap and panel_keymap are not listed, so they
 -- stay unchecked. chat_send_keys and the subject label have their own rules.
 local option_rules = {
-  { 'check_ms', 'ms', 60000, true },
   { 'watch', 'bool' },
   { 'watch_resync_ms', 'ms', 60000 },
   { 'markdown', 'bool' },
@@ -580,10 +576,7 @@ local function invalid_options(opts)
         return key .. ' must be true or false'
       end
     elseif kind == 'ms' then
-      if not (extra and value == false) and (type(value) ~= 'number' or value < min) then
-        if extra then
-          return ('%s must be false or a number of milliseconds of at least %d'):format(key, min)
-        end
+      if type(value) ~= 'number' or value < min then
         return ('%s must be a number of milliseconds of at least %d'):format(key, min)
       end
     elseif kind == 'whole' then
@@ -637,26 +630,17 @@ function M.setup(opts)
       vim.keymap.set('n', lhs, mapping[2], { desc = mapping[3] })
     end
   end
-  -- check_ms = false stops a check an earlier setup() started (only then is
-  -- the mailbox loaded already).
-  if not M.config.check_ms and package.loaded['gc_mail.mailbox'] then
-    package.loaded['gc_mail.mailbox'].stop_check()
-  end
   -- watch = false stops a watch an earlier setup() started.
   if not M.config.watch and package.loaded['gc_mail.watch'] then
     package.loaded['gc_mail.watch'].stop()
   end
   -- After startup, never during it: resume the queue, preload the cities, start
-  -- the watch unless watch = false and, only when check_ms is set, the new-mail
-  -- check.
+  -- the watch unless watch = false.
   local function start()
     queue.resume()
     M.refresh(function() end)
     if M.config.watch then
       require('gc_mail.watch').start()
-    end
-    if M.config.check_ms then
-      require('gc_mail.mailbox').start_check(M.config.check_ms)
     end
   end
   if vim.v.vim_did_enter == 1 then
