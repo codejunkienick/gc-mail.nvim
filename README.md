@@ -806,7 +806,7 @@ and malformed answers.
 
 ## Demo
 
-<img src="gc-mail-demo.gif" width="960" alt="gc-mail.nvim demo: mailbox, chat and search">
+<img src="gc-mail-demo.gif" width="960" alt="gc-mail.nvim demo: chat with the mayor, then the mailbox">
 
 Watch the full video: [gc-mail-demo.mp4](https://github.com/codejunkienick/gc-mail.nvim/releases/latest/download/gc-mail-demo.mp4).
 
@@ -841,8 +841,8 @@ from that MP4 for small sharing files. The terminal runs at font size 22 at
   chat show the mail live: `gc agent <name> reply latest|<id> <text>` and
   `gc agent <name> send human <subject> <text>`.
 - `demo/keys.lua` is the overlay: the last keys at the bottom right (each gone
-  after about 1.5 s) and a caption line above them. Captions come through the
-  Neovim socket, so they never show up as keys.
+  after about 1.5 s) and a compact caption banner at the top right above them.
+  Captions come through the Neovim socket, so they never show up as keys.
 - A tour is a text file, one step per line: `key <xdotool key names>`,
   `type <text>`, `wait <ms>`, `say <caption>`, `agent <args...>` (the demo gc as
   an agent), `# comment`. An unknown step stops the run and names its line.
@@ -854,6 +854,12 @@ from that MP4 for small sharing files. The terminal runs at font size 22 at
   meanwhile waits for the send to land), the mayor's
   answers arriving live from the event log with no key pressed, a second
   exchange, `u` on a message, and `q`.
+  `demo/tour-showcase.txt` (`--tour demo/tour-showcase.txt`, about 57 seconds)
+  records the showcase video embedded above (the chat with the mayor, a cut,
+  then the mailbox as the agents' mail client: walk, open, reply, a new mail,
+  the unread count going down as messages are read):
+  `demo/record.sh --tour demo/tour-showcase.txt --out ./gc-mail-demo.mp4
+  --gif ./gc-mail-demo.gif` reproduces it.
 - Everything lives in one temporary directory, removed on exit; Ctrl-C or a
   failure stops ffmpeg, the terminal, Neovim and Xvfb first. Exit status is 0
   only when a non-empty MP4 was written.

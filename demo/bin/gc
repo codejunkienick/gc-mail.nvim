@@ -295,6 +295,7 @@ local function mail(city, list)
       if verb == 'read' and not m.read then
         m.read = true
         save(store)
+        event('mail.read', 'human', m)
       end
       result = wire(m)
     end)
@@ -318,24 +319,45 @@ local function mail(city, list)
     end
     out({ thread_id = tid, messages = messages_of(list) })
   elseif ACTIONS[verb] then
-    local id = positional[1]
+    -- Archive and delete take one id or, like gc, several ids in one call;
+    -- mark-read and mark-unread take one id (the plugin calls one per message).
+    local ids = {}
+    for _, id in ipairs(positional) do
+      ids[#ids + 1] = id
+    end
+    if #ids == 0 then
+      die(1, ('mail %s: no such message: %s'):format(verb, tostring(nil)))
+    end
+    if (verb == 'mark-read' or verb == 'mark-unread') and #ids ~= 1 then
+      die(1, ('mail %s takes one id'):format(verb))
+    end
+    local touched = {}
     locked(function()
       local store = load()
-      local m = need_message(store, id, 'mail ' .. verb)
-      if verb == 'mark-read' then
-        m.read = true
-      elseif verb == 'mark-unread' then
-        m.read = false
-      elseif verb == 'archive' then
-        m.archived = true
-      else
-        m.deleted = true
+      for _, id in ipairs(ids) do
+        local m = need_message(store, id, 'mail ' .. verb)
+        touched[#touched + 1] = m
+      end
+      for _, m in ipairs(touched) do
+        if verb == 'mark-read' then
+          m.read = true
+        elseif verb == 'mark-unread' then
+          m.read = false
+        elseif verb == 'archive' then
+          m.archived = true
+        else
+          m.deleted = true
+        end
       end
       save(store)
+      local kinds = { ['mark-read'] = 'mail.marked_read', ['mark-unread'] = 'mail.marked_unread', archive = 'mail.archived', delete = 'mail.deleted' }
+      for _, m in ipairs(touched) do
+        event(kinds[verb], 'human', m)
+      end
     end)
-    local record = { command = 'mail.' .. verb, action = verb, ids = { id }, count = 1 }
+    local record = { command = 'mail.' .. verb, action = verb, ids = ids, count = #ids }
     if verb == 'mark-read' or verb == 'mark-unread' then
-      record.id = id
+      record.id = ids[1]
     end
     out(record)
   elseif verb == 'send' or verb == 'reply' then

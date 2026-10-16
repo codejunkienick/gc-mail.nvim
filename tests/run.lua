@@ -4495,6 +4495,73 @@ test('demo gc: mail send and reply are stored as sent by human and can be listed
   eq(bad.code, 1, 'another city is refused')
 end)
 
+test('demo gc: archive and delete take several ids in one call, as the plugin sends them', function()
+  local dir, city = demo_dir()
+  gc_run(dir, { 'seed' })
+  local messages = inbox_of(dir, city, 'human')
+  local a, b, c, d = messages[1].id, messages[2].id, messages[3].id, messages[4].id
+  local archived = gc_json(dir, city, 'archive', a, b, '--json')
+  eq({ archived.command, archived.action, archived.count }, { 'mail.archive', 'archive', 2 }, 'the archive answer')
+  assert(mailbox().DECODE.archive(archived, { a, b }))
+  local remaining = inbox_of(dir, city, 'human')
+  eq(#remaining, #messages - 2, 'both archived messages leave the inbox')
+  for _, m in ipairs(remaining) do
+    assert(m.id ~= a and m.id ~= b, 'archived ' .. m.id)
+  end
+  local deleted = gc_json(dir, city, 'delete', c, d, '--json')
+  assert(mailbox().DECODE.delete(deleted, { c, d }))
+  eq(#inbox_of(dir, city, 'human'), #messages - 4, 'both deleted messages leave the inbox')
+  eq(gc_run(dir, { '--city', city, 'mail', 'mark-read', a, b, '--json' }).code, 1, 'mark-read still takes one id')
+  eq(gc_run(dir, { '--city', city, 'mail', 'archive', '--json' }).code, 1, 'archive with no id is refused')
+end)
+
+test('demo gc: reading, marking read and archiving write the events the watch counts', function()
+  local dir, city = demo_dir()
+  gc_run(dir, { 'seed' })
+  local log = city .. '/.gc/events.jsonl'
+  local seen = {}
+  local events = require('gc_mail.events')
+  events.subscribe('demo_read_test', function(_, ev)
+    seen[#seen + 1] = ev
+  end)
+  events.cities('demo_read_test', { { name = 'demo-city', path = city } })
+  wait('watcher is running', events.running)
+  local target
+  for _, m in ipairs(inbox_of(dir, city, 'human')) do
+    if not m.read then
+      target = m
+      break
+    end
+  end
+  assert(target, 'an unread message to read')
+  local read = gc_json(dir, city, 'read', target.id, '--json')
+  assert(mailbox().DECODE.read(read, target.id))
+  wait('the read event arrives', function()
+    return #seen > 0
+  end)
+  eq({ seen[1].type, seen[1].id }, { 'mail.read', target.id }, 'reading writes mail.read')
+  local marked = gc_json(dir, city, 'mark-read', target.id, '--json')
+  assert(mailbox().DECODE['mark-read'](marked, target.id))
+  wait('the marked event arrives', function()
+    return #seen > 1
+  end)
+  eq({ seen[2].type, seen[2].id }, { 'mail.marked_read', target.id }, 'marking read writes mail.marked_read')
+  local archived = gc_json(dir, city, 'archive', target.id, '--json')
+  assert(mailbox().DECODE.archive(archived, target.id))
+  wait('the archived event arrives', function()
+    return #seen > 2
+  end)
+  eq({ seen[3].type, seen[3].id }, { 'mail.archived', target.id }, 'archiving writes mail.archived')
+  events.unsubscribe('demo_read_test')
+  events.reset()
+  local lines = vim.fn.readfile(log)
+  eq(#lines, 3, 'one line per change')
+  for i, kind in ipairs({ 'mail.read', 'mail.marked_read', 'mail.archived' }) do
+    local raw = vim.json.decode(lines[i])
+    eq({ raw.type, raw.subject }, { kind, target.id }, 'line ' .. i)
+  end
+end)
+
 test('demo gc: an agent reply appends to the store and the event log, and the watcher decodes it', function()
   local dir, city = demo_dir()
   gc_run(dir, { 'seed' })
@@ -4594,7 +4661,7 @@ end)
 
 test('demo tours: every line is a step record.sh accepts, and the chat tour opens, sends and closes the chat', function()
   local steps = { key = true, type = true, wait = true, say = true, agent = true }
-  for _, name in ipairs({ 'tour-basic.txt', 'tour-chat.txt' }) do
+  for _, name in ipairs({ 'tour-basic.txt', 'tour-chat.txt', 'tour-showcase.txt' }) do
     for n, line in ipairs(vim.fn.readfile(root .. '/demo/' .. name)) do
       local text = vim.trim(line)
       if text ~= '' and text:sub(1, 1) ~= '#' then

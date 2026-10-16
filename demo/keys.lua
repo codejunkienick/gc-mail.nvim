@@ -1,7 +1,7 @@
 -- The key overlay of the recording demo: the last few keys in a small float
--- at the bottom right, each gone after about 1.5 s, and a caption line above
--- it. Only demo/init.lua loads it. `format()` is pure so the tests cover it;
--- the rest needs a UI.
+-- at the bottom right, each gone after about 1.5 s, and a compact caption
+-- banner at the top right above it. Only demo/init.lua loads it. `format()`
+-- is pure so the tests cover it; the rest needs a UI.
 local M = {}
 
 M.KEY_MS = 1500
@@ -145,6 +145,8 @@ local function expire()
   end, state.keys)
 end
 
+local show_caption
+
 local function redraw()
   if vim.in_fast_event() then
     return vim.schedule(redraw)
@@ -168,11 +170,10 @@ local function redraw()
       close(keys)
     end
   end
-  local caption = float('caption')
   if state.caption then
-    show(caption, ' ' .. state.caption .. ' ', 2, 'GcDemoCaption')
+    show_caption(state.caption)
   else
-    close(caption)
+    close(float('caption'))
   end
   if #state.keys == 0 and not state.caption and state.timer then
     state.timer:stop()
@@ -211,9 +212,42 @@ function M.say(text, ms)
   return ''
 end
 
+-- Shows `text` as a compact caption banner at the top right: a bordered
+-- box about half the screen wide and two lines high, with one space of
+-- padding, legible in the 960 px recording. The key overlay stays the
+-- small float at the bottom right.
+function show_caption(text)
+  local caption = float('caption')
+  local cols = vim.o.columns
+  local wide = math.min(cols - 2, math.max(vim.fn.strdisplaywidth(text) + 8, math.floor(cols * 0.7)))
+  local width = math.max(1, math.floor(wide * 0.75))
+  if vim.fn.strdisplaywidth(text) > width then
+    text = '…' .. vim.fn.strcharpart(text, vim.fn.strchars(text) - (width - 1))
+  end
+  local padded = ' ' .. text .. ' '
+  local line = padded .. string.rep(' ', math.max(0, width - vim.fn.strdisplaywidth(padded)))
+  if not (caption.buf and vim.api.nvim_buf_is_valid(caption.buf)) then
+    caption.buf = vim.api.nvim_create_buf(false, true)
+    vim.bo[caption.buf].bufhidden = 'hide'
+  end
+  vim.api.nvim_buf_set_lines(caption.buf, 0, -1, false, { line, '' })
+  local config = {
+    relative = 'editor', row = 1, col = math.max(0, cols - width - 2),
+    width = width, height = 2, focusable = false, style = 'minimal', border = 'rounded', zindex = 250,
+    noautocmd = true,
+  }
+  if caption.win and vim.api.nvim_win_is_valid(caption.win) then
+    vim.api.nvim_win_set_config(caption.win, config)
+  else
+    caption.win = vim.api.nvim_open_win(caption.buf, false, config)
+  end
+  vim.wo[caption.win].winhighlight = 'Normal:GcDemoCaption,NormalFloat:GcDemoCaption,FloatBorder:GcDemoCaption'
+  vim.wo[caption.win].wrap = false
+end
+
 local function highlights()
   vim.api.nvim_set_hl(0, 'GcDemoKeys', { fg = '#ffffff', bg = '#2f6f4f', bold = true })
-  vim.api.nvim_set_hl(0, 'GcDemoCaption', { fg = '#101010', bg = '#e6c15a', bold = true })
+  vim.api.nvim_set_hl(0, 'GcDemoCaption', { fg = '#ffffff', bg = '#0b3d62', bold = true })
 end
 
 --- Starts the overlay: records each typed key.
