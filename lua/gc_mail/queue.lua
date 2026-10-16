@@ -44,6 +44,12 @@ local fs = require('gc_mail.fs')
 
 local uv = vim.uv
 
+--- One notice with the plugin's prefix, shared by every module; `level`
+--- defaults to INFO, and every text and level at the call sites is unchanged.
+function M.notify(message, level)
+  vim.notify('gc-mail: ' .. message, level or vim.log.levels.INFO)
+end
+
 local defaults = {
   dir = nil, -- <state_dir>/queue, set by configure()
   -- Delays before the 2nd, 3rd and 4th try; after the last one fails the
@@ -58,9 +64,7 @@ local defaults = {
   busy_ms = 100,
   max_files = 100,
   send_timeout_ms = 120000,
-  notify = function(message, level)
-    vim.notify('gc-mail: ' .. message, level or vim.log.levels.INFO)
-  end,
+  notify = M.notify,
 }
 
 local config = vim.deepcopy(defaults)
@@ -158,8 +162,23 @@ function M.thread_id(text)
   return type(text) == 'string' and #text <= 100 and text:match('^thread%-%x+$') ~= nil
 end
 
-local function whole(n)
+--- A control character (0x00-0x1f, 0x7f), shared by every text rule below
+--- and by the modules that check names, paths and labels with it.
+M.CONTROL = '[%z\1-\31\127]'
+
+--- Whether `n` is a whole number at least zero. A caller that must also
+--- keep the value exactly representable adds its own `< 2^53` bound.
+function M.whole(n)
   return type(n) == 'number' and n >= 0 and n == math.floor(n)
+end
+local whole = M.whole
+
+--- The address rule for a message's `to` (and a chat's `with`): a string,
+--- non-empty, at most 100 bytes, no control character, no leading '-'
+--- (so it can never read as an option in an argument list).
+function M.address_ok(text)
+  return type(text) == 'string' and text ~= '' and #text <= 100 and not text:find(M.CONTROL)
+    and text:sub(1, 1) ~= '-'
 end
 
 -- Why `record` is not a version 1 queue record, or nil when it is one. Every
@@ -207,11 +226,8 @@ local function invalid(record)
       return 'bad to'
     end
   end
-  if record.to ~= nil then
-    if type(record.to) ~= 'string' or record.to == '' or #record.to > 100
-        or record.to:find('[%z\1-\31\127]') or record.to:sub(1, 1) == '-' then
-      return 'bad to'
-    end
+  if record.to ~= nil and not M.address_ok(record.to) then
+    return 'bad to'
   end
 end
 

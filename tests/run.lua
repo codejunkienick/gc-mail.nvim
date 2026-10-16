@@ -442,6 +442,85 @@ test('a record file with invalid to is listed as unreadable and never sent; M.se
   eq(notes[#notes].message, 'gc-mail: cannot queue the message: bad to', 'refusal notice')
 end)
 
+test('shared text and address helpers give the answers their callers rely on', function()
+  local queue = gc_mail.queue
+  local mailbox = require('gc_mail.mailbox')
+  local events = require('gc_mail.events')
+  -- queue.CONTROL matches exactly the control characters, nothing else.
+  for _, bad in ipairs({ string.char(0), string.char(1), string.char(31), string.char(127), '\n', '\t' }) do
+    eq(('a' .. bad .. 'b'):find(queue.CONTROL) ~= nil, true, 'CONTROL matches ' .. vim.inspect(bad))
+  end
+  eq(('plain text 123'):find(queue.CONTROL), nil, 'CONTROL leaves plain text')
+  -- queue.address_ok is the one to/with rule: non-empty, at most 100 bytes,
+  -- no control character and no leading dash, for strings only.
+  eq(queue.address_ok('mayor'), true, 'a plain address passes')
+  eq(queue.address_ok(string.rep('x', 100)), true, '100 bytes passes')
+  eq(queue.address_ok(string.rep('x', 101)), false, '101 bytes fails')
+  eq(queue.address_ok(''), false, 'empty fails')
+  eq(queue.address_ok('-x'), false, 'a leading dash fails')
+  eq(queue.address_ok('a-b'), true, 'an inner dash passes')
+  eq(queue.address_ok('a' .. string.char(1) .. 'b'), false, 'a control character fails')
+  eq(queue.address_ok(nil), false, 'nil fails')
+  eq(queue.address_ok(42), false, 'a number fails')
+  -- queue.whole is the shared whole-number rule, without the 2^53 bound its
+  -- mailbox callers add themselves.
+  eq(queue.whole(0), true, 'zero is whole')
+  eq(queue.whole(7), true, 'a whole number passes')
+  eq(queue.whole(2 ^ 53), true, 'whole itself has no 2^53 bound')
+  eq(queue.whole(1.5), false, 'a fraction fails')
+  eq(queue.whole(-1), false, 'a negative fails')
+  eq(queue.whole('7'), false, 'a string fails')
+  eq(queue.whole(nil), false, 'whole nil fails')
+  -- mailbox.key_of joins city path and id with one NUL, for every caller.
+  eq(mailbox.key_of({ path = '/srv/demo-city' }, 'ic-wisp-a1'), '/srv/demo-city\0ic-wisp-a1', 'the message key')
+  eq(mailbox.key_of({ path = '/srv/demo-city' }, 'mayor'), '/srv/demo-city\0mayor', 'the correspondent key')
+  eq(mailbox.key_of({ path = '/srv/other' }, 'ic-wisp-a1') == mailbox.key_of({ path = '/srv/demo-city' }, 'ic-wisp-a1'),
+    false, 'the city is part of the key')
+  -- mailbox.md_escape escapes markdown markup (and the backslash) only, and
+  -- mailbox.body_lines splits a body verbatim, nil as empty.
+  eq(mailbox.md_escape('plain text'), 'plain text', 'plain text is not escaped')
+  eq(mailbox.md_escape('*a* [b] #c a|b `d` _e_ <f> g\\h'), '\\*a\\* \\[b\\] \\#c a\\|b \\`d\\` \\_e\\_ \\<f\\> g\\\\h',
+    'markup is escaped')
+  eq(mailbox.md_escape('one\ntwo'), 'one / two', 'a line break becomes one line')
+  eq(mailbox.body_lines('a\nb\n'), { 'a', 'b', '' }, 'body lines verbatim')
+  eq(mailbox.body_lines(''), { '' }, 'an empty body is one empty line')
+  eq(mailbox.body_lines(nil), { '' }, 'a nil body is one empty line')
+  -- gc_mail.strip_label takes every copy of the prefix and suffix out and
+  -- trims; gc_mail.label puts them back exactly once.
+  local labelled = { subject_prefix = '[A] ', subject_suffix = ' (x)' }
+  eq(gc_mail.strip_label('[A] [A] hi (x) (x)', labelled), 'hi', 'every copy is stripped')
+  eq(gc_mail.strip_label('  hi  ', { subject_prefix = '', subject_suffix = '' }), 'hi', 'stripping trims')
+  eq(gc_mail.strip_label(nil, labelled), '', 'a nil subject strips to empty')
+  eq(gc_mail.label('[A] hi (x)', labelled), '[A] hi (x)', 'the label is applied once')
+  -- The one notify helper: gc_mail.notify is queue.notify, it adds the
+  -- gc-mail: prefix and defaults to INFO.
+  eq(gc_mail.notify, queue.notify, 'one shared notify helper')
+  notes = {}
+  queue.notify('hello')
+  queue.notify('oops', vim.log.levels.ERROR)
+  eq(notes, { { message = 'gc-mail: hello', level = vim.log.levels.INFO },
+    { message = 'gc-mail: oops', level = vim.log.levels.ERROR } }, 'the prefix and the levels')
+  -- events.close_handle stops and closes a live handle once, and leaves a
+  -- closing handle and nil alone.
+  local calls = {}
+  local live = { closing = false }
+  function live:is_closing()
+    return self.closing
+  end
+  function live:stop()
+    calls[#calls + 1] = 'stop'
+  end
+  function live:close()
+    calls[#calls + 1] = 'close'
+    self.closing = true
+  end
+  events.close_handle(live)
+  eq(calls, { 'stop', 'close' }, 'a live handle is stopped then closed')
+  events.close_handle(live)
+  eq(calls, { 'stop', 'close' }, 'a closing handle is left alone')
+  eq(pcall(events.close_handle, nil), true, 'no handle is fine')
+end)
+
 test('a record without to still sends to mayor', function()
   gc_mail.queue.stop()
   local old_record = { version = 1, city = TWO[1], subject = 'legacy mail', body = 'legacy body', created = 1, attempts = 0, next_at = 0, failed = false }

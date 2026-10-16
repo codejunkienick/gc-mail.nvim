@@ -65,12 +65,7 @@ local function handle(this, h)
   return h
 end
 
-local function close_handle(h)
-  if h and not h:is_closing() then
-    h:stop()
-    h:close()
-  end
-end
+local close_handle = require('gc_mail.events').close_handle
 
 -- Lists w's city, unless an inbox call of the panel is already in flight
 -- for it: then once more when that one ends.
@@ -214,10 +209,6 @@ end
 -- under), entries (as shown, by row) }.
 local panels = {}
 
-local function key_of(entry)
-  return entry.city.path .. '\0' .. entry.message.id
-end
-
 local function valid(panel)
   return panel and vim.api.nvim_win_is_valid(panel.win) and vim.api.nvim_buf_is_valid(panel.buf)
     and vim.api.nvim_win_get_buf(panel.win) == panel.buf
@@ -251,9 +242,9 @@ local function draw(panel)
   -- The cursor stays on the message it was on; the current window is untouched.
   row = math.min(row, #lines)
   if was then
-    local key = key_of(was)
+    local key = mailbox.key_of(was.city, was.message.id)
     for i, entry in ipairs(entries) do
-      if key_of(entry) == key then
+      if mailbox.key_of(entry.city, entry.message.id) == key then
         row = i
         break
       end
@@ -373,7 +364,7 @@ function M.open()
   end
   local origin = vim.api.nvim_get_current_win()
   if vim.api.nvim_win_get_config(origin).relative ~= '' then
-    vim.notify('gc-mail: the mail panel opens below a normal window, not a floating one', vim.log.levels.WARN)
+    gc_mail().notify('the mail panel opens below a normal window, not a floating one', vim.log.levels.WARN)
     return nil
   end
   local buf = vim.api.nvim_create_buf(false, true)

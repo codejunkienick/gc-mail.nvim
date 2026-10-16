@@ -27,19 +27,19 @@ local M = {}
 local KEYS = 'above: <CR> open  t thread  u unread  R refresh  G latest  ]m next  [m prev'
 
 -- Active chats: tab -> key -> chat
--- where key is city.path .. '\0' .. with
+-- where key is mailbox.key_of(city, with)
 local chats = {}
 
 -- Last chat opened in this session: { city = city, with = with }
 local last_chat = nil
 
 -- Compose buffers kept across reopenings while they have text:
--- key (city.path .. '\0' .. with) -> list of buffer numbers (the same chat
+-- key (mailbox.key_of(city, with)) -> list of buffer numbers (the same chat
 -- open in two tab pages keeps one draft per tab page)
 local saved_compose = {}
 
 -- Reopen anchors kept across closings, in session memory only:
--- key (city.path .. '\0' .. with) -> { id = <the message at the top of the
+-- key (mailbox.key_of(city, with)) -> { id = <the message at the top of the
 -- view when closed>, following = <whether the view followed the end>,
 -- known = <the message ids the close had seen>, below = <the ids it counted
 -- below the view> }. The next open restores that message to the top with
@@ -48,7 +48,7 @@ local saved_compose = {}
 local saved_place = {}
 
 -- Session size memory, in memory only and never written to disk:
--- key (city.path .. '\0' .. with) -> { width = <timeline columns a user
+-- key (mailbox.key_of(city, with)) -> { width = <timeline columns a user
 -- resize gave this chat>, compose_height = <compose rows a user resize
 -- gave this chat> }. A chat with no entry opens at chat_width and
 -- chat_compose_height; a new session starts from those again. Full-size
@@ -119,9 +119,7 @@ local function set_buf_name_unique(buf, base_name, tab)
   end
 end
 
-local function key_of(city, with)
-  return city.path .. '\0' .. with
-end
+local key_of = mailbox.key_of
 
 local function valid_chat(chat)
   return chat ~= nil
@@ -201,7 +199,7 @@ local function remember_compose_height(chat)
   end
   chat.want_compose_height = height
   chat.applied_compose_height = height
-  local key = chat.city.path .. '\0' .. chat.with
+  local key = key_of(chat.city, chat.with)
   local entry = saved_size[key] or {}
   entry.compose_height = height
   saved_size[key] = entry
@@ -307,7 +305,7 @@ local function remember_width(chat)
   end
   chat.want_width = width
   chat.applied_width = width
-  local key = chat.city.path .. '\0' .. chat.with
+  local key = key_of(chat.city, chat.with)
   local entry = saved_size[key] or {}
   entry.width = width
   saved_size[key] = entry
@@ -391,25 +389,9 @@ local function observe_size(chat)
   end
 end
 
-local function body_lines(text)
-  return vim.split(text or '', '\n', { plain = true })
-end
-
-local function md_escape(text)
-  return (gc_mail.one_line(text):gsub('[\\`*_%[%]<>#|]', '\\%0'))
-end
-
-local function strip_label(text)
-  local prefix = gc_mail.config.subject_prefix or ''
-  local suffix = gc_mail.config.subject_suffix or ''
-  local core = text or ''
-  for _, part in ipairs({ prefix, suffix }) do
-    if part ~= '' then
-      core = core:gsub(vim.pesc(part), '')
-    end
-  end
-  return vim.trim(core)
-end
+local body_lines = mailbox.body_lines
+local md_escape = mailbox.md_escape
+local strip_label = gc_mail.strip_label
 
 local function first_non_empty_line(body)
   for _, line in ipairs(vim.split(body or '', '\n', { plain = true })) do
@@ -464,8 +446,7 @@ local function resolve_city_and_with(city_arg, with_arg)
     with = with_arg
   end
 
-  if type(with) ~= 'string' or with == '' or #with > 100
-      or with:find('[%z\1-\31\127]') or with:sub(1, 1) == '-' then
+  if not queue.address_ok(with) then
     error(('gc-mail: cannot chat with "%s": bad address'):format(tostring(with)), 2)
   end
 
@@ -573,7 +554,7 @@ local function load_city(city)
     end
     if err then
       if not load_failed[city.path] then
-        vim.notify('gc-mail: ' .. err, vim.log.levels.ERROR)
+        queue.notify(err, vim.log.levels.ERROR)
       end
       load_failed[city.path] = err
       -- The open's history wait answered with nothing: drop pending reopen
@@ -1202,12 +1183,7 @@ local function on_event(this, city, event)
   end
 end
 
-local function close_handle(h)
-  if h and not h:is_closing() then
-    h:stop()
-    h:close()
-  end
-end
+local close_handle = events.close_handle
 
 -- The fallback: `entry`'s city loaded every poll period while it is watched.
 local function start_timer(this, entry)
@@ -1418,14 +1394,14 @@ local function capture_place(chat)
   for mid in pairs(chat.below) do
     below[mid] = true
   end
-  saved_place[chat.city.path .. '\0' .. chat.with] = { id = id, following = following(at), known = known, below = below }
+  saved_place[key_of(chat.city, chat.with)] = { id = id, following = following(at), known = known, below = below }
   chat.place_captured = true
   return true
 end
 
 function M.close(chat)
   local k = key_of(chat.city, chat.with)
-  local compose_key = chat.city.path .. '\0' .. chat.with
+  local compose_key = key_of(chat.city, chat.with)
   local tab = chat.tab
 
   -- The reopen anchor, captured while the timeline can still be read (a
@@ -1662,9 +1638,9 @@ function M.open(city_arg, with_arg)
       if refreshed and #refreshed > 0 then
         M.open(city_arg, with_arg)
       elseif refreshed then
-        vim.notify('gc-mail: no cities are registered with gc', vim.log.levels.WARN)
+        queue.notify('no cities are registered with gc', vim.log.levels.WARN)
       else
-        vim.notify('gc-mail: ' .. tostring(err), vim.log.levels.ERROR)
+        queue.notify(tostring(err), vim.log.levels.ERROR)
       end
     end)
     return nil
@@ -1687,7 +1663,7 @@ function M.open(city_arg, with_arg)
 
   local origin = vim.api.nvim_get_current_win()
   if vim.api.nvim_win_get_config(origin).relative ~= '' then
-    vim.notify('gc-mail: the chat opens beside a normal window, not a floating one', vim.log.levels.WARN)
+    queue.notify('the chat opens beside a normal window, not a floating one', vim.log.levels.WARN)
     return nil
   end
 
@@ -1695,7 +1671,7 @@ function M.open(city_arg, with_arg)
   -- splits beside it exactly as before.
   local taken_buf = fullsize_buf(origin)
 
-  local compose_key = city.path .. '\0' .. with
+  local compose_key = key_of(city, with)
   local compose_buf
   for _, b in ipairs(saved_compose[compose_key] or {}) do
     -- Reuse a kept compose buffer: it is shown in no window of any tab page
@@ -2170,7 +2146,7 @@ function M.open_list()
       if err then
         view.failed[city.path] = err
         if not picker.closed() then
-          vim.notify('gc-mail: ' .. err, vim.log.levels.ERROR)
+          queue.notify(err, vim.log.levels.ERROR)
         end
       else
         view.loaded[city.path] = true
@@ -2200,10 +2176,10 @@ function M.open_list()
       end
       if not cities then
         picker.close()
-        return vim.notify('gc-mail: ' .. tostring(err), vim.log.levels.ERROR)
+        return queue.notify(tostring(err), vim.log.levels.ERROR)
       elseif #cities == 0 then
         picker.close()
-        return vim.notify('gc-mail: no cities are registered with gc', vim.log.levels.WARN)
+        return queue.notify('no cities are registered with gc', vim.log.levels.WARN)
       end
       start(cities)
     end)

@@ -87,11 +87,24 @@ local BODY_MAX_BYTES = 120 * 1024
 local CITIES_TIMEOUT_MS = 10000
 local LOADING = ' loading… '
 
-local function notify(message, level)
-  vim.notify('gc-mail: ' .. message, level or vim.log.levels.INFO)
-end
+local notify = queue.notify
+M.notify = notify
 
 local first_lines = queue.first_lines
+
+--- `text` with any copy of the configured subject prefix and suffix taken
+--- out and the rest trimmed: the core of M.label, also used by the chat to
+--- compare a subject with a body's first line.
+function M.strip_label(text, opts)
+  opts = opts or M.config
+  local core = text or ''
+  for _, part in ipairs({ opts.subject_prefix or '', opts.subject_suffix or '' }) do
+    if part ~= '' then
+      core = core:gsub(vim.pesc(part), '')
+    end
+  end
+  return vim.trim(core)
+end
 
 --- `subject` with the configured prefix and suffix, exactly once: any copy of
 --- either already in it (a reply to a labelled message) is taken out first,
@@ -99,13 +112,7 @@ local first_lines = queue.first_lines
 function M.label(subject, opts)
   opts = opts or M.config
   local prefix, suffix = opts.subject_prefix or '', opts.subject_suffix or ''
-  local core = subject
-  for _, part in ipairs({ prefix, suffix }) do
-    if part ~= '' then
-      core = core:gsub(vim.pesc(part), '')
-    end
-  end
-  core = vim.trim(core)
+  local core = M.strip_label(subject, opts)
   local room = SUBJECT_MAX - vim.fn.strchars(prefix) - vim.fn.strchars(suffix)
   return prefix .. vim.fn.strcharpart(core, 0, room) .. suffix
 end
@@ -135,9 +142,9 @@ function M.message(buf)
   return { subject = subject, body = body }
 end
 
--- A control character (0x00-0x1f, 0x7f): a city name or path with one is
--- malformed (a picker line cannot hold a line break).
-local CONTROL = '[%z\1-\31\127]'
+-- A city name or path with a control character is malformed (a picker
+-- line cannot hold a line break); the pattern itself is queue.CONTROL.
+local CONTROL = queue.CONTROL
 
 -- The cities in a finished `gc cities --json` (a vim.system result of a call
 -- that exited 0), or nil and the reason. Anything but the documented record

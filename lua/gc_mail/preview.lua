@@ -177,7 +177,8 @@ function M.attach(opts)
       return
     end
     local entry = opts.entry_at(vim.api.nvim_win_get_cursor(list_win)[1])
-    local signature = entry and (entry.city.path .. '\0' .. entry.message.id .. '\0' .. entry.message.body) or false
+    local signature = entry
+      and (require('gc_mail.mailbox').key_of(entry.city, entry.message.id) .. '\0' .. entry.message.body) or false
     if signature == last then
       return
     end

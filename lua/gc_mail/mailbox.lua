@@ -51,9 +51,7 @@ local uv = vim.uv
 local config = {
   dir = nil, -- <state_dir>/mailbox, set by configure() (default: from gc_mail.config)
   timeout_ms = 10000,
-  notify = function(message, level)
-    vim.notify('gc-mail: ' .. message, level or vim.log.levels.INFO)
-  end,
+  notify = queue.notify,
 }
 
 function M.configure(opts)
@@ -144,9 +142,9 @@ local function decode(text)
   return pcall(vim.json.decode, text, { luanil = { object = true, array = true } })
 end
 
-local function whole(n)
-  return type(n) == 'number' and n >= 0 and n == math.floor(n) and n < 2 ^ 53
-end
+-- queue.whole, with the < 2^53 bound this module's counts need (a count
+-- gc prints must stay exactly representable) added at each use below.
+local whole = queue.whole
 
 local function strings(list)
   if type(list) ~= 'table' or not vim.islist(list) then
@@ -258,7 +256,7 @@ local function action_of(verb)
         return nil, #asked == 1 and 'it did not name the message' or ('it did not name ' .. id)
       end
     end
-    if not whole(record.count) or (marks and record.count < 1) then
+    if not whole(record.count) or record.count >= 2 ^ 53 or (marks and record.count < 1) then
       return nil, 'no count'
     end
     return true
@@ -298,7 +296,7 @@ local DECODE = {
     if type(record.recipient) ~= 'string' or not strings(record.recipients) then
       return nil, 'no recipient'
     end
-    if not whole(record.total) or not whole(record.unread) then
+    if not whole(record.total) or record.total >= 2 ^ 53 or not whole(record.unread) or record.unread >= 2 ^ 53 then
       return nil, 'no total and unread count'
     end
     return record.unread
@@ -370,9 +368,12 @@ M.run = run
 
 -- ---- kept copies -----------------------------------------------------------
 
-local function key_of(city, id)
+--- The key of one message (or, for the chat, of one correspondent) in one
+--- city, shared by the panel, the preview and the chat.
+function M.key_of(city, id)
   return city.path .. '\0' .. id
 end
+local key_of = M.key_of
 
 local function file_of(city, id)
   return vim.fn.sha256(city.path):sub(1, 16) .. '-' .. id .. '.json'
@@ -385,7 +386,7 @@ local function invalid_kept(record)
   end
   local city = record.city
   if type(city) ~= 'table' or type(city.name) ~= 'string' or city.name == '' or type(city.path) ~= 'string'
-      or city.path == '' or city.name:find('[%z\1-\31\127]') or city.path:find('[%z\1-\31\127]') then
+      or city.path == '' or city.name:find(queue.CONTROL) or city.path:find(queue.CONTROL) then
     return 'bad city'
   end
   local _, why = M.message(record.message)
@@ -808,9 +809,9 @@ local function scratch(name, lines, keys, split, filetype)
 end
 
 --- The lines of a message body, verbatim: the one renderer of a body, for the
---- message view, the thread view and the preview pane.
+--- message view, the thread view, the preview pane and the chat.
 local function body_lines(text)
-  return vim.split(text, '\n', { plain = true })
+  return vim.split(text or '', '\n', { plain = true })
 end
 M.body_lines = body_lines
 
@@ -828,10 +829,11 @@ end
 
 -- Backslash-escapes what markdown reads as markup in a header value (the
 -- backslash itself too), so a subject or sender never turns into emphasis, a
--- link, a heading or a table. Bodies are never escaped.
-local function md_escape(text)
+-- link, a heading or a table. Bodies are never escaped. Shared with the chat.
+function M.md_escape(text)
   return (require('gc_mail').one_line(text):gsub('[\\`*_%[%]<>#|]', '\\%0'))
 end
+local md_escape = M.md_escape
 
 local function markdown()
   return require('gc_mail').config.markdown

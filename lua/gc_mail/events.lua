@@ -37,12 +37,15 @@ local function handle(this, h)
   return h
 end
 
-local function close_handle(h)
+--- Closes one uv handle that is not already closing, shared with the
+--- panel and the chat.
+function M.close_handle(h)
   if h and not h:is_closing() then
     h:stop()
     h:close()
   end
 end
+local close_handle = M.close_handle
 
 local function subscriber_has_city(name, city_path)
   local list = subscriber_cities[name]
@@ -67,7 +70,7 @@ local function dispatch(this, city, event)
         local ok, err = pcall(fn, city, event)
         if not ok and not subscriber_errors[name] then
           subscriber_errors[name] = true
-          vim.notify('gc-mail: subscriber ' .. name .. ' failed: ' .. tostring(err), vim.log.levels.ERROR)
+          queue.notify(('subscriber %s failed: %s'):format(name, tostring(err)), vim.log.levels.ERROR)
         end
       end
     end
