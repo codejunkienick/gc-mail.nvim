@@ -22,9 +22,6 @@ local M = {}
 
 local uv = vim.uv
 
-local TITLE = ' gc mail: <CR> open  r reply  t thread  c chat  s search  x mark  m read  u unread  a archive  d delete  H all  p preview  R refresh  q close '
-local TITLE_ALL = ' all mail  <CR> open  r reply  t thread  c chat  s search  x mark  m read  u unread  a archive  d delete  H all  p preview  R refresh  q close '
-
 local config = {
   poll_ms = nil, -- default: gc_mail.config.panel_poll_ms
   height = nil, -- default: gc_mail.config.panel_height
@@ -250,7 +247,7 @@ local function draw(panel)
   vim.api.nvim_buf_set_lines(panel.buf, 0, -1, false, lines)
   vim.bo[panel.buf].modifiable = false
   panel.entries = entries
-  vim.wo[panel.win].statusline = mailbox.all() and TITLE_ALL or TITLE
+  vim.wo[panel.win].statusline = mailbox.title(mailbox.all(), true)
   -- The cursor stays on the message it was on; the current window is untouched.
   row = math.min(row, #lines)
   if was then
@@ -389,7 +386,7 @@ function M.open()
   local wo = vim.wo[win]
   wo.winfixheight, wo.number, wo.relativenumber, wo.signcolumn = true, false, false, 'no'
   wo.foldcolumn, wo.cursorline, wo.wrap, wo.list, wo.spell = '0', true, false, false, false
-  wo.statusline = TITLE
+  wo.statusline = mailbox.title(false, true)
   vim.bo[buf].filetype = 'gcmail-panel'
   if panels[tab] then
     forget(panels[tab]) -- its window shows another buffer now

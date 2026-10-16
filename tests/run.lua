@@ -8807,6 +8807,109 @@ test('all mail: history-only messages are archived like any other and come back 
   press('q')
 end)
 
+test('single archive and delete take the bulk route, read and unread share one callback, and one builder makes every title', function()
+  eq(mailbox().title(false),
+    ' gc mail: <CR> open  r reply  t thread  c chat  s search  x mark  m read  u unread  a archive  d delete  H all  R refresh ',
+    'the mailbox title')
+  eq(mailbox().title(true),
+    ' all mail  <CR> open  r reply  t thread  c chat  s search  x mark  m read  u unread  a archive  d delete  H all  R refresh ',
+    'the all-mail title')
+  eq(mailbox().title(false, true),
+    ' gc mail: <CR> open  r reply  t thread  c chat  s search  x mark  m read  u unread  a archive  d delete  H all  p preview  R refresh  q close ',
+    'the panel title')
+  eq(mailbox().title(true, true),
+    ' all mail  <CR> open  r reply  t thread  c chat  s search  x mark  m read  u unread  a archive  d delete  H all  p preview  R refresh  q close ',
+    'the all-mail panel title')
+  preload()
+  inbox('demo-city', {
+    msg('ic-wisp-a1', { subject = 'first', created_at = '2026-10-07T13:00:00Z' }),
+    msg('ic-wisp-a2', { subject = 'second', created_at = '2026-10-07T12:00:00Z' }),
+    msg('ic-wisp-a3', { subject = 'third', created_at = '2026-10-07T11:00:00Z' }),
+  })
+  inbox('other city', {})
+  local pwin = panel().open()
+  settled(pwin, 3)
+  eq(vim.wo[pwin].statusline, mailbox().title(false, true), 'the panel status line is the built title')
+  local win = mailbox().open()
+  settled(win, 3)
+  eq(title_of(win), mailbox().title(false), 'the float title is the built title')
+  -- One message through M.act: one call with one id, the single notice.
+  acted('archive', 'ic-wisp-a1')
+  mailbox().act('archive', { mailbox().entries()[1] })
+  wait('the single archive notice', function()
+    return notes[#notes] ~= nil and notes[#notes].message == 'gc-mail: archived: first'
+  end)
+  eq(rows(win), { '  ● demo-city  mayor  second', '  ● demo-city  mayor  third' }, 'only the archived one left')
+  eq(calls_of('archive'), { call('archive', '/srv/demo-city', 'ic-wisp-a1', '--json') }, 'one archive call, one id')
+  local confirm = vim.fn.confirm
+  local asked
+  vim.fn.confirm = function(question)
+    asked = question
+    return 1
+  end
+  acted('delete', 'ic-wisp-a2')
+  mailbox().act('delete', { mailbox().entries()[1] })
+  vim.fn.confirm = confirm
+  eq(asked, 'Delete "second" from mayor?', 'the single delete asks its own question')
+  wait('the single delete notice', function()
+    return notes[#notes] ~= nil and notes[#notes].message == 'gc-mail: deleted: second'
+  end)
+  eq(rows(win), { '  ● demo-city  mayor  third' }, 'the deleted one left too')
+  eq(calls_of('delete'), { call('delete', '/srv/demo-city', 'ic-wisp-a2', '--json') }, 'one delete call, one id')
+  -- The bulk route checks every id before any gc call: a bad single id is
+  -- refused in its words and runs nothing.
+  local bad = { city = { name = 'demo-city', path = '/srv/demo-city' },
+    message = { id = 'not an id', from = 'mayor', subject = 'bad one' }, read = false }
+  mailbox().act('archive', { bad })
+  eq(errors(), { 'gc-mail: cannot archive "bad one": not a list of distinct gc mail ids' },
+    'the single archive is refused before gc runs')
+  eq(#calls_of('archive'), 1, 'no second archive call')
+  -- Read and unread answer through the one callback rule: (true, nil,
+  -- applied) on success, (false, err) on failure, and no callback is fine.
+  local entry = mailbox().entries()[1]
+  local seen
+  acted('mark-read', 'ic-wisp-a3')
+  mailbox().actions.read(entry, function(ok, err, applied)
+    seen = { ok, err, applied }
+  end)
+  wait('the read callback', function()
+    return seen ~= nil
+  end)
+  eq(seen, { true, nil, true }, 'read answers true, no error, applied')
+  eq(entry.read, true, 'read applied')
+  seen = nil
+  acted('mark-unread', 'ic-wisp-a3')
+  mailbox().actions.unread(entry, function(ok, err, applied)
+    seen = { ok, err, applied }
+  end)
+  wait('the unread callback', function()
+    return seen ~= nil
+  end)
+  eq(seen, { true, nil, true }, 'unread answers the same way')
+  eq(entry.read, false, 'unread applied')
+  seen = nil
+  raw_answer('mark-read', 'exit', '1')
+  raw_answer('mark-read', 'stderr', 'fake mark-read error\n')
+  mailbox().actions.read(entry, function(ok, err)
+    seen = { ok, err }
+  end)
+  wait('the failed read callback', function()
+    return seen ~= nil
+  end)
+  eq(seen[1], false, 'a failed read answers false')
+  eq(type(seen[2]) == 'string' and seen[2]:find('mark-read', 1, true) ~= nil, true, 'with the reason')
+  eq(entry.read, false, 'the failed read changed nothing')
+  vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/mark-read.exit')
+  vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/mark-read.stderr')
+  acted('mark-read', 'ic-wisp-a3')
+  mailbox().actions.read(entry)
+  wait('a read with no callback still applies', function()
+    return entry.read == true
+  end)
+  eq(#errors_matching('cannot mark "third" read'), 1, 'only the failed read was said')
+  press('q')
+end)
+
 test('every mailbox mapping this view adds carries a gc-mail: desc, in normal and visual mode', function()
   local cities, log = city_dirs()
   write(log, '')

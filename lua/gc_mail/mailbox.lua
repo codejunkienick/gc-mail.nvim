@@ -67,8 +67,23 @@ M.dir = dir
 
 local first_lines = queue.first_lines
 local RECIPIENT = 'human'
-local TITLE = ' gc mail: <CR> open  r reply  t thread  c chat  s search  x mark  m read  u unread  a archive  d delete  H all  R refresh '
-local TITLE_ALL = ' all mail  <CR> open  r reply  t thread  c chat  s search  x mark  m read  u unread  a archive  d delete  H all  R refresh '
+local TITLE_KEYS = { '<CR> open', 'r reply', 't thread', 'c chat', 's search', 'x mark', 'm read', 'u unread',
+  'a archive', 'd delete', 'H all' }
+
+-- The mailbox and panel titles from one key list: `all` swaps the prefix;
+-- `extra` (the panel) adds its p preview and q close keys.
+local function title(all, extra)
+  local keys = vim.list_extend({}, TITLE_KEYS)
+  if extra then
+    keys[#keys + 1] = 'p preview'
+  end
+  keys[#keys + 1] = 'R refresh'
+  if extra then
+    keys[#keys + 1] = 'q close'
+  end
+  return (all and ' all mail  ' or ' gc mail: ') .. table.concat(keys, '  ') .. ' '
+end
+M.title = title
 local LOADING = ' loading… '
 local EMPTY = ' no mail '
 local KEYS_HINT = 'r reply  t thread  c chat  u unread  a archive  d delete  q close'
@@ -683,7 +698,7 @@ local function render()
   if view and not view.picker.closed() then
     view.entries = M.entries()
     view.picker.set(M.lines(view.entries, os.time(), view.pending > 0))
-    show_title(view.picker, box.all and TITLE_ALL or TITLE)
+    show_title(view.picker, title(box.all))
     if view.preview then
       view.preview.update()
     end
@@ -876,8 +891,8 @@ local function message_view(entry, split)
     t = function() actions.thread(entry) end,
     c = function() actions.chat(entry) end,
     u = function() actions.unread(entry) end,
-    a = function() actions.archive(entry) end,
-    d = function() actions.delete(entry) end,
+    a = function() M.act('archive', { entry }) end,
+    d = function() M.act('delete', { entry }) end,
   }, split, markdown() and 'markdown' or nil)
   return buf
 end
@@ -907,22 +922,24 @@ function actions.open(entry, split)
   return buf
 end
 
+-- Calls `on_done` with the rest, when it is a function at all.
+local function done(on_done, ...)
+  if type(on_done) == 'function' then
+    on_done(...)
+  end
+end
+
 function actions.read(entry, on_done)
   local at = started(entry)
   run(entry.city, 'mark-read', entry.message.id, function(ok, err)
     if not ok then
       notify(('cannot mark "%s" read: %s'):format(entry.message.subject, err), vim.log.levels.ERROR)
-      if type(on_done) == 'function' then
-        on_done(false, err)
-      end
+      done(on_done, false, err)
       return
     end
-    local applied = apply(entry, at, function()
+    done(on_done, true, nil, apply(entry, at, function()
       now_read(entry)
-    end)
-    if type(on_done) == 'function' then
-      on_done(true, nil, applied)
-    end
+    end))
   end)
 end
 
@@ -935,12 +952,10 @@ function actions.unread(entry, on_done)
   run(entry.city, 'mark-unread', entry.message.id, function(ok, err)
     if not ok then
       notify(('cannot mark "%s" unread: %s'):format(entry.message.subject, err), vim.log.levels.ERROR)
-      if type(on_done) == 'function' then
-        on_done(false, err)
-      end
+      done(on_done, false, err)
       return
     end
-    local applied = apply(entry, at, function()
+    done(on_done, true, nil, apply(entry, at, function()
       entry.read, entry.message.read = false, false
       if entry.kept then
         local kept, kerr = keep(entry)
@@ -951,37 +966,8 @@ function actions.unread(entry, on_done)
         box.inbox[entry.city.path] = box.inbox[entry.city.path] or {}
         box.inbox[entry.city.path][entry.message.id] = entry
       end
-    end)
-    if type(on_done) == 'function' then
-      on_done(true, nil, applied)
-    end
+    end))
   end)
-end
-
-local function remove(verb)
-  return function(entry)
-    local at = started(entry)
-    run(entry.city, verb, entry.message.id, function(ok, err)
-      if not ok then
-        return notify(('cannot %s "%s": %s'):format(verb, entry.message.subject, err), vim.log.levels.ERROR)
-      end
-      apply(entry, at, function()
-        gone(entry)
-        notify(('%s: %s'):format(verb == 'archive' and 'archived' or 'deleted', entry.message.subject))
-      end)
-    end)
-  end
-end
-actions.archive = remove('archive')
-local delete = remove('delete')
-
--- Delete asks first; only the message asked about is deleted.
-function actions.delete(entry)
-  local choice = vim.fn.confirm(('Delete "%s" from %s?'):format(require('gc_mail').one_line(entry.message.subject),
-    entry.message.from), '&Yes\n&No', 2)
-  if choice == 1 then
-    delete(entry)
-  end
 end
 
 function actions.thread(entry, split)
@@ -1004,21 +990,17 @@ function actions.thread(entry, split)
     scratch(('gc-mail://%s/thread/%s'):format(entry.city.name, id), lines, nil, split, markdown() and 'markdown' or nil)
   end
 
+  local id = entry.message.thread_id or entry.message.id
+  local function on_thread(messages, err)
+    if not messages then
+      return notify(('cannot show the thread of "%s": %s'):format(entry.message.subject, err), vim.log.levels.ERROR)
+    end
+    show_thread(id, messages)
+  end
   if entry.message.thread_id then
-    require('gc_mail.history').load(entry.city, { thread = entry.message.thread_id }, function(messages, err)
-      if not messages then
-        return notify(('cannot show the thread of "%s": %s'):format(entry.message.subject, err), vim.log.levels.ERROR)
-      end
-      show_thread(entry.message.thread_id, messages)
-    end)
+    require('gc_mail.history').load(entry.city, { thread = id }, on_thread)
   else
-    local id = entry.message.id
-    run(entry.city, 'thread', id, function(messages, err)
-      if not messages then
-        return notify(('cannot show the thread of "%s": %s'):format(entry.message.subject, err), vim.log.levels.ERROR)
-      end
-      show_thread(id, messages)
-    end)
+    run(entry.city, 'thread', id, on_thread)
   end
 end
 
@@ -1125,13 +1107,15 @@ local function one_by_one(action, list)
   step()
 end
 
--- a and d on several messages: one `gc mail archive|delete <id> <id> ...`
--- per city, every id checked before any clock starts and each message's
--- clock started before the call (I2). The answer must name every id (I1);
--- then each message is applied on its own (a later action on one drops only
--- that one). A refused or failed call says the city's ids once and changes
--- nothing.
+-- a and d on one or several messages: one `gc mail archive|delete <id>
+-- [<id> ...]` per city, every id checked before any clock starts and each
+-- message's clock started before the call (I2). The answer must name every
+-- id (I1); then each message is applied on its own (a later action on one
+-- drops only that one). A refused or failed call says the city's ids once
+-- and changes nothing. One message keeps the single notice and failure
+-- texts (`archived: <subject>`, `cannot archive "<subject>": ...`).
 local function remove_many(verb, list)
+  local single = #list == 1 and list[1] or nil
   local order, groups = {}, {}
   for _, entry in ipairs(list) do
     local path = entry.city.path
@@ -1147,8 +1131,12 @@ local function remove_many(verb, list)
       return entry.message.id
     end, group.entries)
     local function refused(err)
-      notify(('cannot %s %d messages in %s (%s): %s'):format(verb, #ids, group.city.name, table.concat(ids, ' '), err),
-        vim.log.levels.ERROR)
+      if single then
+        notify(('cannot %s "%s": %s'):format(verb, single.message.subject, err), vim.log.levels.ERROR)
+      else
+        notify(('cannot %s %d messages in %s (%s): %s'):format(verb, #ids, group.city.name, table.concat(ids, ' '),
+          err), vim.log.levels.ERROR)
+      end
     end
     if not mail_ids(ids) then
       refused('not a list of distinct gc mail ids')
@@ -1158,23 +1146,28 @@ local function remove_many(verb, list)
         if not ok then
           return refused(err)
         end
-        local done = 0
+        local applied = 0
         for i, entry in ipairs(group.entries) do
           if apply(entry, ats[i], function() gone(entry) end) then
-            done = done + 1
+            applied = applied + 1
           end
         end
-        if done > 0 then
-          notify(('%s %d messages in %s'):format(verb == 'archive' and 'archived' or 'deleted', done, group.city.name))
+        if applied > 0 then
+          if single then
+            notify(('%s: %s'):format(verb == 'archive' and 'archived' or 'deleted', single.message.subject))
+          else
+            notify(('%s %d messages in %s'):format(verb == 'archive' and 'archived' or 'deleted', applied,
+              group.city.name))
+          end
         end
       end)
     end
   end
 end
 
---- Runs `verb` (read, unread, archive or delete) on `list` (M.targets). One
---- message is today's single action; several are a bulk action, and delete
---- asks once for all of them.
+--- Runs `verb` (read, unread, archive or delete) on `list` (M.targets).
+--- Archive and delete always go through remove_many; delete asks first,
+--- for one message with today's question, for several with one for all.
 function M.act(verb, list)
   if #list == 0 then
     return
@@ -1182,11 +1175,13 @@ function M.act(verb, list)
   if verb == 'read' or verb == 'unread' then
     return one_by_one(actions[verb], list)
   end
-  if #list == 1 then
-    return actions[verb](list[1])
-  end
-  if verb == 'delete' and vim.fn.confirm(('Delete %d messages?'):format(#list), '&Yes\n&No', 2) ~= 1 then
-    return
+  if verb == 'delete' then
+    local question = #list == 1
+        and ('Delete "%s" from %s?'):format(require('gc_mail').one_line(list[1].message.subject), list[1].message.from)
+      or ('Delete %d messages?'):format(#list)
+    if vim.fn.confirm(question, '&Yes\n&No', 2) ~= 1 then
+      return
+    end
   end
   remove_many(verb, list)
 end
@@ -1288,7 +1283,7 @@ function M.open()
     end
   end
   local entries = M.entries()
-  local picker = gc_mail.float(box.all and TITLE_ALL or TITLE, M.lines(entries, os.time(), true), {
+  local picker = gc_mail.float(title(box.all), M.lines(entries, os.time(), true), {
     ['<CR>'] = on(function(entry, picker)
       picker.close()
       actions.open(entry)
