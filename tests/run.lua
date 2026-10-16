@@ -74,30 +74,35 @@ local function fresh()
     gc_mail.queue.stop()
     wait('the previous test left a send running', gc_mail.queue.idle)
   end
+  -- Quiesce each loaded module through its own reset (or stop), so no timer
+  -- or subscription of an earlier test outlives it, then drop every gc_mail
+  -- module: search captures history at require time, so it must go too, or a
+  -- later test's search would read the history of the test that first loaded it.
+  for name, mod in pairs(package.loaded) do
+    if name:match('^gc_mail') and type(mod) == 'table' then
+      if type(mod.reset) == 'function' then
+        mod.reset()
+      elseif type(mod.stop) == 'function' then
+        mod.stop()
+      end
+    end
+  end
+  -- The panel has neither reset nor stop: only close_all() stops its poll
+  -- and debounce timers and closes its splits, which an unload would leave
+  -- firing into the next test's fake log.
   if package.loaded['gc_mail.panel'] then
     package.loaded['gc_mail.panel'].close_all()
   end
-  if package.loaded['gc_mail.watch'] then
-    pcall(package.loaded['gc_mail.watch'].reset)
-  end
-  if package.loaded['gc_mail.chat'] and package.loaded['gc_mail.chat'].reset then
-    pcall(package.loaded['gc_mail.chat'].reset)
-  end
-  if package.loaded['gc_mail.events'] then
-    pcall(package.loaded['gc_mail.events'].reset)
-  end
-  package.loaded['gc_mail.preview'] = nil
+  -- The new-mail check is a uv timer an unload would not stop; its answers
+  -- would land in a later test's fake log.
   if package.loaded['gc_mail.mailbox'] then
     package.loaded['gc_mail.mailbox'].stop_check()
   end
-  package.loaded['gc_mail'] = nil
-  package.loaded['gc_mail.queue'] = nil
-  package.loaded['gc_mail.mailbox'] = nil
-  package.loaded['gc_mail.panel'] = nil
-  package.loaded['gc_mail.chat'] = nil
-  package.loaded['gc_mail.events'] = nil
-  package.loaded['gc_mail.watch'] = nil
-  package.loaded['gc_mail.history'] = nil
+  for name in pairs(package.loaded) do
+    if name:match('^gc_mail') then
+      package.loaded[name] = nil
+    end
+  end
   gc_mail = require('gc_mail')
   -- The preview pane has its own tests; the others count windows and floats.
   gc_mail.config.preview = false
@@ -218,6 +223,33 @@ local function mail_calls()
     calls[#calls + 1] = argv
   end
   return calls
+end
+
+-- The logged argv lists filtered by verb (argv[4]), city path (argv[2]) and
+-- message id (argv[5]); an absent field matches everything.
+local function calls_where(filter)
+  return vim.tbl_filter(function(c)
+    return (filter.verb == nil or c[4] == filter.verb)
+      and (filter.path == nil or c[2] == filter.path)
+      and (filter.id == nil or c[5] == filter.id)
+  end, mail_calls())
+end
+
+-- One event log line as gc writes it. Without a message it only names `id`;
+-- with one it carries it as its payload, completed the way a live message
+-- arrives: from the mayor, to human, unread, stamped now.
+local function event_line(kind, id, message)
+  if message == nil then
+    return vim.json.encode({ seq = 1, type = kind, ts = '2026-10-08T10:00:00Z', actor = 'human', subject = id }) .. '\n'
+  end
+  local m = vim.tbl_extend('force', {
+    from = 'mayor',
+    to = 'human',
+    read = false,
+    created_at = os.date('!%Y-%m-%dT%H:%M:%SZ', os.time()),
+  }, message)
+  return vim.json.encode({ seq = 1, type = kind, ts = m.created_at, actor = m.from, subject = id,
+    payload = { message = m } }) .. '\n'
 end
 
 test('nothing runs at load time and setup maps <Space>mm, <Space>mi, <Space>mp and the commands', function()
@@ -2884,21 +2916,10 @@ local function append(path, text)
   file:close()
 end
 
--- One event log line as gc writes it.
-local function event(kind)
-  return vim.json.encode({ seq = 1, type = kind, ts = '2026-10-08T10:00:00Z', actor = 'human', subject = 'ic-wisp-a1' }) .. '\n'
-end
-
-local function inbox_calls(path)
-  return #vim.tbl_filter(function(c)
-    return c[4] == 'inbox' and c[2] == path
-  end, mail_calls())
-end
-
 -- Waits until the panel has listed each city once and nothing else runs.
 local function listed(cities)
   wait('the panel listed every city', function()
-    return inbox_calls(cities[1].path) >= 1 and inbox_calls(cities[2].path) >= 1
+    return #calls_where({ verb = 'inbox', path = cities[1].path }) >= 1 and #calls_where({ verb = 'inbox', path = cities[2].path }) >= 1
   end)
   vim.wait(200)
 end
@@ -2914,7 +2935,7 @@ end
 
 test('the panel opens below the current window without moving focus or the cursor, one per tab page', function()
   local cities, log = city_dirs()
-  write(log, event('order.completed'))
+  write(log, event_line('order.completed', 'ic-wisp-a1'))
   inbox('demo-city', { msg('ic-wisp-a1', { subject = 'first' }) })
   inbox('other city', {})
   buffer({ 'line one', 'line two', 'line three' })
@@ -2940,7 +2961,7 @@ test('the panel opens below the current window without moving focus or the curso
   -- A mail arriving changes the panel, not the focus.
   inbox('demo-city', { msg('ic-wisp-a2', { subject = 'second', created_at = '2026-10-07T13:00:00Z' }),
     msg('ic-wisp-a1', { subject = 'first' }) })
-  append(log, event('mail.sent'))
+  append(log, event_line('mail.sent', 'ic-wisp-a1'))
   wait('the new mail is shown', function()
     return #rows(win) == 2
   end)
@@ -3017,53 +3038,53 @@ end)
 
 test('a mail line in a city event log lists that city once after the debounce; other lines list nothing', function()
   local cities, log = city_dirs()
-  write(log, event('order.completed'))
+  write(log, event_line('order.completed', 'ic-wisp-a1'))
   inbox('demo-city', {})
   inbox('other city', {})
   local win = panel().open()
   listed(cities)
-  eq({ inbox_calls(cities[1].path), inbox_calls(cities[2].path) }, { 1, 1 }, 'one listing each on open')
-  append(log, event('order.completed') .. 'not json "mail.sent"\n' .. '{"seq":2,"note":"mail.sent"}\n'
+  eq({ #calls_where({ verb = 'inbox', path = cities[1].path }), #calls_where({ verb = 'inbox', path = cities[2].path }) }, { 1, 1 }, 'one listing each on open')
+  append(log, event_line('order.completed', 'ic-wisp-a1') .. 'not json "mail.sent"\n' .. '{"seq":2,"note":"mail.sent"}\n'
     .. '["mail.sent"]\n' .. '{"type":7,"subject":"mail.sent"}\n' .. '{"type":"mailbox.x","subject":"mail."}\n'
     .. vim.json.encode({ type = vim.NIL, x = 'mail.' }) .. '\n' .. '{"type":"mail.sent"\n')
   vim.wait(1000)
-  eq(inbox_calls(cities[1].path), 1, 'a non-mail or malformed line lists nothing')
+  eq(#calls_where({ verb = 'inbox', path = cities[1].path }), 1, 'a non-mail or malformed line lists nothing')
   eq(vim.tbl_filter(function(note)
     return note.level == vim.log.levels.ERROR
   end, notes), {}, 'and says nothing')
-  append(log, event('mail.sent'))
+  append(log, event_line('mail.sent', 'ic-wisp-a1'))
   vim.wait(250)
-  eq(inbox_calls(cities[1].path), 1, 'not before the debounce')
+  eq(#calls_where({ verb = 'inbox', path = cities[1].path }), 1, 'not before the debounce')
   wait('listed after the debounce', function()
-    return inbox_calls(cities[1].path) == 2
+    return #calls_where({ verb = 'inbox', path = cities[1].path }) == 2
   end)
   vim.wait(800)
-  eq({ inbox_calls(cities[1].path), inbox_calls(cities[2].path) }, { 2, 1 }, 'exactly one call, for that city only')
+  eq({ #calls_where({ verb = 'inbox', path = cities[1].path }), #calls_where({ verb = 'inbox', path = cities[2].path }) }, { 2, 1 }, 'exactly one call, for that city only')
   -- A burst of mail events is one call.
   for _, kind in ipairs({ 'mail.read', 'mail.marked_read', 'mail.archived' }) do
-    append(log, event(kind))
+    append(log, event_line(kind, 'ic-wisp-a1'))
     vim.wait(30)
   end
   wait('the burst listed', function()
-    return inbox_calls(cities[1].path) == 3
+    return #calls_where({ verb = 'inbox', path = cities[1].path }) == 3
   end)
   vim.wait(800)
-  eq(inbox_calls(cities[1].path), 3, 'one call for the burst')
+  eq(#calls_where({ verb = 'inbox', path = cities[1].path }), 3, 'one call for the burst')
   -- A line written in two parts counts once it ends.
   append(log, '{"seq":9,"type":"mail.del')
   vim.wait(800)
-  eq(inbox_calls(cities[1].path), 3, 'half a line is not read yet')
+  eq(#calls_where({ verb = 'inbox', path = cities[1].path }), 3, 'half a line is not read yet')
   append(log, 'eted"}\n')
   wait('the finished line listed', function()
-    return inbox_calls(cities[1].path) == 4
+    return #calls_where({ verb = 'inbox', path = cities[1].path }) == 4
   end)
   -- More than 1 MiB appended at once is simply a refresh.
   append(log, string.rep('x', 1024 * 1024 + 10) .. '\n')
   wait('a huge append listed', function()
-    return inbox_calls(cities[1].path) == 5
+    return #calls_where({ verb = 'inbox', path = cities[1].path }) == 5
   end)
   vim.wait(800)
-  eq(inbox_calls(cities[1].path), 5, 'once')
+  eq(#calls_where({ verb = 'inbox', path = cities[1].path }), 5, 'once')
   eq(vim.api.nvim_win_is_valid(win), true, 'the panel stays open')
 end)
 
@@ -3075,62 +3096,62 @@ test('at most one inbox call per city is in flight: mail during a call lists the
   panel().open()
   listed(cities)
   raw_answer('inbox', 'delay', '3', 'demo-city')
-  append(log, event('mail.sent'))
+  append(log, event_line('mail.sent', 'ic-wisp-a1'))
   wait('the first call started', function()
-    return inbox_calls(cities[1].path) == 2
+    return #calls_where({ verb = 'inbox', path = cities[1].path }) == 2
   end)
   for _, kind in ipairs({ 'mail.read', 'mail.archived' }) do
     vim.wait(600) -- past the debounce, while the call still runs
-    append(log, event(kind))
+    append(log, event_line(kind, 'ic-wisp-a1'))
   end
   vim.wait(200)
-  eq(inbox_calls(cities[1].path), 2, 'no second call while one is in flight')
+  eq(#calls_where({ verb = 'inbox', path = cities[1].path }), 2, 'no second call while one is in flight')
   vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/inbox.demo-city.delay')
   wait('one more call after it', function()
-    return inbox_calls(cities[1].path) == 3
+    return #calls_where({ verb = 'inbox', path = cities[1].path }) == 3
   end, 5000)
   vim.wait(800)
-  eq(inbox_calls(cities[1].path), 3, 'exactly one more')
+  eq(#calls_where({ verb = 'inbox', path = cities[1].path }), 3, 'exactly one more')
 end)
 
 test('a rotated or recreated event log is watched again; the old file no longer is', function()
   panel().configure({ rearm_ms = 200 })
   local cities, log = city_dirs()
-  write(log, event('order.completed'))
+  write(log, event_line('order.completed', 'ic-wisp-a1'))
   inbox('demo-city', {})
   inbox('other city', {})
   panel().open()
   listed(cities)
-  local n = inbox_calls(cities[1].path)
+  local n = #calls_where({ verb = 'inbox', path = cities[1].path })
   -- gc renames the log and starts a new one with an events.rotated line.
   assert(os.rename(log, log .. '.archive-1'))
-  write(log, event('events.rotated'))
+  write(log, event_line('events.rotated', 'ic-wisp-a1'))
   wait('listed once after the rotation', function()
-    return inbox_calls(cities[1].path) == n + 1
+    return #calls_where({ verb = 'inbox', path = cities[1].path }) == n + 1
   end)
   vim.wait(800)
-  n = inbox_calls(cities[1].path)
-  append(log, event('mail.archived'))
+  n = #calls_where({ verb = 'inbox', path = cities[1].path })
+  append(log, event_line('mail.archived', 'ic-wisp-a1'))
   wait('the new file is watched', function()
-    return inbox_calls(cities[1].path) == n + 1
+    return #calls_where({ verb = 'inbox', path = cities[1].path }) == n + 1
   end)
   vim.wait(800)
-  n = inbox_calls(cities[1].path)
-  append(log .. '.archive-1', event('mail.sent'))
+  n = #calls_where({ verb = 'inbox', path = cities[1].path })
+  append(log .. '.archive-1', event_line('mail.sent', 'ic-wisp-a1'))
   vim.wait(1000)
-  eq(inbox_calls(cities[1].path), n, 'the renamed file is not watched')
+  eq(#calls_where({ verb = 'inbox', path = cities[1].path }), n, 'the renamed file is not watched')
   -- Removed, and created again a moment later.
   assert(os.remove(log))
   vim.wait(50)
   write(log, '')
   wait('listed once the new file is watched', function()
-    return inbox_calls(cities[1].path) == n + 1
+    return #calls_where({ verb = 'inbox', path = cities[1].path }) == n + 1
   end)
   vim.wait(800)
-  n = inbox_calls(cities[1].path)
-  append(log, event('mail.sent'))
+  n = #calls_where({ verb = 'inbox', path = cities[1].path })
+  append(log, event_line('mail.sent', 'ic-wisp-a1'))
   wait('the recreated file is watched', function()
-    return inbox_calls(cities[1].path) == n + 1
+    return #calls_where({ verb = 'inbox', path = cities[1].path }) == n + 1
   end)
 end)
 
@@ -3141,7 +3162,7 @@ test('with no event log the fallback timer lists every city, and watches the log
   inbox('other city', {})
   panel().open()
   wait('the fallback timer lists both cities again', function()
-    return inbox_calls(cities[1].path) >= 3 and inbox_calls(cities[2].path) >= 3
+    return #calls_where({ verb = 'inbox', path = cities[1].path }) >= 3 and #calls_where({ verb = 'inbox', path = cities[2].path }) >= 3
   end, 3000)
   local function watched()
     for _, h in ipairs(panel().handles()) do
@@ -3201,7 +3222,7 @@ test('after close no watcher or timer fires and no callback touches the closed p
   -- A mail event whose debounce is still waiting, and an inbox call in flight.
   raw_answer('inbox', 'delay', '0.5', 'other city')
   panel_key(win, 'R')()
-  append(log, event('mail.sent'))
+  append(log, event_line('mail.sent', 'ic-wisp-a1'))
   vim.wait(50)
   local n = #mail_calls()
   panel().close()
@@ -3213,9 +3234,9 @@ test('after close no watcher or timer fires and no callback touches the closed p
   for i, h in ipairs(opened_timers) do
     eq(h:is_closing(), true, 'opened timer ' .. i .. ' closed')
   end
-  append(log, event('mail.sent'))
+  append(log, event_line('mail.sent', 'ic-wisp-a1'))
   assert(os.rename(log, log .. '.old'))
-  write(log, event('mail.sent'))
+  write(log, event_line('mail.sent', 'ic-wisp-a1'))
   vim.wait(1500)
   eq(#mail_calls(), n, 'nothing ran after close')
   eq(#floats(), 0, 'nothing opened')
@@ -3238,10 +3259,10 @@ test('an archive from the panel also leaves the open float and survives a late i
   vim.wait(200)
   -- A panel refresh that answers late, with the message still in it.
   raw_answer('inbox', 'delay', '1', 'demo-city')
-  local n = inbox_calls(cities[1].path)
-  append(log, event('mail.sent'))
+  local n = #calls_where({ verb = 'inbox', path = cities[1].path })
+  append(log, event_line('mail.sent', 'ic-wisp-a1'))
   wait('the panel refresh started', function()
-    return inbox_calls(cities[1].path) == n + 1
+    return #calls_where({ verb = 'inbox', path = cities[1].path }) == n + 1
   end)
   acted('archive', 'ic-wisp-a1')
   vim.api.nvim_win_set_cursor(pwin, { 1, 0 })
@@ -3312,7 +3333,7 @@ test('preview: a panel refresh that removes the message under the cursor updates
   listed(cities)
   inbox('demo-city', { msg('ic-wisp-a2', { subject = 'older subject', body = 'beta only',
     created_at = '2026-10-07T12:00:00Z' }) })
-  append(log, event('mail.sent'))
+  append(log, event_line('mail.sent', 'ic-wisp-a1'))
   pane_shows({ 'beta only' }, 'the message now under the cursor')
   local before = #mail_calls()
   vim.wait(200)
@@ -3674,8 +3695,8 @@ test('the thread view t in the mailbox renders every message of the thread, clos
   assert(t_lines[9]:find('^## mayor · 2026%-10%-07T11:00:00Z$'), 'open message has no (closed): ' .. t_lines[9])
 
   local calls = mail_calls()
-  local thread_calls = vim.tbl_filter(function(c) return c[4] == 'thread' end, calls)
-  local bd_list_calls = vim.tbl_filter(function(c) return c[3] == 'bd' and c[4] == 'list' end, calls)
+  local thread_calls = calls_where({ verb = 'thread' })
+  local bd_list_calls = calls_where({ verb = 'list' })
   eq(#thread_calls, 0, 'no gc mail thread call made')
   eq(#bd_list_calls, 1, 'one bd list call made')
 
@@ -3705,7 +3726,7 @@ test('the thread view t in the mailbox renders every message of the thread, clos
     return #floats() == 0 and vim.api.nvim_buf_get_name(0):find('^gc%-mail://demo%-city/thread/ic%-wisp%-a2') ~= nil
   end)
   calls = mail_calls()
-  thread_calls = vim.tbl_filter(function(c) return c[4] == 'thread' and c[5] == 'ic-wisp-a2' end, calls)
+  thread_calls = calls_where({ verb = 'thread', id = 'ic-wisp-a2' })
   eq(#thread_calls, 1, 'message without thread_id called gc mail thread')
 end)
 
@@ -3835,7 +3856,7 @@ test('two subscribers on the same city both receive an event; after one unsubscr
   end)
   events.cities('sub2', { cities[1] })
 
-  append(log, event('mail.sent'))
+  append(log, event_line('mail.sent', 'ic-wisp-a1'))
   wait('both received event', function()
     return #rec1 == 1 and #rec2 == 1
   end)
@@ -3843,7 +3864,7 @@ test('two subscribers on the same city both receive an event; after one unsubscr
   eq(rec2[1].type, 'mail.sent')
 
   events.unsubscribe('sub1')
-  append(log, event('mail.read'))
+  append(log, event_line('mail.read', 'ic-wisp-a1'))
   wait('sub2 received second event', function()
     return #rec2 == 2
   end)
@@ -3871,7 +3892,7 @@ test('an appended chunk over 1 MiB gives one overflow event and later lines are 
   end)
   eq(rec[1].type, 'overflow')
 
-  append(log, event('mail.sent'))
+  append(log, event_line('mail.sent', 'ic-wisp-a1'))
   wait('later line received after overflow', function()
     return #rec == 2
   end)
@@ -3888,7 +3909,7 @@ test('an appended chunk over 1 MiB gives one overflow event and later lines are 
     return ev.type == 'watching' and 'watching ' .. tostring(ev.watching) or ev.type
   end, vim.list_slice(rec, 3)), { 'watching false', 'rotated', 'watching true' })
 
-  append(log, event('mail.read'))
+  append(log, event_line('mail.read', 'ic-wisp-a1'))
   wait('later line received after rotation', function()
     return #rec == 6
   end)
@@ -3921,8 +3942,8 @@ test('events.cities with a second city watches both; dropping the city from ever
     return has_fs_event(log1) and has_fs_event(log2)
   end)
 
-  append(log1, event('mail.sent'))
-  append(log2, event('mail.sent'))
+  append(log1, event_line('mail.sent', 'ic-wisp-a1'))
+  append(log2, event_line('mail.sent', 'ic-wisp-a1'))
   wait('both events received', function()
     return #rec == 2
   end)
@@ -3935,11 +3956,11 @@ test('events.cities with a second city watches both; dropping the city from ever
   end)
   eq(has_fs_event(log1), true, 'city1 still watched')
 
-  append(log2, event('mail.read'))
+  append(log2, event_line('mail.read', 'ic-wisp-a1'))
   vim.wait(300)
   eq(#rec, 2, 'dropped city event not received')
 
-  append(log1, event('mail.read'))
+  append(log1, event_line('mail.read', 'ic-wisp-a1'))
   wait('city1 event received', function()
     return #rec == 3
   end)
@@ -3961,7 +3982,7 @@ test('a subscriber that raises does not stop a second subscriber (its error said
   events.cities('broken', { cities[1] })
   events.cities('good', { cities[1] })
 
-  append(log, event('mail.sent'))
+  append(log, event_line('mail.sent', 'ic-wisp-a1'))
   wait('good received first event', function()
     return #rec == 1
   end)
@@ -3972,7 +3993,7 @@ test('a subscriber that raises does not stop a second subscriber (its error said
   end, notes)
   eq(#err_notes, 1, 'error said once')
 
-  append(log, event('mail.read'))
+  append(log, event_line('mail.read', 'ic-wisp-a1'))
   wait('good received second event', function()
     return #rec == 2
   end)
@@ -3991,21 +4012,6 @@ end)
 
 local function count_answer(city, unread)
   answer('count', { recipient = 'human', recipients = { 'human' }, total = unread + 2, unread = unread }, city)
-end
-
-local function count_calls(path)
-  return #vim.tbl_filter(function(c)
-    return c[4] == 'count' and (path == nil or c[2] == path)
-  end, mail_calls())
-end
-
--- One mail line of an event log, as gc writes it, for message `id`.
-local function mail_line(kind, id, fields)
-  local line = { seq = 1, type = kind, ts = '2026-10-08T10:00:00Z', actor = 'mayor', subject = id }
-  if fields then
-    line.payload = { message = msg(id, fields) }
-  end
-  return vim.json.encode(line) .. '\n'
 end
 
 -- The two cities with empty event logs, counts of 2 and 1 unread mail, and
@@ -4033,13 +4039,13 @@ test('the watch is on by default: nothing runs before startup finishes, then one
   eq(gc_mail.status(), '', 'status before setup')
   eq(package.loaded['gc_mail.watch'], nil, 'the watch loaded at load time')
   local cities = watched()
-  eq(count_calls(), 0, 'setup counted mail')
+  eq(#calls_where({ verb = 'count' }), 0, 'setup counted mail')
   eq(package.loaded['gc_mail.watch'], nil, 'setup loaded the watch')
   seeded(3)
   vim.wait(200)
-  eq(count_calls(), 2, 'one count call per city')
-  eq(count_calls(cities[1].path), 1, 'the first city once')
-  eq(count_calls(cities[2].path), 1, 'the second city once')
+  eq(#calls_where({ verb = 'count' }), 2, 'one count call per city')
+  eq(#calls_where({ verb = 'count', path = cities[1].path }), 1, 'the first city once')
+  eq(#calls_where({ verb = 'count', path = cities[2].path }), 1, 'the second city once')
   eq(has_call(call('count', cities[1].path, 'human', '--json')), true, 'count argv')
   eq(#notes, 0, 'the first count is no arrival')
 end)
@@ -4059,38 +4065,38 @@ end)
 test('a mail for you raises one notice and adds one; the same id again, other recipients and your own mail change nothing', function()
   local _, log = watched()
   seeded(3)
-  append(log, mail_line('mail.sent', 'ic-wisp-a1', { subject = 'Build done', created_at = '2026-10-08T10:00:00Z' }))
+  append(log, event_line('mail.sent', 'ic-wisp-a1', msg('ic-wisp-a1', { subject = 'Build done', created_at = '2026-10-08T10:00:00Z' })))
   seeded(4)
   eq(#notes, 1, 'one notice')
   eq(notes[1].message, 'gc-mail: mayor in demo-city: Build done', 'the notice')
   eq(notes[1].level, vim.log.levels.INFO, 'its level')
-  append(log, mail_line('mail.sent', 'ic-wisp-a1', { subject = 'Build done' }))
+  append(log, event_line('mail.sent', 'ic-wisp-a1', msg('ic-wisp-a1', { subject = 'Build done' })))
   vim.wait(300)
   eq({ #notes, gc_mail.status() }, { 1, ' 4' }, 'the same id again')
-  append(log, mail_line('mail.marked_read', 'ic-wisp-a1'))
+  append(log, event_line('mail.marked_read', 'ic-wisp-a1'))
   seeded(3)
-  append(log, mail_line('mail.marked_unread', 'ic-wisp-a1'))
+  append(log, event_line('mail.marked_unread', 'ic-wisp-a1'))
   seeded(4)
   eq(#notes, 1, 'marking it unread says nothing')
-  append(log, mail_line('mail.sent', 'ic-wisp-b2', { to = 'planner' }))
-  append(log, mail_line('mail.sent', 'ic-wisp-c3', { from = 'human', to = 'human' }))
-  append(log, mail_line('mail.sent', 'ic-wisp-d4', { from = 'human', to = 'mayor' }))
+  append(log, event_line('mail.sent', 'ic-wisp-b2', msg('ic-wisp-b2', { to = 'planner' })))
+  append(log, event_line('mail.sent', 'ic-wisp-c3', msg('ic-wisp-c3', { from = 'human', to = 'human' })))
+  append(log, event_line('mail.sent', 'ic-wisp-d4', msg('ic-wisp-d4', { from = 'human', to = 'mayor' })))
   vim.wait(300)
   eq({ #notes, gc_mail.status() }, { 1, ' 4' }, 'mail for others and from you')
-  append(log, mail_line('mail.replied', 'ic-wisp-e5', { subject = 'Re: Build done' }))
+  append(log, event_line('mail.replied', 'ic-wisp-e5', msg('ic-wisp-e5', { subject = 'Re: Build done' })))
   seeded(5)
   eq(notes[2].message, 'gc-mail: mayor in demo-city: Re: Build done', 'a reply counts too')
-  append(log, mail_line('mail.archived', 'ic-wisp-e5'))
+  append(log, event_line('mail.archived', 'ic-wisp-e5'))
   seeded(4)
-  append(log, mail_line('mail.deleted', 'ic-wisp-a1'))
+  append(log, event_line('mail.deleted', 'ic-wisp-a1'))
   seeded(3)
-  eq(count_calls(), 2, 'the events moved the count without another call')
+  eq(#calls_where({ verb = 'count' }), 2, 'the events moved the count without another call')
 end)
 
 test('a notice is one line and the subject is cut at 72 characters', function()
   local _, log = watched()
   seeded(3)
-  append(log, mail_line('mail.sent', 'ic-wisp-a1', { from = 'may\nor', subject = 'first\nsecond ' .. string.rep('x', 100) }))
+  append(log, event_line('mail.sent', 'ic-wisp-a1', msg('ic-wisp-a1', { from = 'may\nor', subject = 'first\nsecond ' .. string.rep('x', 100) })))
   seeded(4)
   local subject = ('first / second ' .. string.rep('x', 100)):sub(1, 72)
   eq(notes[1].message, 'gc-mail: may / or in demo-city: ' .. subject, 'one line, 72 characters of subject')
@@ -4106,11 +4112,11 @@ test('no notice while the chat of that city and sender is open and current; the 
       return city.name == 'demo-city' and with == 'mayor'
     end,
   }
-  append(log, mail_line('mail.sent', 'ic-wisp-a1', { from = 'mayor' }))
+  append(log, event_line('mail.sent', 'ic-wisp-a1', msg('ic-wisp-a1', { from = 'mayor' })))
   seeded(4)
   eq(#notes, 0, 'the chat shows it')
   eq(asked, { { 'demo-city', 'mayor' } }, 'asked the chat once')
-  append(log, mail_line('mail.sent', 'ic-wisp-b2', { from = 'planner' }))
+  append(log, event_line('mail.sent', 'ic-wisp-b2', msg('ic-wisp-b2', { from = 'planner' })))
   seeded(5)
   eq(#notes, 1, 'another sender still raises a notice')
 end)
@@ -4118,13 +4124,13 @@ end)
 test('a count never goes below zero and an unknown id changes nothing', function()
   local cities, log = watched(nil, { 0, 0 })
   wait('counted', function()
-    return count_calls() == 2 and require('gc_mail.watch').unread[cities[2].path] ~= nil
+    return #calls_where({ verb = 'count' }) == 2 and require('gc_mail.watch').unread[cities[2].path] ~= nil
   end)
   eq(gc_mail.status(), '', 'nothing unread')
-  append(log, mail_line('mail.read', 'ic-wisp-zz'))
-  append(log, mail_line('mail.marked_read', 'ic-wisp-zz'))
-  append(log, mail_line('mail.archived', 'ic-wisp-zz'))
-  append(log, mail_line('mail.deleted', 'ic-wisp-zz'))
+  append(log, event_line('mail.read', 'ic-wisp-zz'))
+  append(log, event_line('mail.marked_read', 'ic-wisp-zz'))
+  append(log, event_line('mail.archived', 'ic-wisp-zz'))
+  append(log, event_line('mail.deleted', 'ic-wisp-zz'))
   vim.wait(300)
   eq(gc_mail.status(), '', 'still zero')
   eq(require('gc_mail.watch').unread, { [cities[1].path] = 0, [cities[2].path] = 0 }, 'counts')
@@ -4133,53 +4139,53 @@ end)
 test('an overflow or a recreated log counts that city again; the resync timer counts every city again', function()
   local cities, log = watched()
   seeded(3)
-  eq(count_calls(), 2, 'one count per city')
+  eq(#calls_where({ verb = 'count' }), 2, 'one count per city')
   append(log, string.rep('x', 1024 * 1024 + 10) .. '\n')
   wait('counted again after an overflow', function()
-    return count_calls(cities[1].path) == 2
+    return #calls_where({ verb = 'count', path = cities[1].path }) == 2
   end)
   vim.wait(200)
-  eq(count_calls(cities[2].path), 1, 'the other city was not counted')
+  eq(#calls_where({ verb = 'count', path = cities[2].path }), 1, 'the other city was not counted')
   assert(os.remove(log))
   vim.wait(50)
   write(log, '')
   wait('counted again after a recreated log', function()
-    return count_calls(cities[1].path) == 3
+    return #calls_where({ verb = 'count', path = cities[1].path }) == 3
   end)
   count_answer('demo-city', 5)
   append(log, string.rep('x', 1024 * 1024 + 10) .. '\n')
   seeded(6)
   require('gc_mail.watch').configure({ resync_ms = 100 })
   wait('the timer counts every city', function()
-    return count_calls(cities[2].path) >= 3
+    return #calls_where({ verb = 'count', path = cities[2].path }) >= 3
   end)
 end)
 
 test('a mail counted by a recount is still taken off when it is read; a repeat of an old arrival counts nothing', function()
   local cities, log = watched()
   seeded(3)
-  append(log, mail_line('mail.sent', 'ic-wisp-a1', { subject = 'Build done' }))
+  append(log, event_line('mail.sent', 'ic-wisp-a1', msg('ic-wisp-a1', { subject = 'Build done' })))
   seeded(4)
   count_answer('demo-city', 3)
   append(log, string.rep('x', 1024 * 1024 + 10) .. '\n')
   wait('counted again after an overflow', function()
-    return count_calls(cities[1].path) == 2
+    return #calls_where({ verb = 'count', path = cities[1].path }) == 2
   end)
   vim.wait(100)
   eq(gc_mail.status(), ' 4', 'the recount includes the arrival')
-  append(log, mail_line('mail.read', 'ic-wisp-a1'))
+  append(log, event_line('mail.read', 'ic-wisp-a1'))
   seeded(3)
   -- More arrivals than any bounded memory of ids would keep: the first one
   -- repeated is still not a new message.
   local lines = {}
   for n = 1, 600 do
-    lines[#lines + 1] = mail_line('mail.sent', ('ic-wisp-m%d'):format(n), { subject = 'bulk' })
+    lines[#lines + 1] = event_line('mail.sent', ('ic-wisp-m%d'):format(n), msg(('ic-wisp-m%d'):format(n), { subject = 'bulk' }))
   end
   append(log, table.concat(lines))
   seeded(603)
   eq(#notes, 601, 'one notice per message')
-  append(log, mail_line('mail.sent', 'ic-wisp-a1', { subject = 'Build done' }))
-  append(log, mail_line('mail.sent', 'ic-wisp-m1', { subject = 'bulk' }))
+  append(log, event_line('mail.sent', 'ic-wisp-a1', msg('ic-wisp-a1', { subject = 'Build done' })))
+  append(log, event_line('mail.sent', 'ic-wisp-m1', msg('ic-wisp-m1', { subject = 'bulk' })))
   vim.wait(300)
   eq({ #notes, gc_mail.status() }, { 601, ' 603' }, 'repeats of old arrivals')
 end)
@@ -4192,7 +4198,7 @@ test('a failed count is said once and the count is kept', function()
   for n = 2, 3 do
     append(log, string.rep('x', 1024 * 1024 + 10) .. '\n')
     wait('counted again', function()
-      return count_calls(cities[1].path) == n
+      return #calls_where({ verb = 'count', path = cities[1].path }) == n
     end)
     vim.wait(100)
   end
@@ -4214,7 +4220,7 @@ test('setup({ watch = false }) again stops a running watch', function()
   eq(require('gc_mail.watch').running(), false, 'stopped')
   eq(gc_mail.status(), '', 'status')
   eq(events.running(), false, 'events unsubscribed')
-  append(log, mail_line('mail.sent', 'ic-wisp-a1', { from = 'mayor' }))
+  append(log, event_line('mail.sent', 'ic-wisp-a1', msg('ic-wisp-a1', { from = 'mayor' })))
   vim.wait(300)
   eq({ #notes, gc_mail.status() }, { 0, '' }, 'a mail after the stop')
 end)
@@ -4336,7 +4342,7 @@ test('rearm_missing reports rotated when a previously armed city log is recreate
     return vim.tbl_contains(rec, 'rotated')
   end)
 
-  append(log, event('mail.sent'))
+  append(log, event_line('mail.sent', 'ic-wisp-a1'))
   wait('mail.sent received after rotated', function()
     return vim.tbl_contains(rec, 'mail.sent')
   end)
@@ -5649,26 +5655,6 @@ local function header_row(win, stamp)
   end
 end
 
-local function list_calls()
-  local n = 0
-  for _, c in ipairs(mail_calls()) do
-    if c[3] == 'bd' and c[4] == 'list' then
-      n = n + 1
-    end
-  end
-  return n
-end
-
-local function read_calls(id)
-  local n = 0
-  for _, c in ipairs(mail_calls()) do
-    if c[4] == 'mark-read' and c[5] == id then
-      n = n + 1
-    end
-  end
-  return n
-end
-
 test('RS4: u in the chat keeps the message unread with the default chat_mark_read until the chat is left', function()
   local fix, _, t1, t2 = conversation_fixture()
   write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
@@ -5685,7 +5671,7 @@ test('RS4: u in the chat keeps the message unread with the default chat_mark_rea
     return header_row(win, stamp) ~= nil
   end)
   wait('the unread message is marked read', function()
-    return read_calls('tc-wisp-m2') == 1
+    return #calls_where({ verb = 'mark-read', id = 'tc-wisp-m2' }) == 1
   end)
 
   vim.api.nvim_set_current_win(win)
@@ -5700,7 +5686,7 @@ test('RS4: u in the chat keeps the message unread with the default chat_mark_rea
     return false
   end)
   vim.wait(300)
-  eq(read_calls('tc-wisp-m3'), 0, 'u does not undo itself')
+  eq(#calls_where({ verb = 'mark-read', id = 'tc-wisp-m3' }), 0, 'u does not undo itself')
   assert(table.concat(lines_of(win), '\n'):find('## mayor · ' .. stamp .. ' ●', 1, true),
     'the dot stays: ' .. table.concat(lines_of(win), '|'))
 
@@ -5708,12 +5694,12 @@ test('RS4: u in the chat keeps the message unread with the default chat_mark_rea
   -- next entry mark it read.
   vim.api.nvim_set_current_win(chat.compose_win)
   vim.wait(100)
-  eq(read_calls('tc-wisp-m3'), 0, 'compose box is the same chat')
+  eq(#calls_where({ verb = 'mark-read', id = 'tc-wisp-m3' }), 0, 'compose box is the same chat')
   vim.api.nvim_set_current_win(chat.origin)
   vim.wait(100)
   vim.api.nvim_set_current_win(win)
   wait('entering the chat again marks it read', function()
-    return read_calls('tc-wisp-m3') == 1
+    return #calls_where({ verb = 'mark-read', id = 'tc-wisp-m3' }) == 1
   end)
   vim.api.nvim_set_current_win(chat.origin)
 end)
@@ -5731,7 +5717,7 @@ test('RS5: a load while a mark-read is pending keeps the local read value', func
   local win = chat.timeline_win
   local stamp = os.date('%H:%M', t1)
   wait('mark-read started', function()
-    return read_calls('tc-wisp-m2') == 1
+    return #calls_where({ verb = 'mark-read', id = 'tc-wisp-m2' }) == 1
   end)
   vim.api.nvim_set_current_win(win)
   vim.api.nvim_feedkeys('R', 'x', false)
@@ -5740,7 +5726,7 @@ test('RS5: a load while a mark-read is pending keeps the local read value', func
   assert(header_row(win, stamp), 'history rendered')
   assert(not table.concat(lines_of(win), '\n'):find('## mayor · ' .. stamp .. ' ●', 1, true), 'no dot while pending')
   vim.wait(900)
-  eq(read_calls('tc-wisp-m2'), 1, 'not passed again')
+  eq(#calls_where({ verb = 'mark-read', id = 'tc-wisp-m2' }), 1, 'not passed again')
   vim.api.nvim_set_current_win(chat.origin)
 end)
 
@@ -5760,7 +5746,7 @@ test('RS5 and RS6: a refused mark-read is not retried until a load shows the mes
     return table.concat(lines_of(win), '\n'):find('## mayor · ' .. stamp .. ' ●', 1, true) ~= nil
   end
   wait('refused once', function()
-    return read_calls('tc-wisp-m2') == 1
+    return #calls_where({ verb = 'mark-read', id = 'tc-wisp-m2' }) == 1
   end)
   vim.wait(300)
   vim.api.nvim_set_current_win(win)
@@ -5768,7 +5754,7 @@ test('RS5 and RS6: a refused mark-read is not retried until a load shows the mes
   vim.api.nvim_feedkeys('R', 'x', false)
   vim.wait(400)
   eq(dot(), true, 'the dot stays')
-  eq(read_calls('tc-wisp-m2'), 1, 'not retried')
+  eq(#calls_where({ verb = 'mark-read', id = 'tc-wisp-m2' }), 1, 'not retried')
   -- A load that lists it read drops the record
   local read_fix = vim.json.decode(fix)
   for _, m in ipairs(read_fix) do
@@ -5781,13 +5767,13 @@ test('RS5 and RS6: a refused mark-read is not retried until a load shows the mes
   wait('the dot is gone', function()
     return not dot()
   end)
-  eq(read_calls('tc-wisp-m2'), 1, 'still not retried')
+  eq(#calls_where({ verb = 'mark-read', id = 'tc-wisp-m2' }), 1, 'still not retried')
   -- Unread again in gc: with the record gone it is passed once more
   vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/mark-read.exit')
   write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
   vim.api.nvim_feedkeys('R', 'x', false)
   wait('passed again', function()
-    return read_calls('tc-wisp-m2') == 2
+    return #calls_where({ verb = 'mark-read', id = 'tc-wisp-m2' }) == 2
   end)
   vim.api.nvim_set_current_win(chat.origin)
 end)
@@ -5808,7 +5794,7 @@ test('RS4: u with a second chat open in another tab page keeps the message unrea
     return header_row(win, stamp) ~= nil
   end)
   wait('the unread message is marked read', function()
-    return read_calls('tc-wisp-m2') == 1
+    return #calls_where({ verb = 'mark-read', id = 'tc-wisp-m2' }) == 1
   end)
 
   vim.cmd('tabnew')
@@ -5832,7 +5818,7 @@ test('RS4: u with a second chat open in another tab page keeps the message unrea
   vim.wait(150)
   vim.api.nvim_set_current_win(win)
   vim.wait(300)
-  eq(read_calls('tc-wisp-m3'), 0, 'a second chat does not end the u')
+  eq(#calls_where({ verb = 'mark-read', id = 'tc-wisp-m3' }), 0, 'a second chat does not end the u')
   assert(table.concat(lines_of(win), '\n'):find('## mayor · ' .. stamp .. ' ●', 1, true),
     'the dot stays: ' .. table.concat(lines_of(win), '|'))
 
@@ -5840,7 +5826,7 @@ test('RS4: u with a second chat open in another tab page keeps the message unrea
   vim.wait(100)
   vim.api.nvim_set_current_win(win)
   wait('entering the chat again marks it read', function()
-    return read_calls('tc-wisp-m3') == 1
+    return #calls_where({ verb = 'mark-read', id = 'tc-wisp-m3' }) == 1
   end)
   vim.api.nvim_set_current_win(chat.origin)
   vim.cmd('tabclose!')
@@ -5914,11 +5900,11 @@ test('RS4 and RS2: a stale mark-unread answer after the chat was left drops the 
   end
   write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', vim.json.encode(unread))
   vim.wait(1000)
-  local before = read_calls('tc-wisp-m3')
+  local before = #calls_where({ verb = 'mark-read', id = 'tc-wisp-m3' })
   -- The stale unread record is gone: entering the chat passes the message
   vim.api.nvim_set_current_win(win)
   wait('entering the chat marks the unread message read', function()
-    return read_calls('tc-wisp-m3') == before + 1
+    return #calls_where({ verb = 'mark-read', id = 'tc-wisp-m3' }) == before + 1
   end)
   vim.api.nvim_set_current_win(chat.origin)
 end)
@@ -5927,16 +5913,6 @@ end)
 local function refuse_unread()
   raw_answer('mark-unread', 'exit', '1\n')
   raw_answer('mark-unread', 'stderr', 'fake mark-unread error\n')
-end
-
-local function unread_calls(id)
-  local n = 0
-  for _, c in ipairs(mail_calls()) do
-    if c[4] == 'mark-unread' and c[5] == id then
-      n = n + 1
-    end
-  end
-  return n
 end
 
 test('RS6: a refused u on a message that was unread keeps its dot, with chat_mark_read false', function()
@@ -5959,11 +5935,11 @@ test('RS6: a refused u on a message that was unread keeps its dot, with chat_mar
   vim.api.nvim_win_set_cursor(win, { header_row(win, stamp), 0 })
   vim.api.nvim_feedkeys('u', 'x', false)
   wait('mark-unread refused', function()
-    return unread_calls('tc-wisp-m2') == 1
+    return #calls_where({ verb = 'mark-unread', id = 'tc-wisp-m2' }) == 1
   end)
   vim.wait(300)
   eq(dot(), true, 'the dot stays: ' .. table.concat(lines_of(win), '|'))
-  eq(read_calls('tc-wisp-m2'), 0, 'no mark-read call')
+  eq(#calls_where({ verb = 'mark-read', id = 'tc-wisp-m2' }), 0, 'no mark-read call')
   -- A load that lists it read takes gc's state
   local read_fix = vim.json.decode(fix)
   for _, m in ipairs(read_fix) do
@@ -5976,7 +5952,7 @@ test('RS6: a refused u on a message that was unread keeps its dot, with chat_mar
   wait('the load decides again', function()
     return not dot()
   end)
-  eq(read_calls('tc-wisp-m2'), 0, 'still no mark-read call')
+  eq(#calls_where({ verb = 'mark-read', id = 'tc-wisp-m2' }), 0, 'still no mark-read call')
   vim.api.nvim_set_current_win(chat.origin)
 end)
 
@@ -5992,20 +5968,20 @@ test('RS6: a refused u on a message that was read shows it read with no extra ma
   local win = chat.timeline_win
   local stamp = os.date('%H:%M', t2)
   wait('history rendered and tc-wisp-m2 marked read', function()
-    return header_row(win, stamp) ~= nil and read_calls('tc-wisp-m2') == 1
+    return header_row(win, stamp) ~= nil and #calls_where({ verb = 'mark-read', id = 'tc-wisp-m2' }) == 1
   end)
   vim.api.nvim_set_current_win(win)
   vim.api.nvim_win_set_cursor(win, { header_row(win, stamp), 0 })
   vim.api.nvim_feedkeys('u', 'x', false)
   wait('mark-unread refused', function()
-    return unread_calls('tc-wisp-m3') == 1
+    return #calls_where({ verb = 'mark-unread', id = 'tc-wisp-m3' }) == 1
   end)
   vim.wait(300)
   local text = table.concat(lines_of(win), '\n')
   eq(text:find('## mayor · ' .. stamp, 1, true) ~= nil, true, 'the message is shown')
   eq(text:find('## mayor · ' .. stamp .. ' ●', 1, true), nil, 'it shows read')
-  eq(read_calls('tc-wisp-m3'), 0, 'no mark-read call for it')
-  eq(read_calls('tc-wisp-m2'), 1, 'and none again for the other')
+  eq(#calls_where({ verb = 'mark-read', id = 'tc-wisp-m3' }), 0, 'no mark-read call for it')
+  eq(#calls_where({ verb = 'mark-read', id = 'tc-wisp-m2' }), 1, 'and none again for the other')
   vim.api.nvim_set_current_win(chat.origin)
 end)
 
@@ -6024,14 +6000,14 @@ test('RS6: with chat_mark_read true a refused u on a message that was unread kee
     return table.concat(lines_of(win), '\n'):find('## mayor · ' .. stamp .. ' ●', 1, true) ~= nil
   end
   wait('history rendered and the unread message marked read', function()
-    return header_row(win, stamp) ~= nil and read_calls('tc-wisp-m2') == 1
+    return header_row(win, stamp) ~= nil and #calls_where({ verb = 'mark-read', id = 'tc-wisp-m2' }) == 1
   end)
   vim.api.nvim_set_current_win(win)
   vim.api.nvim_win_set_cursor(win, { header_row(win, stamp), 0 })
   -- The first u is accepted: unread, held out of the automatic pass
   vim.api.nvim_feedkeys('u', 'x', false)
   wait('the first mark-unread answered', function()
-    return unread_calls('tc-wisp-m3') == 1 and dot()
+    return #calls_where({ verb = 'mark-unread', id = 'tc-wisp-m3' }) == 1 and dot()
   end)
   vim.wait(200)
   -- The second u is refused: the message was unread, so it stays unread and
@@ -6040,17 +6016,17 @@ test('RS6: with chat_mark_read true a refused u on a message that was unread kee
   vim.api.nvim_win_set_cursor(win, { header_row(win, stamp), 0 })
   vim.api.nvim_feedkeys('u', 'x', false)
   wait('the second mark-unread refused', function()
-    return unread_calls('tc-wisp-m3') == 2
+    return #calls_where({ verb = 'mark-unread', id = 'tc-wisp-m3' }) == 2
   end)
   vim.wait(500)
   eq(dot(), true, 'the dot stays: ' .. table.concat(lines_of(win), '|'))
-  eq(read_calls('tc-wisp-m3'), 0, 'no mark-read call for it')
+  eq(#calls_where({ verb = 'mark-read', id = 'tc-wisp-m3' }), 0, 'no mark-read call for it')
   -- Leaving the chat releases it (RS4): entering again marks it read
   vim.api.nvim_set_current_win(chat.origin)
   vim.wait(100)
   vim.api.nvim_set_current_win(win)
   wait('entering the chat again marks it read', function()
-    return read_calls('tc-wisp-m3') == 1
+    return #calls_where({ verb = 'mark-read', id = 'tc-wisp-m3' }) == 1
   end)
   vim.api.nvim_set_current_win(chat.origin)
 end)
@@ -6093,7 +6069,7 @@ test('RS4 and RS6: a refusal that arrives after the chat was left leaves no reco
   vim.api.nvim_feedkeys('R', 'x', false)
   vim.api.nvim_set_current_win(chat.origin)
   wait('mark-unread refused', function()
-    return unread_calls('tc-wisp-m3') == 1
+    return #calls_where({ verb = 'mark-unread', id = 'tc-wisp-m3' }) == 1
   end)
   vim.wait(1500)
   eq(dot(), true, 'the list decides: ' .. table.concat(lines_of(win), '|'))
@@ -6115,25 +6091,25 @@ test('RS5: the load after a send keeps a pending mark-read from bringing the dot
     return table.concat(lines_of(win), '\n'):find('## mayor · ' .. stamp .. ' ●', 1, true) ~= nil
   end
   wait('mark-read started', function()
-    return read_calls('tc-wisp-m2') == 1
+    return #calls_where({ verb = 'mark-read', id = 'tc-wisp-m2' }) == 1
   end)
   wait('the opening load ran', function()
-    return list_calls() == 1
+    return #calls_where({ verb = 'list' }) == 1
   end)
   vim.wait(300)
-  local loads = list_calls()
+  local loads = #calls_where({ verb = 'list' })
   vim.api.nvim_set_current_win(chat.compose_win)
   vim.api.nvim_buf_set_lines(chat.compose_buf, 0, -1, false, { 'hello', 'body' })
   vim.api.nvim_feedkeys(vim.keycode('<Space>ms'), 'x', false)
   wait('the send drained', drained)
   wait('the load after the send ran', function()
-    return list_calls() > loads
+    return #calls_where({ verb = 'list' }) > loads
   end)
   vim.wait(300)
   eq(dot(), false, 'no dot from the send load while the mark-read is pending')
   vim.wait(1000)
   eq(dot(), false, 'no dot after gc answered')
-  eq(read_calls('tc-wisp-m2'), 1, 'not passed again')
+  eq(#calls_where({ verb = 'mark-read', id = 'tc-wisp-m2' }), 1, 'not passed again')
   vim.api.nvim_set_current_win(chat.origin)
 end)
 
@@ -6155,16 +6131,16 @@ test('RS5: a u during a load that a later R joined is not undone by the older sn
     return table.concat(lines_of(win), '\n'):find('## mayor · ' .. stamp .. ' ●', 1, true) ~= nil
   end
   wait('the opening load ran', function()
-    return list_calls() == 1
+    return #calls_where({ verb = 'list' }) == 1
   end)
   vim.wait(300)
   write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.delay', '0.8\n')
-  local loads = list_calls()
+  local loads = #calls_where({ verb = 'list' })
   vim.api.nvim_set_current_win(chat.compose_win)
   vim.api.nvim_buf_set_lines(chat.compose_buf, 0, -1, false, { 'hello', 'body' })
   vim.api.nvim_feedkeys(vim.keycode('<Space>ms'), 'x', false)
   wait('the load after the send started', function()
-    return list_calls() > loads
+    return #calls_where({ verb = 'list' }) > loads
   end)
   -- u while that load runs, then R joins it with a later start
   vim.api.nvim_set_current_win(win)
@@ -6176,7 +6152,7 @@ test('RS5: a u during a load that a later R joined is not undone by the older sn
   vim.wait(200)
   vim.api.nvim_feedkeys('R', 'x', false)
   vim.wait(1500)
-  eq(list_calls(), loads + 1, 'R joined the running load')
+  eq(#calls_where({ verb = 'list' }), loads + 1, 'R joined the running load')
   eq(dot(), true, 'the older snapshot did not undo the u')
   vim.api.nvim_set_current_win(chat.origin)
 end)
@@ -6217,7 +6193,7 @@ test('RS1: a mark-read answer that a later u made stale leaves the message unrea
     return header_row(win, stamp) ~= nil
   end)
   wait('mark-read started', function()
-    return read_calls('tc-wisp-m2') == 1
+    return #calls_where({ verb = 'mark-read', id = 'tc-wisp-m2' }) == 1
   end)
   vim.api.nvim_set_current_win(win)
   vim.api.nvim_win_set_cursor(win, { header_row(win, stamp), 0 })
@@ -6225,7 +6201,7 @@ test('RS1: a mark-read answer that a later u made stale leaves the message unrea
   vim.wait(1200)
   chat_mod.render(chat)
   assert(table.concat(lines_of(win), '\n'):find('## mayor · ' .. stamp .. ' ●', 1, true), 'the late read answer leaves the dot')
-  eq(read_calls('tc-wisp-m2'), 1, 'not passed again')
+  eq(#calls_where({ verb = 'mark-read', id = 'tc-wisp-m2' }), 1, 'not passed again')
   vim.api.nvim_set_current_win(chat.origin)
 end)
 
@@ -6239,17 +6215,17 @@ test('RS5: a message marked unread outside the chat is passed again on the next 
   local chat_mod = require('gc_mail.chat')
   local chat = chat_mod.open('demo-city', 'mayor')
   wait('marked read', function()
-    return read_calls('tc-wisp-m2') == 1
+    return #calls_where({ verb = 'mark-read', id = 'tc-wisp-m2' }) == 1
   end)
   vim.wait(300)
   -- The list still says unread: the mark-read answered before this reload began
   vim.api.nvim_set_current_win(chat.timeline_win)
   vim.api.nvim_feedkeys('R', 'x', false)
   wait('passed again', function()
-    return read_calls('tc-wisp-m2') == 2
+    return #calls_where({ verb = 'mark-read', id = 'tc-wisp-m2' }) == 2
   end)
   vim.wait(300)
-  eq(read_calls('tc-wisp-m2'), 2, 'once per reload, no loop')
+  eq(#calls_where({ verb = 'mark-read', id = 'tc-wisp-m2' }), 2, 'once per reload, no loop')
   vim.api.nvim_set_current_win(chat.origin)
 end)
 
@@ -6567,7 +6543,7 @@ test('chat focus: <C-j>/<C-k> move between timeline and compose and a u-held id 
     return header_row(win, stamp) ~= nil
   end)
   wait('the unread message is marked read', function()
-    return read_calls('tc-wisp-m2') == 1
+    return #calls_where({ verb = 'mark-read', id = 'tc-wisp-m2' }) == 1
   end)
 
   vim.api.nvim_set_current_win(win)
@@ -6582,22 +6558,22 @@ test('chat focus: <C-j>/<C-k> move between timeline and compose and a u-held id 
     return false
   end)
   vim.wait(300)
-  eq(read_calls('tc-wisp-m3'), 0, 'u does not undo itself')
+  eq(#calls_where({ verb = 'mark-read', id = 'tc-wisp-m3' }), 0, 'u does not undo itself')
 
   -- The focus keys move between the chat's own windows and never release the hold.
   vim.api.nvim_feedkeys(vim.keycode('<C-j>'), 'x', false)
   eq(vim.api.nvim_get_current_win(), chat.compose_win, '<C-j> focuses the compose box')
   vim.wait(150)
-  eq(read_calls('tc-wisp-m3'), 0, 'compose focus keeps the hold (RS4)')
+  eq(#calls_where({ verb = 'mark-read', id = 'tc-wisp-m3' }), 0, 'compose focus keeps the hold (RS4)')
   vim.api.nvim_feedkeys(vim.keycode('<C-k>'), 'x', false)
   eq(vim.api.nvim_get_current_win(), win, '<C-k> focuses the timeline')
   vim.wait(150)
-  eq(read_calls('tc-wisp-m3'), 0, 'timeline focus keeps the hold (RS4)')
+  eq(#calls_where({ verb = 'mark-read', id = 'tc-wisp-m3' }), 0, 'timeline focus keeps the hold (RS4)')
   -- From the compose box back again, still held.
   vim.api.nvim_feedkeys(vim.keycode('<C-j>'), 'x', false)
   eq(vim.api.nvim_get_current_win(), chat.compose_win, 'back in the compose box')
   vim.wait(150)
-  eq(read_calls('tc-wisp-m3'), 0, 'still held')
+  eq(#calls_where({ verb = 'mark-read', id = 'tc-wisp-m3' }), 0, 'still held')
   vim.api.nvim_feedkeys(vim.keycode('<C-k>'), 'x', false)
   eq(vim.api.nvim_get_current_win(), win, 'back in the timeline')
 
@@ -6606,7 +6582,7 @@ test('chat focus: <C-j>/<C-k> move between timeline and compose and a u-held id 
   vim.wait(100)
   vim.api.nvim_set_current_win(win)
   wait('entering the chat again marks it read', function()
-    return read_calls('tc-wisp-m3') == 1
+    return #calls_where({ verb = 'mark-read', id = 'tc-wisp-m3' }) == 1
   end)
   vim.api.nvim_set_current_win(chat.origin)
 end)
@@ -6866,26 +6842,6 @@ end)
 
 -- ---- the chat's live updates ---------------------------------------------------
 
-local function bd_list_calls(path)
-  return #vim.tbl_filter(function(c)
-    return c[3] == 'bd' and c[4] == 'list' and c[2] == path
-  end, mail_calls())
-end
-
--- One event log line of a mail event that carries its message, as gc writes it.
-local function message_line(kind, fields)
-  local m = vim.tbl_extend('force', {
-    from = 'mayor', to = 'human', read = false, created_at = os.date('!%Y-%m-%dT%H:%M:%SZ', os.time()),
-  }, fields)
-  return vim.json.encode({ seq = 1, type = kind, ts = m.created_at, actor = m.from, subject = m.id,
-    payload = { message = m } }) .. '\n'
-end
-
--- One event log line of a mail event about message `id`, with no payload.
-local function id_line(kind, id)
-  return vim.json.encode({ seq = 1, type = kind, ts = '2026-10-08T10:00:00Z', actor = 'human', subject = id }) .. '\n'
-end
-
 -- A chat with mayor in demo-city (a real directory with an empty event log, or
 -- none with `no_log`), opened on the conversation fixture, after its first
 -- history load. No background watch; nothing is marked read unless `opts` says so.
@@ -6908,7 +6864,7 @@ local function live_chat(opts, no_log)
     end
   end
   wait('the chat loaded its history once', function()
-    return bd_list_calls(cities[1].path) == 1 and table.concat(lines_of(chat.timeline_win), '\n'):find('all good', 1, true)
+    return #calls_where({ verb = 'list', path = cities[1].path }) == 1 and table.concat(lines_of(chat.timeline_win), '\n'):find('all good', 1, true)
   end)
   vim.wait(100)
   return chat
@@ -6925,7 +6881,7 @@ test('chat live: a mail.replied for the conversation renders at once with no gc 
   local lines = lines_of(chat.timeline_win)
   eq(vim.api.nvim_win_get_cursor(chat.timeline_win)[1], #lines, 'the timeline cursor starts at the end')
   local when = os.time()
-  append(chat.log, message_line('mail.replied', { id = 'tc-wisp-live1', subject = 'live answer',
+  append(chat.log, event_line('mail.replied', 'tc-wisp-live1', { id = 'tc-wisp-live1', subject = 'live answer',
     body = 'live answer\nfrom the log', created_at = os.date('!%Y-%m-%dT%H:%M:%SZ', when) }))
   wait('the answer shows within 1 s', function()
     return shown(chat):find('from the log', 1, true) ~= nil
@@ -6936,19 +6892,19 @@ test('chat live: a mail.replied for the conversation renders at once with no gc 
   eq(vim.api.nvim_win_get_cursor(chat.timeline_win)[1], #after, 'the cursor follows the end')
   eq(#mail_calls(), calls, 'no bd list, inbox or other gc call')
 
-  append(chat.log, message_line('mail.replied', { id = 'tc-wisp-live2', to = 'planner', subject = 'for the planner',
+  append(chat.log, event_line('mail.replied', 'tc-wisp-live2', { id = 'tc-wisp-live2', to = 'planner', subject = 'for the planner',
     body = 'for the planner' }))
   vim.wait(300)
   eq(lines_of(chat.timeline_win), after, 'another conversation changes nothing shown')
   eq(require('gc_mail.history').cache[path].by_id['tc-wisp-live2'] ~= nil, true, 'but it is cached')
   eq(#mail_calls(), calls, 'and calls nothing')
 
-  append(chat.log, id_line('mail.sent', 'tc-wisp-live3'))
+  append(chat.log, event_line('mail.sent', 'tc-wisp-live3'))
   wait('a mail.sent without its message loads the city', function()
-    return bd_list_calls(path) == 2
+    return #calls_where({ verb = 'list', path = path }) == 2
   end)
   vim.wait(300)
-  eq(bd_list_calls(path), 2, 'exactly one bd list call')
+  eq(#calls_where({ verb = 'list', path = path }), 2, 'exactly one bd list call')
   eq(#mail_calls(), calls + 1, 'and nothing else')
 end)
 
@@ -6957,20 +6913,20 @@ test('chat live: read, unread and archived events move the dot and the closed ma
   local heading = '## mayor · ' .. os.date('%H:%M', chat.t1)
   local calls = #mail_calls()
   eq(lines_of(chat.timeline_win)[7], heading .. ' ●', 'unread to begin with')
-  append(chat.log, id_line('mail.marked_read', 'tc-wisp-m2'))
+  append(chat.log, event_line('mail.marked_read', 'tc-wisp-m2'))
   wait('marked_read removes the dot', function()
     return lines_of(chat.timeline_win)[7] == heading
   end, 1000)
-  append(chat.log, id_line('mail.marked_unread', 'tc-wisp-m2'))
+  append(chat.log, event_line('mail.marked_unread', 'tc-wisp-m2'))
   wait('marked_unread brings it back', function()
     return lines_of(chat.timeline_win)[7] == heading .. ' ●'
   end, 1000)
-  append(chat.log, id_line('mail.archived', 'tc-wisp-m2'))
+  append(chat.log, event_line('mail.archived', 'tc-wisp-m2'))
   wait('archived marks it closed in the heading', function()
     return lines_of(chat.timeline_win)[7] == heading .. ' (closed) ●'
   end, 1000)
   local before = lines_of(chat.timeline_win)
-  append(chat.log, id_line('mail.read', 'tc-wisp-nope') .. id_line('mail.deleted', 'tc-wisp-nope'))
+  append(chat.log, event_line('mail.read', 'tc-wisp-nope') .. event_line('mail.deleted', 'tc-wisp-nope'))
   vim.wait(300)
   eq(lines_of(chat.timeline_win), before, 'an unknown id changes nothing')
   eq(#mail_calls(), calls, 'no gc call for any of them')
@@ -6979,7 +6935,7 @@ end)
 test('chat live: with the timeline cursor moved up, an appended message does not move it', function()
   local chat = live_chat()
   vim.api.nvim_win_set_cursor(chat.timeline_win, { 3, 0 })
-  append(chat.log, message_line('mail.replied', { id = 'tc-wisp-live1', subject = 'later', body = 'later\nanswer' }))
+  append(chat.log, event_line('mail.replied', 'tc-wisp-live1', { id = 'tc-wisp-live1', subject = 'later', body = 'later\nanswer' }))
   wait('the answer shows', function()
     return shown(chat):find('later\nanswer', 1, true) ~= nil
   end, 1000)
@@ -7022,7 +6978,7 @@ test('chat live: with the view scrolled up, an appended message keeps cursor and
   assert(before.bottom < before.last, 'the view no longer shows the end')
   local compose_cursor = vim.api.nvim_win_get_cursor(chat.compose_win)
   eq(newer_below(chat), nil, 'nothing waits below yet')
-  append(chat.log, message_line('mail.replied', { id = 'tc-wisp-live1', subject = 'later', body = 'later\nanswer' }))
+  append(chat.log, event_line('mail.replied', 'tc-wisp-live1', { id = 'tc-wisp-live1', subject = 'later', body = 'later\nanswer' }))
   wait('the answer shows', function()
     return shown(chat):find('later\nanswer', 1, true) ~= nil
   end, 1000)
@@ -7033,7 +6989,7 @@ test('chat live: with the view scrolled up, an appended message keeps cursor and
 
   -- A read flag and a closed mark above change no message id: no new count
   local heading = '## mayor · ' .. os.date('%H:%M', chat.t1)
-  append(chat.log, id_line('mail.marked_read', 'tc-wisp-m2') .. id_line('mail.archived', 'tc-wisp-m3'))
+  append(chat.log, event_line('mail.marked_read', 'tc-wisp-m2') .. event_line('mail.archived', 'tc-wisp-m3'))
   wait('the read flag and the closed mark show', function()
     local lines = lines_of(chat.timeline_win)
     return lines[7] == heading and lines[14]:find('(closed)', 1, true) ~= nil
@@ -7046,7 +7002,7 @@ end)
 test('chat live: with the cursor and the view at the end, the view follows an appended message', function()
   local chat = live_chat()
   short_timeline(chat)
-  append(chat.log, message_line('mail.replied', { id = 'tc-wisp-live1', subject = 'later', body = 'later\nanswer' }))
+  append(chat.log, event_line('mail.replied', 'tc-wisp-live1', { id = 'tc-wisp-live1', subject = 'later', body = 'later\nanswer' }))
   wait('the answer shows', function()
     return shown(chat):find('later\nanswer', 1, true) ~= nil
   end, 1000)
@@ -7060,8 +7016,8 @@ test('chat live: G jumps to the latest message, clears the count and follows aga
   local chat = live_chat()
   short_timeline(chat)
   scroll_up(chat)
-  append(chat.log, message_line('mail.replied', { id = 'tc-wisp-live1', subject = 'later', body = 'later\nanswer' })
-    .. message_line('mail.replied', { id = 'tc-wisp-live2', subject = 'and more', body = 'and more' }))
+  append(chat.log, event_line('mail.replied', 'tc-wisp-live1', { id = 'tc-wisp-live1', subject = 'later', body = 'later\nanswer' })
+    .. event_line('mail.replied', 'tc-wisp-live2', { id = 'tc-wisp-live2', subject = 'and more', body = 'and more' }))
   wait('both answers counted', function()
     return newer_below(chat) == 2
   end, 1000)
@@ -7070,7 +7026,7 @@ test('chat live: G jumps to the latest message, clears the count and follows aga
   local at = timeline_view(chat)
   eq({ at.cursor, at.bottom }, { at.last, at.last }, 'at the latest message')
   eq(newer_below(chat), nil, 'the count is cleared')
-  append(chat.log, message_line('mail.replied', { id = 'tc-wisp-live3', subject = 'newest', body = 'newest' }))
+  append(chat.log, event_line('mail.replied', 'tc-wisp-live3', { id = 'tc-wisp-live3', subject = 'newest', body = 'newest' }))
   wait('the newest shows', function()
     return shown(chat):find('newest', 1, true) ~= nil
   end, 1000)
@@ -7452,7 +7408,7 @@ test('chat reopen: moving during a slow open load keeps the view instead of yank
     vim.cmd('normal! zt')
   end)
   wait('the open load answered', function()
-    return bd_list_calls(chat.cities[1].path) == 2
+    return #calls_where({ verb = 'list', path = chat.cities[1].path }) == 2
   end)
   vim.wait(1500)
   local after = view_of_win(win)
@@ -7543,13 +7499,13 @@ test('chat live: your own mail.sent hides its sending record without a load', fu
   wait('sending… shows', function()
     return shown(chat):find('## you · sending…', 1, true) ~= nil
   end)
-  append(chat.log, message_line('mail.sent', { id = 'tc-wisp-mine', from = 'human', to = 'mayor', read = false,
+  append(chat.log, event_line('mail.sent', 'tc-wisp-mine', { id = 'tc-wisp-mine', from = 'human', to = 'mayor', read = false,
     subject = 'my question', body = 'my question\nmore of it' }))
   wait('the logged message replaces the record', function()
     local text = shown(chat)
     return text:find('sending…', 1, true) == nil and select(2, text:gsub('more of it', '')) == 1
   end, 1500)
-  eq(bd_list_calls(path), 1, 'no load before the send ends')
+  eq(#calls_where({ verb = 'list', path = path }), 1, 'no load before the send ends')
   wait('the send ends', drained, 5000)
 end)
 
@@ -7557,7 +7513,7 @@ test('chat live: the fallback loads the city again every poll period with no eve
   require('gc_mail.chat').configure({ poll_ms = 100 })
   local chat = live_chat()
   wait('the fallback loaded again', function()
-    return bd_list_calls(chat.cities[1].path) >= 3
+    return #calls_where({ verb = 'list', path = chat.cities[1].path }) >= 3
   end, 2000)
 end)
 
@@ -7572,8 +7528,8 @@ test('chat live: after q nothing runs and the watcher stops; an open panel keeps
   eq(vim.api.nvim_win_is_valid(chat.timeline_win), false, 'closed')
   eq(events.running(), false, 'no subscriber left')
   local calls = #mail_calls()
-  append(chat.log, message_line('mail.replied', { id = 'tc-wisp-late', subject = 'late', body = 'late' })
-    .. id_line('mail.sent', 'tc-wisp-late2') .. id_line('mail.marked_read', 'tc-wisp-m2'))
+  append(chat.log, event_line('mail.replied', 'tc-wisp-late', { id = 'tc-wisp-late', subject = 'late', body = 'late' })
+    .. event_line('mail.sent', 'tc-wisp-late2') .. event_line('mail.marked_read', 'tc-wisp-m2'))
   vim.wait(500)
   eq(#mail_calls(), calls, 'no call after close, from the events or the fallback')
   eq(require('gc_mail.history').cache[path].by_id['tc-wisp-late'], nil, 'and nothing cached')
@@ -7585,7 +7541,7 @@ test('chat live: after q nothing runs and the watcher stops; an open panel keeps
   listed(chat.cities)
   vim.cmd('GcMailChat demo-city')
   wait('the chat loaded', function()
-    return bd_list_calls(path) >= 2
+    return #calls_where({ verb = 'list', path = path }) >= 2
   end)
   for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
     if vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(w)):match('/chat/') then
@@ -7594,14 +7550,14 @@ test('chat live: after q nothing runs and the watcher stops; an open panel keeps
   end
   vim.api.nvim_feedkeys('q', 'x', false)
   eq(events.running(), true, 'the panel still watches')
-  local inboxes = inbox_calls(path)
-  local loads = bd_list_calls(path)
-  append(chat.log, id_line('mail.sent', 'tc-wisp-late3'))
+  local inboxes = #calls_where({ verb = 'inbox', path = path })
+  local loads = #calls_where({ verb = 'list', path = path })
+  append(chat.log, event_line('mail.sent', 'tc-wisp-late3'))
   wait('the panel lists the city', function()
-    return inbox_calls(path) == inboxes + 1
+    return #calls_where({ verb = 'inbox', path = path }) == inboxes + 1
   end)
   vim.wait(300)
-  eq(bd_list_calls(path), loads, 'the closed chat loads nothing')
+  eq(#calls_where({ verb = 'list', path = path }), loads, 'the closed chat loads nothing')
 end)
 
 test('chat live: a failing load is said once over every fallback tick and shown, never as an empty conversation', function()
@@ -7614,7 +7570,7 @@ test('chat live: a failing load is said once over every fallback tick and shown,
   write(log, '')
   vim.cmd('GcMailChat demo-city')
   wait('three failed loads', function()
-    return bd_list_calls(cities[1].path) >= 3
+    return #calls_where({ verb = 'list', path = cities[1].path }) >= 3
   end, 2000)
   local errors = vim.tbl_filter(function(note)
     return note.level == vim.log.levels.ERROR
@@ -7647,12 +7603,12 @@ test('chat live: a load that began before an event never takes back what the eve
   vim.api.nvim_set_current_win(chat.timeline_win)
   vim.api.nvim_feedkeys('R', 'x', false)
   wait('the slow load started', function()
-    return bd_list_calls(path) == 2
+    return #calls_where({ verb = 'list', path = path }) == 2
   end)
   vim.wait(200)
-  append(chat.log, message_line('mail.replied', { id = 'tc-wisp-live1', subject = 'live answer',
-    body = 'live answer\nduring the load' }) .. id_line('mail.marked_read', 'tc-wisp-m2')
-    .. id_line('mail.archived', 'tc-wisp-m3'))
+  append(chat.log, event_line('mail.replied', 'tc-wisp-live1', { id = 'tc-wisp-live1', subject = 'live answer',
+    body = 'live answer\nduring the load' }) .. event_line('mail.marked_read', 'tc-wisp-m2')
+    .. event_line('mail.archived', 'tc-wisp-m3'))
   local function current()
     local text = shown(chat)
     return text:find('during the load', 1, true) ~= nil and lines_of(chat.timeline_win)[7] == m2
@@ -7660,7 +7616,7 @@ test('chat live: a load that began before an event never takes back what the eve
   end
   wait('the events show', current, 1000)
   vim.wait(1500)
-  eq(bd_list_calls(path), 2, 'the slow load ended with no other load')
+  eq(#calls_where({ verb = 'list', path = path }), 2, 'the slow load ended with no other load')
   eq(current(), true, 'the answer, the read message and the closed one stay after the load ends: '
     .. table.concat(lines_of(chat.timeline_win), '|'))
 
@@ -7675,7 +7631,7 @@ test('chat live: a load that began before an event never takes back what the eve
   end)
   vim.api.nvim_feedkeys('R', 'x', false)
   wait('the next load', function()
-    return bd_list_calls(path) == 3
+    return #calls_where({ verb = 'list', path = path }) == 3
   end)
   vim.wait(300)
   eq(select(2, shown(chat):gsub('during the load', '')), 1, 'the answer shows once')
@@ -7695,10 +7651,10 @@ end)
 -- event's own table for it; a copy would lose what the later events changed.
 for _, case in ipairs({
   { 'no later event', '', ' ●' },
-  { 'mark-read', id_line('mail.marked_read', 'tc-wisp-live1'), '' },
-  { 'read', id_line('mail.read', 'tc-wisp-live1'), '' },
-  { 'archived', id_line('mail.archived', 'tc-wisp-live1'), ' (closed) ●' },
-  { 'read and deleted', id_line('mail.read', 'tc-wisp-live1') .. id_line('mail.deleted', 'tc-wisp-live1'), ' (closed)' },
+  { 'mark-read', event_line('mail.marked_read', 'tc-wisp-live1'), '' },
+  { 'read', event_line('mail.read', 'tc-wisp-live1'), '' },
+  { 'archived', event_line('mail.archived', 'tc-wisp-live1'), ' (closed) ●' },
+  { 'read and deleted', event_line('mail.read', 'tc-wisp-live1') .. event_line('mail.deleted', 'tc-wisp-live1'), ' (closed)' },
 }) do
   local name, later, suffix = case[1], case[2], case[3]
   test('chat live: a new message then ' .. name .. ' during a slow load keeps its dot and closed mark', function()
@@ -7718,17 +7674,17 @@ for _, case in ipairs({
     vim.api.nvim_set_current_win(chat.timeline_win)
     vim.api.nvim_feedkeys('R', 'x', false)
     wait('the slow load started', function()
-      return bd_list_calls(path) == 2
+      return #calls_where({ verb = 'list', path = path }) == 2
     end)
     vim.wait(200)
-    append(chat.log, message_line('mail.replied', { id = 'tc-wisp-live1', subject = 'live',
+    append(chat.log, event_line('mail.replied', 'tc-wisp-live1', { id = 'tc-wisp-live1', subject = 'live',
       body = 'live body', created_at = os.date('!%Y-%m-%dT%H:%M:%SZ', when) }) .. later)
     wait('the events show while the load runs', function()
       return live_heading() == heading
     end, 1000)
-    eq(bd_list_calls(path), 2, 'the load is still the only one')
+    eq(#calls_where({ verb = 'list', path = path }), 2, 'the load is still the only one')
     vim.wait(1500)
-    eq(bd_list_calls(path), 2, 'the slow load ended with no other load')
+    eq(#calls_where({ verb = 'list', path = path }), 2, 'the slow load ended with no other load')
     eq(live_heading(), heading, 'the same heading after the load ends: ' .. table.concat(lines_of(chat.timeline_win), '|'))
   end)
 end
@@ -7738,18 +7694,18 @@ test('chat live: a read event moves the dot of a message the chat marked read it
   local chat = live_chat({ chat_mark_read = true })
   local heading = '## mayor · ' .. os.date('%H:%M', chat.t1)
   wait('the chat marked it read', function()
-    return read_calls('tc-wisp-m2') == 1 and lines_of(chat.timeline_win)[7] == heading
+    return #calls_where({ verb = 'mark-read', id = 'tc-wisp-m2' }) == 1 and lines_of(chat.timeline_win)[7] == heading
   end)
   vim.cmd('wincmd h')
-  append(chat.log, id_line('mail.marked_unread', 'tc-wisp-m2'))
+  append(chat.log, event_line('mail.marked_unread', 'tc-wisp-m2'))
   wait('marked_unread brings the dot back', function()
     return lines_of(chat.timeline_win)[7] == heading .. ' ●'
   end, 1000)
-  append(chat.log, id_line('mail.marked_read', 'tc-wisp-m2'))
+  append(chat.log, event_line('mail.marked_read', 'tc-wisp-m2'))
   wait('marked_read removes it', function()
     return lines_of(chat.timeline_win)[7] == heading
   end, 1000)
-  eq(read_calls('tc-wisp-m2'), 1, 'the chat marked nothing again')
+  eq(#calls_where({ verb = 'mark-read', id = 'tc-wisp-m2' }), 1, 'the chat marked nothing again')
 end)
 
 test('chat live: a mail.read event clears the dot a refused mark-read kept', function()
@@ -7758,10 +7714,10 @@ test('chat live: a mail.read event clears the dot a refused mark-read kept', fun
   local chat = live_chat({ chat_mark_read = true })
   local heading = '## mayor · ' .. os.date('%H:%M', chat.t1)
   wait('the mark-read was refused', function()
-    return read_calls('tc-wisp-m2') == 1 and lines_of(chat.timeline_win)[7] == heading .. ' ●'
+    return #calls_where({ verb = 'mark-read', id = 'tc-wisp-m2' }) == 1 and lines_of(chat.timeline_win)[7] == heading .. ' ●'
   end)
   vim.cmd('wincmd h')
-  append(chat.log, id_line('mail.read', 'tc-wisp-m2'))
+  append(chat.log, event_line('mail.read', 'tc-wisp-m2'))
   wait('mail.read removes the dot', function()
     return lines_of(chat.timeline_win)[7] == heading
   end, 1000)
@@ -7777,7 +7733,7 @@ test('chat live: a failed load after a delivered send is said as an error', func
   vim.api.nvim_feedkeys(vim.keycode('<Space>ms'), 'x', false)
   wait('the send ends', drained, 5000)
   wait('the load after it failed', function()
-    return bd_list_calls(path) == 2
+    return #calls_where({ verb = 'list', path = path }) == 2
   end)
   local function errors()
     return vim.tbl_filter(function(note)
@@ -7800,7 +7756,7 @@ test('chat status: correspondent, city, liveness and unread count; a narrow wind
   eq(status(), ' mayor in demo-city · live · 1 unread ', 'idle, one unread')
   eq(vim.wo[chat.compose_win].statusline, ' <Space>ms send · q close · <C-j>/<C-k> focus · above: <CR…',
     'the keys, cut at the chat width')
-  append(chat.log, message_line('mail.replied', { id = 'tc-wisp-live1', subject = 'later', body = 'later' }))
+  append(chat.log, event_line('mail.replied', 'tc-wisp-live1', { id = 'tc-wisp-live1', subject = 'later', body = 'later' }))
   wait('the arrival counts', function()
     return status() == ' mayor in demo-city · live · 2 unread '
   end, 1000)
@@ -7898,7 +7854,7 @@ test('chat status: a city with no event log is polling, live once its log is wat
     return status() == ' mayor in demo-city · polling · 1 unread '
   end, 1000)
   vim.wait(100)
-  eq(bd_list_calls(path), 1, 'no history load moved it')
+  eq(#calls_where({ verb = 'list', path = path }), 1, 'no history load moved it')
   eq(#mail_calls(), calls, 'no gc call either')
 end)
 
@@ -7943,16 +7899,16 @@ test('chat is_current: only the current chat of that city and correspondent in t
   eq(chat.is_current(cities[1], 'mayor'), true, 'the compose window is current')
   eq(chat.is_current(cities[1], 'planner'), false, 'another correspondent')
   eq(chat.is_current(cities[2], 'mayor'), false, 'another city')
-  append(log, mail_line('mail.sent', 'ic-wisp-a1', { from = 'mayor', subject = 'in the chat' }))
+  append(log, event_line('mail.sent', 'ic-wisp-a1', msg('ic-wisp-a1', { from = 'mayor', subject = 'in the chat' })))
   seeded(4)
   eq(notices(), 0, 'the chat shows it')
-  append(log, mail_line('mail.sent', 'ic-wisp-b2', { from = 'planner' }))
+  append(log, event_line('mail.sent', 'ic-wisp-b2', msg('ic-wisp-b2', { from = 'planner' })))
   seeded(5)
   eq(notices(), 1, 'another correspondent is said')
 
   vim.cmd('tabnew')
   eq(chat.is_current(cities[1], 'mayor'), false, 'the chat of another tab page')
-  append(log, mail_line('mail.sent', 'ic-wisp-c3', { from = 'mayor' }))
+  append(log, event_line('mail.sent', 'ic-wisp-c3', msg('ic-wisp-c3', { from = 'mayor' })))
   seeded(6)
   eq(notices(), 2, 'said from another tab page')
   vim.cmd('tabclose')
@@ -7969,7 +7925,7 @@ test('chat is_current: only the current chat of that city and correspondent in t
   eq(chat.is_current(cities[1], 'mayor'), true, 'the timeline is current')
   vim.api.nvim_feedkeys('q', 'x', false)
   eq(chat.is_current(cities[1], 'mayor'), false, 'after close')
-  append(log, mail_line('mail.sent', 'ic-wisp-d4', { from = 'mayor' }))
+  append(log, event_line('mail.sent', 'ic-wisp-d4', msg('ic-wisp-d4', { from = 'mayor' })))
   seeded(7)
   eq(notices(), 3, 'said after close')
 end)
@@ -8035,7 +7991,7 @@ test(':GcMailChats opens at once with loading…, then lists every conversation 
   end)
   eq(lines_of(win), CHAT_LINES, 'one line per conversation, newest last message first')
   vim.wait(300)
-  eq({ bd_list_calls(cities[1].path), bd_list_calls(cities[2].path) }, { 1, 1 }, 'one bd list call per city')
+  eq({ #calls_where({ verb = 'list', path = cities[1].path }), #calls_where({ verb = 'list', path = cities[2].path }) }, { 1, 1 }, 'one bd list call per city')
   eq(#mail_calls(), 2, 'and nothing else')
 
   -- Opened again with the cache: the lines at once, one more load per city
@@ -8044,7 +8000,7 @@ test(':GcMailChats opens at once with loading…, then lists every conversation 
   vim.cmd('GcMailChats')
   eq(lines_of(vim.api.nvim_get_current_win()), CHAT_LINES, 'from the cache at once')
   vim.wait(800)
-  eq({ bd_list_calls(cities[1].path), bd_list_calls(cities[2].path) }, { 2, 2 }, 'each city loaded once more')
+  eq({ #calls_where({ verb = 'list', path = cities[1].path }), #calls_where({ verb = 'list', path = cities[2].path }) }, { 2, 2 }, 'each city loaded once more')
   vim.api.nvim_feedkeys(vim.keycode('<Esc>'), 'x', false)
   eq(#floats(), 0, '<Esc> closes')
 end)
@@ -8081,7 +8037,7 @@ test('a failed load for one city is said once and the other city still lists', f
   vim.cmd('GcMailChats')
   local win = vim.api.nvim_get_current_win()
   wait('both answered', function()
-    return bd_list_calls(cities[1].path) == 1 and bd_list_calls(cities[2].path) == 1 and #lines_of(win) == 3
+    return #calls_where({ verb = 'list', path = cities[1].path }) == 1 and #calls_where({ verb = 'list', path = cities[2].path }) == 1 and #lines_of(win) == 3
   end)
   vim.wait(300)
   eq(lines_of(win), { CHAT_LINES[1], CHAT_LINES[2], '     other-city  cannot load the history ' },
@@ -8091,7 +8047,7 @@ test('a failed load for one city is said once and the other city still lists', f
   end, notes)
   eq(#errors, 1, 'said once')
   eq(errors[1].message:find('store unavailable', 1, true) ~= nil, true, errors[1].message)
-  eq(bd_list_calls(cities[2].path), 1, 'and not retried')
+  eq(#calls_where({ verb = 'list', path = cities[2].path }), 1, 'and not retried')
   vim.api.nvim_feedkeys('q', 'x', false)
 end)
 
@@ -8301,7 +8257,7 @@ test(':GcMailSearch lists the hits across cities newest first, one bd list per c
   end)
   eq(lines_of(win), SEARCH_LINES, 'one line per hit: a subject, a sender, a body, both cases')
   vim.wait(200)
-  eq({ bd_list_calls(cities[1].path), bd_list_calls(cities[2].path) }, { 1, 1 }, 'one bd list call per city')
+  eq({ #calls_where({ verb = 'list', path = cities[1].path }), #calls_where({ verb = 'list', path = cities[2].path }) }, { 1, 1 }, 'one bd list call per city')
   vim.api.nvim_feedkeys('q', 'x', false)
   eq(#floats(), 0, 'q closes')
 
@@ -8313,12 +8269,31 @@ test(':GcMailSearch lists the hits across cities newest first, one bd list per c
   eq(lines_of(win), { ' no mail matches ' }, 'a word in no message')
   vim.api.nvim_feedkeys('q', 'x', false)
   vim.wait(200)
-  eq({ bd_list_calls(cities[1].path), bd_list_calls(cities[2].path) }, { 1, 1 }, 'still one load each')
+  eq({ #calls_where({ verb = 'list', path = cities[1].path }), #calls_where({ verb = 'list', path = cities[2].path }) }, { 1, 1 }, 'still one load each')
 
   -- Sender and recipient are searched too
   win = search_open('reviewer', 1)
   eq(lines_of(win), { SEARCH_LINES[5] }, 'a recipient')
   vim.api.nvim_feedkeys('q', 'x', false)
+end)
+
+test('fresh() unloads search: it reads the new history, not the one from before', function()
+  -- search captures the history module at require time: if fresh() left it
+  -- loaded, it would keep reading the history of the test that loaded it
+  -- first, while chat and mailbox read a fresh one.
+  require('gc_mail.search')
+  require('gc_mail.chat')
+  require('gc_mail.mailbox')
+  fresh()
+  local history = require('gc_mail.history')
+  local city = { path = '/srv/demo-city', name = 'demo-city' }
+  history.cache[city.path] = { by_id = { ['ic-wisp-a1'] = {
+    id = 'ic-wisp-a1', from = 'mayor', to = 'human', subject = 'Build done', body = 'done',
+    created = 1728470400, created_at = '2026-10-08T10:00:00Z', read = false,
+  } } }
+  local hits = require('gc_mail.search').hits(city, 'build')
+  eq(#hits, 1, 'search sees the history module fresh() loaded')
+  eq(hits[1].message.id, 'ic-wisp-a1', 'the cached message')
 end)
 
 test(':GcMailSearch without text is refused', function()
@@ -8428,7 +8403,7 @@ test('a failed load for one city is said once and the other city\'s hits still l
   vim.cmd('GcMailSearch markdown')
   local win = vim.api.nvim_get_current_win()
   wait('both answered', function()
-    return bd_list_calls(cities[1].path) == 1 and bd_list_calls(cities[2].path) == 1 and #lines_of(win) == 4
+    return #calls_where({ verb = 'list', path = cities[1].path }) == 1 and #calls_where({ verb = 'list', path = cities[2].path }) == 1 and #lines_of(win) == 4
   end)
   vim.wait(300)
   eq(lines_of(win), { SEARCH_LINES[2], SEARCH_LINES[3], SEARCH_LINES[4], ' other-city  cannot load the history ' },
@@ -8454,7 +8429,7 @@ test('a city registered after the list was cached is searched too, and a failed 
   local win = search_open('markdown', 6)
   eq(lines_of(win)[1], ' late-city  mayor→you  Markdown late  1m ', 'the newly registered city is searched')
   eq(#gc_mail.cached_cities(), 3, 'the refresh replaced the cached list')
-  eq(bd_list_calls(late_path), 1, 'one bd list for the new city')
+  eq(#calls_where({ verb = 'list', path = late_path }), 1, 'one bd list for the new city')
   vim.api.nvim_feedkeys('q', 'x', false)
 
   -- gc cities failing leaves the cached list searched, said once as a warning
@@ -8625,7 +8600,7 @@ test('H lists read and closed mail to human from the history in both views, one 
   end)
   eq(title_of(fwin):sub(1, 10), ' all mail ', 'the float title says all mail')
   eq(vim.wo[pwin].statusline:sub(1, 10), ' all mail ', 'the panel status line says all mail')
-  eq({ bd_list_calls(cities[1].path), bd_list_calls(cities[2].path) }, { 1, 1 }, 'one bd list call per city')
+  eq({ #calls_where({ verb = 'list', path = cities[1].path }), #calls_where({ verb = 'list', path = cities[2].path }) }, { 1, 1 }, 'one bd list call per city')
   -- H in the panel turns it off for both views.
   panel_key(pwin, 'H')()
   eq(rows(fwin), { '  ● demo-city  mayor  unread' }, 'the float lists today\'s set again')
@@ -8635,10 +8610,10 @@ test('H lists read and closed mail to human from the history in both views, one 
   press('H')
   eq(rows(fwin), ALL_MAIL, 'all mail again at once')
   vim.wait(200)
-  eq({ bd_list_calls(cities[1].path), bd_list_calls(cities[2].path) }, { 1, 1 }, 'no second load for a second H')
+  eq({ #calls_where({ verb = 'list', path = cities[1].path }), #calls_where({ verb = 'list', path = cities[2].path }) }, { 1, 1 }, 'no second load for a second H')
   press('R')
   wait('R loads the history again', function()
-    return bd_list_calls(cities[1].path) == 2 and bd_list_calls(cities[2].path) == 2
+    return #calls_where({ verb = 'list', path = cities[1].path }) == 2 and #calls_where({ verb = 'list', path = cities[2].path }) == 2
   end)
   vim.wait(200)
   eq(errors(), {}, 'nothing said')
@@ -8664,7 +8639,7 @@ test('a failed history load is said once and all mail shows what the mailbox has
   assert(errors()[1]:find('store unavailable', 1, true), errors()[1])
   press('R')
   wait('loaded again', function()
-    return bd_list_calls(cities[2].path) == 2
+    return #calls_where({ verb = 'list', path = cities[2].path }) == 2
   end)
   vim.wait(200)
   eq(#errors(), 1, 'the same failure is not said again')
@@ -8692,10 +8667,10 @@ test('x marks lines in both views; a archives exactly the marked ones in one cal
   eq(rows(pwin), marked, 'the panel shows the same marks')
   -- A refresh that answers late, with both messages still in it.
   raw_answer('inbox', 'delay', '1', 'demo-city')
-  local n = inbox_calls(cities[1].path)
+  local n = #calls_where({ verb = 'inbox', path = cities[1].path })
   press('R')
   wait('the refresh started', function()
-    return inbox_calls(cities[1].path) == n + 1
+    return #calls_where({ verb = 'inbox', path = cities[1].path }) == n + 1
   end)
   acted_many('archive', { 'ic-wisp-a1', 'ic-wisp-a3' })
   vim.api.nvim_win_set_cursor(fwin, { 2, 0 })
@@ -8888,10 +8863,10 @@ test('a bulk archive that fails while a refresh runs leaves every line: the refr
   mark_rows(win, { 1, 2 })
   -- The refresh answers after 0.5 s, while the archive (1 s) still runs; then the archive fails.
   raw_answer('inbox', 'delay', '0.5', 'demo-city')
-  local n = inbox_calls('/srv/demo-city')
+  local n = #calls_where({ verb = 'inbox', path = '/srv/demo-city' })
   press('R')
   wait('the refresh started', function()
-    return inbox_calls('/srv/demo-city') == n + 1
+    return #calls_where({ verb = 'inbox', path = '/srv/demo-city' }) == n + 1
   end)
   raw_answer('archive', 'delay', '1', 'demo-city')
   raw_answer('archive', 'exit', '1', 'demo-city')
@@ -8918,9 +8893,9 @@ test('H before the first city list arrives loads the history of every city once 
   wait('all mail once the cities arrived', function()
     return vim.deep_equal(rows(fwin), ALL_MAIL)
   end)
-  eq({ bd_list_calls(cities[1].path), bd_list_calls(cities[2].path) }, { 1, 1 }, 'one bd list call per city')
+  eq({ #calls_where({ verb = 'list', path = cities[1].path }), #calls_where({ verb = 'list', path = cities[2].path }) }, { 1, 1 }, 'one bd list call per city')
   vim.wait(200)
-  eq({ bd_list_calls(cities[1].path), bd_list_calls(cities[2].path) }, { 1, 1 }, 'and no more')
+  eq({ #calls_where({ verb = 'list', path = cities[1].path }), #calls_where({ verb = 'list', path = cities[2].path }) }, { 1, 1 }, 'and no more')
   eq(errors(), {}, 'nothing said')
   press('q')
 end)

@@ -31,38 +31,15 @@ if [ "$1" = cities ]; then
   fi
   exit "${FAKE_GC_CITIES_EXIT:-0}"
 fi
-if [ "$3" = mail ]; then
-  case "$4" in
-    inbox|count|peek|read|mark-read|mark-unread|thread|archive|delete)
-      # One append per call: two calls running at once never mix their lines.
-      line=$(printf '%s\037' "$@")
-      printf '%s\n' "$line" >> "$FAKE_GC_MAIL_LOG"
-      base="$FAKE_GC_MAIL/$4"
-      city=$(basename "$2")
-      for ext in json exit stderr hang delay; do
-        if [ -f "$FAKE_GC_MAIL/$4.$city.$ext" ]; then base="$FAKE_GC_MAIL/$4.$city"; fi
-      done
-      if [ -f "$base.hang" ]; then
-        exec sleep "$(cat "$base.hang")"
-      fi
-      if [ -f "$base.delay" ]; then
-        out=$(cat "$base.json" 2>/dev/null)
-        sleep "$(cat "$base.delay")"
-        printf '%s\n' "$out"
-      elif [ -f "$base.json" ]; then cat "$base.json"; fi
-      if [ -f "$base.stderr" ]; then cat "$base.stderr" >&2; fi
-      exit "$(cat "$base.exit" 2>/dev/null || echo 0)"
-      ;;
-  esac
-fi
-if [ "$3" = bd ] && [ "$4" = list ]; then
-  # One append per call: two calls running at once never mix their lines.
+# One append per call: two calls running at once never mix their lines.
+answer() {
+  base="$FAKE_GC_MAIL/$1"
+  shift
   line=$(printf '%s\037' "$@")
   printf '%s\n' "$line" >> "$FAKE_GC_MAIL_LOG"
-  base="$FAKE_GC_MAIL/bd-list"
   city=$(basename "$2")
   for ext in json exit stderr hang delay; do
-    if [ -f "$FAKE_GC_MAIL/bd-list.$city.$ext" ]; then base="$FAKE_GC_MAIL/bd-list.$city"; fi
+    if [ -f "$base.$city.$ext" ]; then base="$base.$city"; fi
   done
   if [ -f "$base.hang" ]; then
     exec sleep "$(cat "$base.hang")"
@@ -74,6 +51,16 @@ if [ "$3" = bd ] && [ "$4" = list ]; then
   elif [ -f "$base.json" ]; then cat "$base.json"; fi
   if [ -f "$base.stderr" ]; then cat "$base.stderr" >&2; fi
   exit "$(cat "$base.exit" 2>/dev/null || echo 0)"
+}
+if [ "$3" = mail ]; then
+  case "$4" in
+    inbox|count|peek|read|mark-read|mark-unread|thread|archive|delete)
+      answer "$4" "$@"
+      ;;
+  esac
+fi
+if [ "$3" = bd ] && [ "$4" = list ]; then
+  answer bd-list "$@"
 fi
 # Written whole (temp, then rename): a test polling the log never reads it empty.
 printf '%s\0' "$@" > "$FAKE_GC_LOG.$$"
