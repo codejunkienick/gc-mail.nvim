@@ -42,6 +42,133 @@ local function all_strings(list)
   return true
 end
 
+--- Messages oldest first: created, then id.
+function M.by_created(a, b)
+  if a.created ~= b.created then
+    return a.created < b.created
+  end
+  return a.id < b.id
+end
+
+--- Entries newest first: created, then city name, then id. An entry is a
+--- mailbox or search entry ({ city, message }) or a conversation
+--- ({ city, with, last }); for a conversation the last message gives the
+--- created and the correspondent gives the final key.
+function M.newest_first(a, b)
+  local am = a.message or a.last
+  local bm = b.message or b.last
+  if am.created ~= bm.created then
+    return am.created > bm.created
+  end
+  if a.city.name ~= b.city.name then
+    return a.city.name < b.city.name
+  end
+  local ai = a.message and a.message.id or a.with
+  local bi = b.message and b.message.id or b.with
+  return ai < bi
+end
+
+--- The other side of message `m`: its non-human sender or recipient, or
+--- nil when neither side is human or both are.
+function M.correspondent(m)
+  if m.from == 'human' and m.to ~= 'human' then
+    return m.to
+  end
+  if m.to == 'human' and m.from ~= 'human' then
+    return m.from
+  end
+  return nil
+end
+
+-- The one strict decoder of the bd-list shape (I1): one element as gc
+-- prints it, with `started` stamped on the message, or nil when the
+-- element is not a message this plugin can read.
+local function bead_message(elem, started)
+  if type(elem) ~= 'table' then
+    return nil
+  end
+  if type(elem.id) ~= 'string' or not queue.mail_id(elem.id) then
+    return nil
+  end
+  if type(elem.title) ~= 'string' then
+    return nil
+  end
+  if type(elem.sender) ~= 'string' or elem.sender == '' then
+    return nil
+  end
+  if type(elem.status) ~= 'string' then
+    return nil
+  end
+  if type(elem.created_at) ~= 'string' or not mailbox.epoch(elem.created_at) then
+    return nil
+  end
+  if elem.description ~= nil and type(elem.description) ~= 'string' then
+    return nil
+  end
+  if elem.metadata ~= nil and type(elem.metadata) ~= 'table' then
+    return nil
+  end
+  if elem.labels ~= nil then
+    if type(elem.labels) ~= 'table' or not vim.islist(elem.labels) or not all_strings(elem.labels) then
+      return nil
+    end
+  end
+  local recipient = nil
+  if type(elem.assignee) == 'string' and elem.assignee ~= '' then
+    recipient = elem.assignee
+  elseif elem.assignee == nil or elem.assignee == vim.NIL or elem.assignee == '' then
+    if elem.metadata and type(elem.metadata) == 'table'
+        and type(elem.metadata['gc.routed_to']) == 'string' and elem.metadata['gc.routed_to'] ~= '' then
+      recipient = elem.metadata['gc.routed_to']
+    else
+      return nil
+    end
+  else
+    return nil
+  end
+  local thread_id = nil
+  local reply_to = nil
+  local has_read_label = false
+  if elem.labels then
+    for _, lbl in ipairs(elem.labels) do
+      if thread_id == nil then
+        local tid = lbl:match('^thread:(.*)$')
+        if tid and queue.thread_id(tid) then
+          thread_id = tid
+        end
+      end
+      if reply_to == nil then
+        local rid = lbl:match('^reply%-to:(.*)$')
+        if rid and queue.mail_id(rid) then
+          reply_to = rid
+        end
+      end
+      if lbl == 'read' then
+        has_read_label = true
+      end
+    end
+  end
+  local closed = (elem.status == 'closed')
+  local read = (closed or has_read_label or (elem.metadata and elem.metadata['mail.read'] == 'true')) and true or false
+  local msg = mailbox.message({
+    id = elem.id,
+    from = elem.sender,
+    to = recipient,
+    subject = elem.title,
+    body = elem.description or '',
+    created_at = elem.created_at,
+    read = read,
+    thread_id = thread_id,
+  })
+  if not msg then
+    return nil
+  end
+  msg.closed = closed
+  msg.reply_to = reply_to
+  msg.loaded_since = started
+  return msg
+end
+
 --- Loads mail history for `city` from the bead store:
 ---   gc --city <path> bd list --type message --all --json --limit 0 --created-after <T>
 --- or with `opts.thread` set:
@@ -109,101 +236,15 @@ function M.load(city, opts, on_done)
     local list = {}
     local skipped = 0
     for _, elem in ipairs(raw_list) do
-      local valid = true
-      if type(elem) ~= 'table' then
-        valid = false
-      elseif type(elem.id) ~= 'string' or not queue.mail_id(elem.id) then
-        valid = false
-      elseif type(elem.title) ~= 'string' then
-        valid = false
-      elseif type(elem.sender) ~= 'string' or elem.sender == '' then
-        valid = false
-      elseif type(elem.status) ~= 'string' then
-        valid = false
-      elseif type(elem.created_at) ~= 'string' or not mailbox.epoch(elem.created_at) then
-        valid = false
-      elseif elem.description ~= nil and type(elem.description) ~= 'string' then
-        valid = false
-      elseif elem.metadata ~= nil and type(elem.metadata) ~= 'table' then
-        valid = false
-      elseif elem.labels ~= nil then
-        if type(elem.labels) ~= 'table' or not vim.islist(elem.labels) or not all_strings(elem.labels) then
-          valid = false
-        end
-      end
-
-      local recipient = nil
-      if valid then
-        if type(elem.assignee) == 'string' and elem.assignee ~= '' then
-          recipient = elem.assignee
-        elseif elem.assignee == nil or elem.assignee == vim.NIL or elem.assignee == '' then
-          if elem.metadata and type(elem.metadata) == 'table'
-              and type(elem.metadata['gc.routed_to']) == 'string' and elem.metadata['gc.routed_to'] ~= '' then
-            recipient = elem.metadata['gc.routed_to']
-          else
-            valid = false
-          end
-        else
-          valid = false
-        end
-      end
-
-      if not valid then
+      local msg = bead_message(elem, started)
+      if not msg then
         skipped = skipped + 1
       else
-        local thread_id = nil
-        local reply_to = nil
-        local has_read_label = false
-        if elem.labels then
-          for _, lbl in ipairs(elem.labels) do
-            if thread_id == nil then
-              local tid = lbl:match('^thread:(.*)$')
-              if tid and queue.thread_id(tid) then
-                thread_id = tid
-              end
-            end
-            if reply_to == nil then
-              local rid = lbl:match('^reply%-to:(.*)$')
-              if rid and queue.mail_id(rid) then
-                reply_to = rid
-              end
-            end
-            if lbl == 'read' then
-              has_read_label = true
-            end
-          end
-        end
-
-        local closed = (elem.status == 'closed')
-        local read = (closed or has_read_label or (elem.metadata and elem.metadata['mail.read'] == 'true')) and true or false
-        local mapped = {
-          id = elem.id,
-          from = elem.sender,
-          to = recipient,
-          subject = elem.title,
-          body = elem.description or '',
-          created_at = elem.created_at,
-          read = read,
-          thread_id = thread_id,
-        }
-        local msg, _ = mailbox.message(mapped)
-        if not msg then
-          skipped = skipped + 1
-        else
-          msg.closed = closed
-          msg.reply_to = reply_to
-          msg.loaded_since = started
-          list[#list + 1] = msg
-        end
+        list[#list + 1] = msg
       end
     end
 
-    table.sort(list, function(a, b)
-      if a.created ~= b.created then
-        return a.created < b.created
-      end
-      return a.id < b.id
-    end)
+    table.sort(list, M.by_created)
 
     if opts.thread then
       local cache_entry = M.cache[city.path]
@@ -251,12 +292,7 @@ function M.messages(city)
   for _, m in pairs(entry.by_id) do
     list[#list + 1] = m
   end
-  table.sort(list, function(a, b)
-    if a.created ~= b.created then
-      return a.created < b.created
-    end
-    return a.id < b.id
-  end)
+  table.sort(list, M.by_created)
   return list
 end
 
@@ -266,7 +302,8 @@ function M.conversation(city, with)
   local all = M.messages(city)
   local list = {}
   for _, m in ipairs(all) do
-    if (m.from == with and m.to == 'human') or (m.from == 'human' and m.to == with) then
+    local other = M.correspondent(m)
+    if other and other == with then
       list[#list + 1] = m
     end
   end

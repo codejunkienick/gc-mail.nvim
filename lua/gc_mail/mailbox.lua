@@ -589,15 +589,7 @@ function M.entries()
       box.marks[key] = nil
     end
   end
-  table.sort(list, function(a, b)
-    if a.message.created ~= b.message.created then
-      return a.message.created > b.message.created
-    end
-    if a.city.name ~= b.city.name then
-      return a.city.name < b.city.name
-    end
-    return a.message.id < b.message.id
-  end)
+  table.sort(list, require('gc_mail.history').newest_first)
   return list
 end
 

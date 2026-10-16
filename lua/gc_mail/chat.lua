@@ -1075,7 +1075,8 @@ end
 
 -- Whether message `m` belongs to the conversation of the human with `with`
 local function belongs(m, with)
-  return (m.from == with and m.to == 'human') or (m.from == 'human' and m.to == with)
+  local other = history.correspondent(m)
+  return other ~= nil and other == with
 end
 
 -- Renders every open chat of `city`; with `m`, only those whose conversation
@@ -2040,7 +2041,7 @@ local CHATS_LOADING = ' loading… '
 function M.conversations(city)
   local by_with, list = {}, {}
   for _, m in ipairs(history.messages(city)) do
-    local with = (m.from == 'human' and m.to ~= 'human') and m.to or (m.to == 'human' and m.from ~= 'human') and m.from or nil
+    local with = history.correspondent(m)
     if with then
       local c = by_with[with]
       if not c then
@@ -2055,12 +2056,7 @@ function M.conversations(city)
       end
     end
   end
-  table.sort(list, function(a, b)
-    if a.last.created ~= b.last.created then
-      return a.last.created > b.last.created
-    end
-    return a.with < b.with
-  end)
+  table.sort(list, history.newest_first)
   return list
 end
 
@@ -2080,15 +2076,7 @@ local function chat_rows(view)
       bare[#bare + 1] = { city = city, with = 'mayor' }
     end
   end
-  table.sort(conversations, function(a, b)
-    if a.last.created ~= b.last.created then
-      return a.last.created > b.last.created
-    end
-    if a.city.name ~= b.city.name then
-      return a.city.name < b.city.name
-    end
-    return a.with < b.with
-  end)
+  table.sort(conversations, history.newest_first)
   return vim.list_extend(conversations, bare)
 end
 

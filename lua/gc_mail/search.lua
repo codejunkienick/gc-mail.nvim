@@ -59,16 +59,6 @@ function M.line(hit, now)
     gc_mail().age(math.max(0, now - m.created)))
 end
 
-local function newest_first(a, b)
-  if a.message.created ~= b.message.created then
-    return a.message.created > b.message.created
-  end
-  if a.city.name ~= b.city.name then
-    return a.city.name < b.city.name
-  end
-  return a.message.id < b.message.id
-end
-
 local DESC = { ['<CR>'] = 'open the message', c = 'open the chat with its correspondent' }
 
 --- Opens the results float for `text` (the whole argument, trimmed; empty is
@@ -94,7 +84,7 @@ function M.run(text)
     for _, list in pairs(view.hits) do
       vim.list_extend(hits, list)
     end
-    table.sort(hits, newest_first)
+    table.sort(hits, history.newest_first)
     view.rows = hits
     local lines, now = {}, os.time()
     for i, hit in ipairs(hits) do
