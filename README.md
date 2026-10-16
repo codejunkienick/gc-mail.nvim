@@ -814,19 +814,28 @@ Watch the full video: [gc-mail-demo.mp4](https://github.com/codejunkienick/gc-ma
 headless: nothing appears on your screen and no real gc or city is touched.
 
 ```sh
-demo/record.sh [--out FILE.mp4] [--tour FILE] [--size WxH]
+demo/record.sh [--out FILE.mp4] [--tour FILE] [--size WxH] [--gif FILE] [--webp FILE]
 ```
 
 It starts its own Xvfb display, runs alacritty (wezterm as the fallback) with
 `nvim --clean -u demo/init.lua` and the plugin against a fake demo city, types
 the tour at human speed, and grabs the display with ffmpeg (30 fps, H.264) into
-an MP4 (default `./gc-mail-demo.mp4`, 1920x1080). Requires `sh`, `nvim`, `Xvfb`,
+an MP4 (default `./gc-mail-demo.mp4`, 1920x1080). A second ffmpeg pass writes
+a 960 px wide 12 fps palette GIF (`--gif FILE`) or animated WebP (`--webp FILE`)
+from that MP4 for small sharing files. The terminal runs at font size 22 at
+1920x1080 so the overlay keystrokes stay large. Requires `sh`, `nvim`, `Xvfb`,
 `xdotool`, `ffmpeg` and `alacritty` or `wezterm`; nothing is downloaded.
 
+- `demo/init.lua` is the recording config: a statusline with the unread count
+  via `require('gc_mail').status()`, and recording-only markdown rendering when
+  `GC_DEMO_MARKVIEW` names a local markview.nvim checkout (skipped cleanly when
+  unset or missing; its `ignore_buftypes` is cleared so `nofile` demo buffers
+  render). `record.sh` keeps `GC_DEMO_MARKVIEW` (made absolute) across its
+  `GC_*` cleanup and passes it to Neovim.
 - `demo/bin/gc` is the demo gc: a small mail store in a temporary directory,
   seeded with a few days of mail from `mayor`, `builder` and `reviewer` to
   `human` (city `demo-city`). `record.sh` puts it first on `PATH`, unsets every
-  `GC_*` variable and refuses to start unless `gc` resolves to it. It answers
+  `GC_*` variable except `GC_DEMO_MARKVIEW` and refuses to start unless `gc` resolves to it. It answers
   the calls the plugin makes, and two demo-only verbs write a message from an
   agent and the matching line of the city's event log, so the panel and an open
   chat show the mail live: `gc agent <name> reply latest|<id> <text>` and

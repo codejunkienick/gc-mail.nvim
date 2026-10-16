@@ -1,14 +1,16 @@
 #!/bin/sh
 # Records a presentation video of the plugin's windows, headless.
 #
-#   demo/record.sh [--out FILE.mp4] [--tour FILE] [--size WxH]
+#   demo/record.sh [--out FILE.mp4] [--tour FILE] [--size WxH] [--gif FILE] [--webp FILE]
 #
 # A fresh Xvfb display runs a terminal (alacritty, else wezterm) with Neovim
 # and the plugin against a fake demo city (demo/bin/gc); the tour is typed at
 # human speed while demo/keys.lua shows each key and the captions, an agent
-# reply arrives live, and ffmpeg grabs the display into an MP4. Nothing
-# touches the real screen, the real gc or any real city: everything lives in
-# one temporary directory that is removed on exit.
+# reply arrives live, and ffmpeg grabs the display into an MP4. A second
+# ffmpeg pass writes a 960 px wide 12 fps palette GIF (--gif) or animated
+# WebP (--webp) from that MP4. Nothing touches the real screen, the real gc
+# or any real city: everything lives in one temporary directory that is
+# removed on exit.
 #
 # Tour file, one step per line:
 #   key <xdotool key names>   one chord or a sequence: key space m p
@@ -26,6 +28,8 @@ here=$(cd "$(dirname "$0")" && pwd -P)
 out=./gc-mail-demo.mp4
 tour="$here/tour-basic.txt"
 size=1920x1080
+gif=
+webp=
 
 usage() {
   sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
@@ -41,6 +45,8 @@ while [ $# -gt 0 ]; do
     --out) [ $# -ge 2 ] || die '--out needs a file'; out=$2; shift 2 ;;
     --tour) [ $# -ge 2 ] || die '--tour needs a file'; tour=$2; shift 2 ;;
     --size) [ $# -ge 2 ] || die '--size needs WxH'; size=$2; shift 2 ;;
+    --gif) [ $# -ge 2 ] || die '--gif needs a file'; gif=$2; shift 2 ;;
+    --webp) [ $# -ge 2 ] || die '--webp needs a file'; webp=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1 (see --help)" ;;
   esac
@@ -94,10 +100,20 @@ done < "$tour"
 # ---- never the real gc, never the real screen --------------------------------
 
 # Every GC_*, BEADS_* and BD_* variable goes: the demo gc takes its state from
-# GC_DEMO_DIR, which is set below.
+# GC_DEMO_DIR, which is set below. GC_DEMO_MARKVIEW survives: demo/init.lua
+# reads it for recording-only markdown rendering.
+demo_markview=${GC_DEMO_MARKVIEW:-}
 for name in $(env | sed -n 's/^\(GC_[A-Za-z0-9_]*\|BEADS_[A-Za-z0-9_]*\|BD_[A-Za-z0-9_]*\)=.*/\1/p'); do
   unset "$name"
 done
+if [ -n "$demo_markview" ]; then
+  case $demo_markview in
+    /*) ;;
+    *) demo_markview=$PWD/$demo_markview ;;
+  esac
+  GC_DEMO_MARKVIEW=$demo_markview
+  export GC_DEMO_MARKVIEW
+fi
 # alacritty and wezterm prefer Wayland when it is set: they would open on the
 # real desktop.
 unset WAYLAND_DISPLAY DISPLAY XAUTHORITY
@@ -125,6 +141,20 @@ case $out in
   *) out=$PWD/$out ;;
 esac
 mkdir -p "$(dirname "$out")"
+if [ -n "$gif" ]; then
+  case $gif in
+    /*) ;;
+    *) gif=$PWD/$gif ;;
+  esac
+  mkdir -p "$(dirname "$gif")"
+fi
+if [ -n "$webp" ]; then
+  case $webp in
+    /*) ;;
+    *) webp=$PWD/$webp ;;
+  esac
+  mkdir -p "$(dirname "$webp")"
+fi
 
 # ---- one temporary directory holds everything ---------------------------------
 
@@ -239,7 +269,7 @@ cat > "$tmp/alacritty.toml" <<'EOF'
 ipc_socket = false
 
 [font]
-size = 18
+size = 22
 
 [window]
 decorations = "None"
@@ -250,7 +280,7 @@ y = 8
 EOF
 cat > "$tmp/wezterm.lua" <<'EOF'
 return {
-  font_size = 18.0,
+  font_size = 22.0,
   enable_tab_bar = false,
   window_decorations = "NONE",
   enable_wayland = false,
@@ -374,4 +404,24 @@ stop_ffmpeg
 [ -s "$tmp/out.mp4" ] || fail 'ffmpeg wrote an empty file'
 mv -f "$tmp/out.mp4" "$out"
 printf 'recorded %s\n' "$out"
+
+# ---- a second ffmpeg pass writes the small sharing files ----------------------
+# Both are 960 px wide at 12 fps from the recorded MP4; the GIF goes through
+# a palette for readable text.
+if [ -n "$gif" ]; then
+  ffmpeg -y -loglevel error -i "$out" -vf "fps=12,scale=960:-1:flags=lanczos,palettegen" "$tmp/palette.png" \
+    >"$tmp/gif-palette.log" 2>&1 || fail "ffmpeg palette failed: $(tail -n 3 "$tmp/gif-palette.log")"
+  ffmpeg -y -loglevel error -i "$out" -i "$tmp/palette.png" \
+    -lavfi "fps=12,scale=960:-1:flags=lanczos [x]; [x][1:v] paletteuse" "$gif" \
+    >"$tmp/gif.log" 2>&1 || fail "ffmpeg GIF failed: $(tail -n 3 "$tmp/gif.log")"
+  [ -s "$gif" ] || fail 'ffmpeg wrote an empty GIF'
+  printf 'recorded %s\n' "$gif"
+fi
+if [ -n "$webp" ]; then
+  ffmpeg -y -loglevel error -i "$out" -vf "fps=12,scale=960:-1:flags=lanczos" \
+    -c:v libwebp -lossless 0 -quality 70 -cr_threshold 50 -cr_size 16 -loop 0 "$webp" \
+    >"$tmp/webp.log" 2>&1 || fail "ffmpeg WebP failed: $(tail -n 3 "$tmp/webp.log")"
+  [ -s "$webp" ] || fail 'ffmpeg wrote an empty WebP'
+  printf 'recorded %s\n' "$webp"
+fi
 exit 0
