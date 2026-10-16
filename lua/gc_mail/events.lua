@@ -1,7 +1,7 @@
 -- The shared Gas City event-log watcher of gc-mail.nvim.
 --
--- Serves every live view: the panel today, the chat and background watch
--- later. Subscribers get decoded mail.* events instead of each view watching
+-- Serves every live view: the panel, the chat and the background watch.
+-- Subscribers get decoded mail.* events instead of each view watching
 -- the files itself. Nothing runs at load time; nothing runs while no
 -- subscriber exists; every handle is closed when the last subscriber leaves;
 -- callbacks never touch a stopped watch.
@@ -46,6 +46,14 @@ function M.close_handle(h)
   end
 end
 local close_handle = M.close_handle
+
+-- Stops one city: no more events from it, and its event handle and rearm
+-- timer are closed.
+local function drop(w)
+  w.stopped = true
+  close_handle(w.event)
+  close_handle(w.rearm)
+end
 
 local function subscriber_has_city(name, city_path)
   local list = subscriber_cities[name]
@@ -217,6 +225,25 @@ local function rearm_missing(this)
   end
 end
 
+-- The one place the rearm timer starts: a new timer when there is none or
+-- it is closing, otherwise the live one restarted at the configured poll.
+local function arm_rearm(this)
+  if not this.timer or this.timer:is_closing() then
+    this.timer = handle(this, uv.new_timer())
+  else
+    this.timer:stop()
+  end
+  local poll = config.events_rearm_ms
+  this.timer:start(poll, poll, function()
+    vim.schedule(function()
+      if live ~= this then
+        return
+      end
+      rearm_missing(this)
+    end)
+  end)
+end
+
 local function stop()
   local this = live
   if not this then
@@ -224,9 +251,7 @@ local function stop()
   end
   live = nil
   for _, w in pairs(this.cities) do
-    w.stopped = true
-    close_handle(w.event)
-    close_handle(w.rearm)
+    drop(w)
   end
   this.cities = {}
   close_handle(this.timer)
@@ -253,9 +278,7 @@ local function reconcile(this)
 
   if next(union) == nil then
     for _, w in pairs(this.cities) do
-      w.stopped = true
-      close_handle(w.event)
-      close_handle(w.rearm)
+      drop(w)
     end
     this.cities = {}
     close_handle(this.timer)
@@ -264,23 +287,12 @@ local function reconcile(this)
   end
 
   if not this.timer or this.timer:is_closing() then
-    local poll = config.events_rearm_ms
-    this.timer = handle(this, uv.new_timer())
-    this.timer:start(poll, poll, function()
-      vim.schedule(function()
-        if live ~= this then
-          return
-        end
-        rearm_missing(this)
-      end)
-    end)
+    arm_rearm(this)
   end
 
   for path, w in pairs(this.cities) do
     if not union[path] then
-      w.stopped = true
-      close_handle(w.event)
-      close_handle(w.rearm)
+      drop(w)
       this.cities[path] = nil
     end
   end
@@ -304,14 +316,7 @@ end
 function M.configure(opts)
   config = vim.tbl_extend('force', config, opts or {})
   if live and live.timer and not live.timer:is_closing() and opts and opts.events_rearm_ms then
-    live.timer:stop()
-    live.timer:start(config.events_rearm_ms, config.events_rearm_ms, function()
-      vim.schedule(function()
-        if live then
-          rearm_missing(live)
-        end
-      end)
-    end)
+    arm_rearm(live)
   end
 end
 

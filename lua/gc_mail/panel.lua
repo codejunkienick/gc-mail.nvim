@@ -47,23 +47,11 @@ end
 -- ---- the event log watch ------------------------------------------------------
 
 -- The watch while any panel is open: { owner (for mailbox.list), cities (city
--- path -> w), timer (the fallback), handles (every uv handle it made) }.
+-- path -> w), timer (the fallback) }.
 -- File watching and event parsing are handled by gc_mail.events.
 -- In panel.lua, w = { city, debounce (timer), busy (an inbox call in flight),
 -- again (list once more when it ends), stopped }.
 local live
--- The last watch started, kept after it stops (M.handles).
-local last
-
--- Records `h` among the watch's handles; closed ones are dropped, so a watch
--- re-armed many times holds only what is open.
-local function handle(this, h)
-  this.handles = vim.tbl_filter(function(old)
-    return not old:is_closing()
-  end, this.handles)
-  this.handles[#this.handles + 1] = h
-  return h
-end
 
 local close_handle = require('gc_mail.events').close_handle
 
@@ -105,7 +93,7 @@ local function add_city(this, city)
   end
   local w = {
     city = { name = city.name, path = city.path },
-    debounce = handle(this, uv.new_timer()),
+    debounce = uv.new_timer(),
   }
   this.cities[city.path] = w
   local clist = {}
@@ -135,8 +123,8 @@ end
 local render
 
 local function start()
-  local this = { owner = { pending = 0 }, cities = {}, handles = {} }
-  live, last = this, this
+  local this = { owner = { pending = 0 }, cities = {} }
+  live = this
   local events = require('gc_mail.events')
   events.subscribe('panel', function(city, ev)
     if live ~= this then
@@ -171,7 +159,7 @@ local function start()
     end
   end)
   local poll = config.poll_ms or gc_mail().config.panel_poll_ms
-  this.timer = handle(this, uv.new_timer())
+  this.timer = uv.new_timer()
   this.timer:start(poll, poll, function()
     vim.schedule(function()
       if live ~= this then
@@ -197,10 +185,9 @@ local function stop()
   require('gc_mail.events').unsubscribe('panel')
   for _, w in pairs(this.cities) do
     w.stopped = true
+    close_handle(w.debounce)
   end
-  for _, h in ipairs(this.handles) do
-    close_handle(h)
-  end
+  close_handle(this.timer)
 end
 
 -- ---- the window ---------------------------------------------------------------
@@ -266,6 +253,13 @@ render = function()
   end
 end
 
+-- The window `panel` opened under, when it is still a usable origin: valid,
+-- not the panel itself, and on the panel's tab page; otherwise nil.
+local function origin_of(panel)
+  return vim.api.nvim_win_is_valid(panel.origin) and panel.origin ~= panel.win
+    and vim.api.nvim_win_get_tabpage(panel.origin) == panel.tab and panel.origin or nil
+end
+
 -- Opens and enters a window above `panel` for a message, a thread or a
 -- reply: a split of the window right above it, else a full-width one at the
 -- top. Never inside the panel.
@@ -275,8 +269,7 @@ local function split_above(panel)
       return vim.fn.win_getid(vim.fn.winnr('k'))
     end)
     if above == 0 or above == panel.win then
-      above = vim.api.nvim_win_is_valid(panel.origin) and panel.origin ~= panel.win
-        and vim.api.nvim_win_get_tabpage(panel.origin) == panel.tab and panel.origin or nil
+      above = origin_of(panel)
     end
     if above then
       vim.api.nvim_set_current_win(above)
@@ -292,8 +285,7 @@ end
 -- inside the panel.
 local function beside(panel)
   return function()
-    local target = vim.api.nvim_win_is_valid(panel.origin) and panel.origin ~= panel.win
-      and vim.api.nvim_win_get_tabpage(panel.origin) == panel.tab and panel.origin or nil
+    local target = origin_of(panel)
     if target then
       vim.api.nvim_set_current_win(target)
     else
@@ -437,11 +429,10 @@ function M.running()
   return live ~= nil
 end
 
---- Every uv handle the last watch made (for the tests: once it stops, each
---- is closing).
+--- Every uv handle the shared event watch made (for the tests: once it
+--- stops, each is closing).
 function M.handles()
-  local panel_handles = last and last.handles or {}
-  return vim.list_extend(vim.list_slice(panel_handles), require('gc_mail.events').handles())
+  return require('gc_mail.events').handles()
 end
 
 return M

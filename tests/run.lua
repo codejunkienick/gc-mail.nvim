@@ -3104,10 +3104,42 @@ test('after close no watcher or timer fires and no callback touches the closed p
   write(log, '')
   inbox('demo-city', {})
   inbox('other city', {})
+  -- panel().handles() lists only the shared event watch's handles, so the
+  -- panel's own poll and debounce timers are tracked here instead, by the
+  -- uv handles that appear while the panel opens: each must be closing
+  -- once the panel has closed. (A plain timer count would also catch the
+  -- unrelated timers of gc calls made after this snapshot.)
+  local function timers()
+    local found = {}
+    vim.uv.walk(function(h)
+      if h:get_type() == 'timer' then
+        found[#found + 1] = h
+      end
+    end)
+    return found
+  end
+  local before = {}
+  for _, h in ipairs(timers()) do
+    before[h] = true
+  end
   local win = panel().open()
   listed(cities)
   local handles = panel().handles()
-  eq(#handles >= 6, true, 'a timer, two debounce and two rearm timers and a watcher: ' .. #handles)
+  eq(#handles >= 4, true, 'a timer, two rearm timers and a watcher: ' .. #handles)
+  local opened_timers = {}
+  for _, h in ipairs(timers()) do
+    if not before[h] then
+      opened_timers[#opened_timers + 1] = h
+    end
+  end
+  local running = 0
+  for _, h in ipairs(opened_timers) do
+    if h:is_active() then
+      running = running + 1
+    end
+  end
+  eq(#opened_timers >= 3, true, 'the poll timer and two debounce timers: ' .. #opened_timers)
+  eq(running >= 1, true, 'the panel poll timer is running')
   -- A mail event whose debounce is still waiting, and an inbox call in flight.
   raw_answer('inbox', 'delay', '0.5', 'other city')
   panel_key(win, 'R')()
@@ -3119,6 +3151,9 @@ test('after close no watcher or timer fires and no callback touches the closed p
   eq(panel().running(), false, 'the watch stopped')
   for i, h in ipairs(vim.list_extend(vim.list_slice(handles), panel().handles())) do
     eq(h:is_closing(), true, 'handle ' .. i .. ' closed')
+  end
+  for i, h in ipairs(opened_timers) do
+    eq(h:is_closing(), true, 'opened timer ' .. i .. ' closed')
   end
   append(log, event('mail.sent'))
   assert(os.rename(log, log .. '.old'))
