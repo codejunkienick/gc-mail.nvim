@@ -61,6 +61,7 @@ unchanged; the mailbox lists mail only when you open it.
 | `chat_send_keys` | `{ '<Space>ms' }` | keys mapped in normal mode of the compose box that send the message; a send key never loses to a close or focus key on the same key (`false` maps none) |
 | `chat_mark_read` | `true` | `true`: unread mail to human in the rendered conversation is marked read when viewed; `false` marks nothing |
 | `chat_poll_ms` | `60000` | while a chat is open, its city's history is loaded again this often (ms, at least `15000`) |
+| `chat_city_key` | `'C'` | normal-mode mapping in the chat timeline that opens the city picker; `false` sets none |
 
 `setup()` refuses (raises an error) a prefix or suffix with a control
 character, the two together over 40 characters, a `watch` that is not `true` or
@@ -71,9 +72,9 @@ whole number of at least 1, a `history_days` that is not a whole number
 of at least 1, a `markdown` that is not `true` or `false`, a `chat_width`
 under 20, a `chat_compose_height` under 1, a `chat_send_keys` that is neither
 `false` nor a list of key mapping strings, a `chat_mark_read` that is not
-`true` or `false`, a `keymap`, `mailbox_keymap`, `panel_keymap`, `chat_keymap` or
-`chats_keymap` that is neither `false` nor a non-empty string, and a
-`chat_poll_ms` under 15 seconds.
+`true` or `false`, a `keymap`, `mailbox_keymap`, `panel_keymap`, `chat_keymap`,
+`chats_keymap` or `chat_city_key` that is neither `false` nor a non-empty
+string, and a `chat_poll_ms` under 15 seconds.
 
 ## Use
 
@@ -414,6 +415,7 @@ window holding the empty buffer, keeping any compose draft.
 | `q` | timeline, compose box | close both chat windows (non-empty draft preserved, focus returns to the origin window) |
 | `<C-j>` / `<C-k>` | timeline, compose box | move focus to the compose box / to the timeline (staying inside the chat never releases a `u`-held unread id) |
 | `]m` / `[m` | timeline | next / previous message: land on the heading line of the adjacent message, stopping at the last / first message |
+| `C` | timeline | switch city: open a picker of every registered city (the current one marked) and open the picked city's mayor chat (option `chat_city_key`, default `'C'`) |
 
 - **Timeline rendering.** Rendered oldest first from `history.conversation(city, with)`
   and pending send queue records for `(city.path, with)` that are not replies or
@@ -473,8 +475,9 @@ window holding the empty buffer, keeping any compose draft.
   takes a remembered width nor replaces one — while its compose height
   is remembered and restored like any other chat's.
 - **Statuslines.** The timeline's statusline says the state of the conversation,
-  ` <with> in <city> · <last send> · <liveness> · <n> unread · ↓ <n> newer below (G) `,
-  from what the chat already holds (no gc call):
+  ` <with> in <city> (<key> city) · <last send> · <liveness> · <n> unread · ↓ <n> newer below (G) `,
+  from what the chat already holds (no gc call), where `<key>` is the
+  `chat_city_key` (`'C'` by default):
   - the last pending send's state as its timeline heading says it, `sending…`,
     `queued` or `failed: <first error line>`; nothing once no send is pending. An
     unreadable queue file shows in the timeline but is no send of the chat;
@@ -489,9 +492,15 @@ window holding the empty buffer, keeping any compose draft.
   it shows changed (a render, a load, a send, the view, a new width, the city's
   log starting or ending being watched), and never re-renders the timeline or
   moves a cursor. The compose window's statusline holds
-  the keys, ` <send key> send · q close · <C-j>/<C-k> focus · above: <CR> open  t thread  u unread  R refresh  G latest  ]m next  [m prev `,
+  the keys, ` <send key> send · q close · <C-j>/<C-k> focus · <key> city `,
   cut the same way, leaving out any close or focus key a configured send key
   uses or starts with, so it only advertises keys that are actually mapped.
+  The timeline keys above the compose box stay mapped but are no longer listed
+  there. With `chat_city_key = false` both statuslines leave the hint out and
+  nothing is mapped. Picking the current city closes the picker and changes
+  nothing; picking another city closes this chat as `q` does (a non-empty
+  draft is kept with this chat) and opens that city's mayor chat with the
+  focus in its compose box.
   All chat keys are buffer-local normal-mode mappings with a
   `gc-mail: ` desc; nothing but the configured `chat_send_keys` sends mail, and
   insert-mode typing in the compose box is unaffected.

@@ -70,6 +70,9 @@ local defaults = {
   -- While a chat is open: its city's history loaded again this often (ms, at
   -- least 15000), besides the updates gc's event log brings.
   chat_poll_ms = 60000,
+  -- Normal-mode mapping in the chat timeline that opens the city picker;
+  -- false sets none.
+  chat_city_key = 'C',
 }
 
 M.config = vim.deepcopy(defaults)
@@ -557,6 +560,7 @@ local option_rules = {
   { 'panel_keymap', 'keymap' },
   { 'chat_keymap', 'keymap' },
   { 'chats_keymap', 'keymap' },
+  { 'chat_city_key', 'keymap' },
 }
 
 -- Why `opts` cannot be used, or nil. A label with a control character could

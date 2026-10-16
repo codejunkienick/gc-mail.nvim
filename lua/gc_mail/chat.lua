@@ -5,7 +5,8 @@
 -- compose box in normal mode; nothing else about the user's windows changes.
 -- q in either window closes both windows. <C-j>/<C-k> move focus between the
 -- timeline and the compose box, ]m/[m walk message headings in the timeline,
--- and G jumps the timeline to the latest message.
+-- G jumps the timeline to the latest message, and C (chat_city_key) opens
+-- the city picker in the timeline.
 --
 -- Live updates: while at least one chat is open, the chat is one subscriber
 -- ('chat') of the shared event log watcher (gc_mail.events) for the open
@@ -21,10 +22,10 @@ local events = require('gc_mail.events')
 
 local M = {}
 
--- The timeline-only keys, shown after the shared keys on the compose window's
--- statusline. Shared keys (q, focus) work in both chat windows; these work
--- only in the timeline above the compose box.
-local KEYS = 'above: <CR> open  t thread  u unread  R refresh  G latest  ]m next  [m prev'
+-- Shared keys (q, focus) work in both chat windows; the rest of the key list
+-- in M.open works only in the timeline above the compose box. The compose
+-- window's statusline no longer lists those timeline keys.
+local CITY_TITLE = ' gc-mail switch city: <CR> open  q close '
 
 -- Active chats: tab -> key -> chat
 -- where key is mailbox.key_of(city, with)
@@ -721,7 +722,12 @@ end
 -- it changed and never touches the timeline or a cursor.
 local function update_status(chat)
   local one_line = gc_mail.one_line
-  local parts = { ('%s in %s'):format(one_line(chat.with), one_line(chat.city.name)) }
+  local where = ('%s in %s'):format(one_line(chat.with), one_line(chat.city.name))
+  local city_key = gc_mail.config.chat_city_key
+  if city_key ~= false then
+    where = ('%s (%s city)'):format(where, city_key)
+  end
+  local parts = { where }
   parts[#parts + 1] = chat.last_send
   parts[#parts + 1] = liveness(chat)
   if chat.unread > 0 then
@@ -782,13 +788,23 @@ local function shared_keys_text()
 end
 
 -- The compose window's statusline: the send key, the shared keys of both chat
--- windows, then the timeline-only keys above it
+-- windows, then the city picker key. The timeline-only keys stay mapped but
+-- are no longer listed here.
 local function update_keys(chat)
   local send_keys = gc_mail.config.chat_send_keys
-  local send = type(send_keys) == 'table' and send_keys[1] and (send_keys[1] .. ' send · ') or ''
+  local parts = {}
+  if type(send_keys) == 'table' and send_keys[1] then
+    parts[#parts + 1] = send_keys[1] .. ' send'
+  end
   local shared = shared_keys_text()
-  local tail = shared ~= '' and (shared .. ' · ' .. KEYS) or KEYS
-  set_statusline(chat.compose_win, fit(' ' .. send .. tail .. ' ', vim.api.nvim_win_get_width(chat.compose_win)))
+  if shared ~= '' then
+    parts[#parts + 1] = shared
+  end
+  local city_key = gc_mail.config.chat_city_key
+  if city_key ~= false then
+    parts[#parts + 1] = city_key .. ' city'
+  end
+  set_statusline(chat.compose_win, fit(' ' .. table.concat(parts, ' · ') .. ' ', vim.api.nvim_win_get_width(chat.compose_win)))
 end
 
 -- Drops from the messages waiting below what the view now shows, all of them
@@ -1409,6 +1425,69 @@ local function capture_place(chat)
   return true
 end
 
+-- The city picker for `chat`: every registered city, the current one marked.
+-- The cached list shows at once and the refresh replaces it, as the other
+-- views do; a city-list failure uses the shared notice texts. Picking the
+-- current city closes the picker and changes nothing; picking another city
+-- closes this chat as q does (a non-empty draft stays with this chat), then
+-- opens that city's chat with its mayor as :GcMailChat would from the origin
+-- window, focused in its compose box.
+local function open_city_picker(chat)
+  if not valid_chat(chat) then
+    return nil
+  end
+  local current_path = chat.city.path
+  local shown = nil
+  local function city_lines(cities)
+    local items = {}
+    for i, city in ipairs(cities) do
+      local mark = city.path == current_path and '  (current)' or ''
+      items[i] = (' %s%s '):format(gc_mail.one_line(city.name), mark)
+    end
+    return items
+  end
+  local picker = gc_mail.float(CITY_TITLE, { ' loading… ' }, {
+    ['<CR>'] = function(p, row)
+      local picked = shown and shown[row]
+      if not picked then
+        return
+      end
+      p.close()
+      if picked.path == current_path then
+        return
+      end
+      if not valid_chat(chat) then
+        return
+      end
+      M.close(chat)
+      M.open(picked.name, 'mayor')
+    end,
+  }, { ['<CR>'] = 'open the chat' })
+  gc_mail.with_cities(function(cities)
+    if picker.closed() then
+      return
+    end
+    if #cities == 0 then
+      picker.close()
+      queue.notify(gc_mail.NO_CITIES, vim.log.levels.WARN)
+      return
+    end
+    shown = cities
+    picker.set(city_lines(cities))
+  end, function(err, had_cached)
+    if picker.closed() then
+      return
+    end
+    if had_cached then
+      queue.notify(gc_mail.STALE_CITIES_PREFIX .. tostring(err), vim.log.levels.WARN)
+      return
+    end
+    picker.close()
+    queue.notify(tostring(err), vim.log.levels.ERROR)
+  end)
+  return picker.win
+end
+
 function M.close(chat)
   local k = key_of(chat.city, chat.with)
   local compose_key = key_of(chat.city, chat.with)
@@ -1831,6 +1910,18 @@ function M.open(city_arg, with_arg)
       nowait = true,
       silent = true,
       desc = item[3],
+    })
+  end
+
+  -- The city picker lives on the timeline only; the compose box keeps Vim's
+  -- own keys. chat_city_key = false maps nothing.
+  local city_key = gc_mail.config.chat_city_key
+  if city_key ~= false then
+    vim.keymap.set('n', city_key, function() open_city_picker(chat) end, {
+      buffer = timeline_buf,
+      nowait = true,
+      silent = true,
+      desc = 'gc-mail: switch city',
     })
   end
 

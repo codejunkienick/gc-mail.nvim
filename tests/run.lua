@@ -6924,7 +6924,16 @@ local function scroll_up(chat)
 end
 
 test('chat live: with the view scrolled up, an appended message keeps cursor and topline and counts one newer below', function()
-  local chat = live_chat()
+  -- A wider editor so the (C city) hint and the newer-below count fit the
+  -- timeline statusline. The headless screen keeps the last layout's total
+  -- until a window is resized, so widen beside a temporary split first.
+  vim.o.columns = 120
+  local wide_origin = vim.api.nvim_get_current_win()
+  vim.cmd('vsplit')
+  pcall(vim.api.nvim_win_set_width, wide_origin, vim.o.columns)
+  pcall(vim.api.nvim_win_close, vim.api.nvim_get_current_win(), true)
+  vim.api.nvim_set_current_win(wide_origin)
+  local chat = live_chat({ chat_width = 80 })
   short_timeline(chat)
   local start = timeline_view(chat)
   eq(start.bottom, start.last, 'the view shows the end')
@@ -6968,7 +6977,16 @@ test('chat live: with the cursor and the view at the end, the view follows an ap
 end)
 
 test('chat live: G jumps to the latest message, clears the count and follows again', function()
-  local chat = live_chat()
+  -- A wider editor so the (C city) hint and the newer-below count fit the
+  -- timeline statusline. The headless screen keeps the last layout's total
+  -- until a window is resized, so widen beside a temporary split first.
+  vim.o.columns = 120
+  local wide_origin = vim.api.nvim_get_current_win()
+  vim.cmd('vsplit')
+  pcall(vim.api.nvim_win_set_width, wide_origin, vim.o.columns)
+  pcall(vim.api.nvim_win_close, vim.api.nvim_get_current_win(), true)
+  vim.api.nvim_set_current_win(wide_origin)
+  local chat = live_chat({ chat_width = 80 })
   short_timeline(chat)
   scroll_up(chat)
   append(chat.log, event_line('mail.replied', 'tc-wisp-live1', { id = 'tc-wisp-live1', subject = 'later', body = 'later\nanswer' })
@@ -7407,7 +7425,16 @@ test('chat reopen: a failed open load drops the anchor, so the next load stays a
 end)
 
 test('chat reopen: mail that arrived while closed counts as newer below the restored view', function()
-  local chat = live_chat()
+  -- A wider editor so the (C city) hint and the newer-below count fit the
+  -- timeline statusline. The headless screen keeps the last layout's total
+  -- until a window is resized, so widen beside a temporary split first.
+  vim.o.columns = 120
+  local wide_origin = vim.api.nvim_get_current_win()
+  vim.cmd('vsplit')
+  pcall(vim.api.nvim_win_set_width, wide_origin, vim.o.columns)
+  pcall(vim.api.nvim_win_close, vim.api.nvim_get_current_win(), true)
+  vim.api.nvim_set_current_win(wide_origin)
+  local chat = live_chat({ chat_width = 80 })
   short_timeline(chat)
   vim.api.nvim_win_set_cursor(chat.timeline_win, { 7, 0 })
   vim.api.nvim_win_call(chat.timeline_win, function()
@@ -7701,6 +7728,120 @@ test('chat live: a failed load after a delivered send is said as an error', func
   eq(shown(chat):find('all good', 1, true) ~= nil, true, 'the timeline keeps what it showed')
 end)
 
+test('chat city: C opens a picker with every city marked, and picking the other city switches to its mayor chat', function()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', (conversation_fixture()))
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.other city.json', '[]')
+  local chat = live_chat()
+  eq(gc_mail.config.chat_city_key, 'C', 'the default city key')
+  local compose_buf = vim.api.nvim_win_get_buf(chat.compose_win)
+  vim.api.nvim_buf_set_lines(compose_buf, 0, -1, false, { 'unsent draft' })
+  vim.api.nvim_set_current_win(chat.timeline_win)
+  vim.api.nvim_feedkeys('C', 'x', false)
+  wait('the city picker lists both cities with the current one marked', function()
+    return #floats() == 1
+      and vim.deep_equal(lines_of(floats()[1]), { ' demo-city  (current) ', ' other-city ' })
+  end)
+  vim.api.nvim_feedkeys(vim.keycode('j<CR>'), 'x', false)
+  wait('the old chat closed', function()
+    return not vim.api.nvim_win_is_valid(chat.timeline_win)
+  end)
+  eq(vim.api.nvim_win_is_valid(chat.compose_win), false, 'the old compose box closed too')
+  eq(#floats(), 0, 'the picker closed')
+  local new_compose_win = vim.api.nvim_get_current_win()
+  local new_compose_name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(new_compose_win))
+  assert(new_compose_name:match('other%-city/compose/mayor') ~= nil, 'focus in the new compose box: ' .. new_compose_name)
+  local new_timeline_win = nil
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(w)):match('other%-city/chat/mayor$') then
+      new_timeline_win = w
+    end
+  end
+  assert(new_timeline_win, 'the other-city mayor chat is open')
+  assert(vim.wo[new_timeline_win].statusline:find(' mayor in other%-city %(C city%) · ', 1) ~= nil,
+    'the timeline statusline names the city with the hint: ' .. vim.wo[new_timeline_win].statusline)
+  assert(vim.wo[new_compose_win].statusline:find('C city', 1, true) ~= nil,
+    'the compose statusline carries the hint: ' .. vim.wo[new_compose_win].statusline)
+
+  -- mc reopens the new chat as the last one.
+  vim.api.nvim_set_current_win(new_timeline_win)
+  vim.api.nvim_feedkeys('q', 'x', false)
+  wait('the new chat closed', function()
+    return not vim.api.nvim_win_is_valid(new_timeline_win)
+  end)
+  require('gc_mail.chat').open_last()
+  wait('open_last reopened the other-city chat', function()
+    return vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win())):match('other%-city/compose/mayor') ~= nil
+  end)
+  vim.api.nvim_feedkeys('q', 'x', false)
+
+  -- The old chat's non-empty draft stayed with it. Compose buffers outlive
+  -- their chats, so earlier tests may own the plain buffer name and this
+  -- chat's buffers carry a (tab) suffix: match the city prefix, not the end.
+  vim.cmd('GcMailChat demo-city')
+  wait('the demo-city chat reopened', function()
+    return vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win())):match('demo%-city/compose/mayor') ~= nil
+  end)
+  eq(vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win()), 0, -1, false),
+    { 'unsent draft' }, 'the draft was kept')
+end)
+
+test('chat city: picking the current city changes nothing, q closes only the picker, and false maps nothing', function()
+  local chat = live_chat()
+  local wins_before = #vim.api.nvim_tabpage_list_wins(0)
+  vim.api.nvim_set_current_win(chat.timeline_win)
+  vim.api.nvim_feedkeys('C', 'x', false)
+  wait('the picker opens', function()
+    return #floats() == 1
+  end)
+  vim.api.nvim_feedkeys(vim.keycode('<CR>'), 'x', false)
+  eq(#floats(), 0, 'picking the current city closes the picker')
+  eq(vim.api.nvim_win_is_valid(chat.timeline_win), true, 'the timeline stays open')
+  eq(vim.api.nvim_win_is_valid(chat.compose_win), true, 'the compose box stays open')
+  eq(#vim.api.nvim_tabpage_list_wins(0), wins_before, 'no window changed')
+
+  vim.api.nvim_set_current_win(chat.timeline_win)
+  vim.api.nvim_feedkeys('C', 'x', false)
+  wait('the picker opens again', function()
+    return #floats() == 1
+  end)
+  vim.api.nvim_feedkeys('q', 'x', false)
+  eq(#floats(), 0, 'q closes the picker')
+  eq(vim.api.nvim_win_is_valid(chat.timeline_win), true, 'q closed only the picker')
+  eq(vim.api.nvim_win_is_valid(chat.compose_win), true, 'the compose box stays open')
+
+  local tl_maps = {}
+  for _, m in ipairs(vim.api.nvim_buf_get_keymap(vim.api.nvim_win_get_buf(chat.timeline_win), 'n')) do
+    tl_maps[m.lhs] = m.desc
+  end
+  eq(tl_maps['C'], 'gc-mail: switch city', 'the timeline C mapping')
+  local cp_maps = {}
+  for _, m in ipairs(vim.api.nvim_buf_get_keymap(vim.api.nvim_win_get_buf(chat.compose_win), 'n')) do
+    cp_maps[m.lhs] = m.desc
+  end
+  eq(cp_maps['C'], nil, 'no C mapping in the compose box')
+
+  -- chat_city_key = false maps nothing and leaves both hints out.
+  reset()
+  local nochat = live_chat({ chat_city_key = false })
+  vim.wait(100)
+  eq(vim.wo[nochat.timeline_win].statusline, ' mayor in demo-city · live · 1 unread ', 'no hint on the timeline')
+  eq(vim.wo[nochat.compose_win].statusline, ' <Space>ms send · q close · <C-j>/<C-k> focus ', 'no hint in the compose box')
+  tl_maps = {}
+  for _, m in ipairs(vim.api.nvim_buf_get_keymap(vim.api.nvim_win_get_buf(nochat.timeline_win), 'n')) do
+    tl_maps[m.lhs] = m.desc
+  end
+  eq(tl_maps['C'], nil, 'nothing mapped with false')
+
+  local bad, bad_err = pcall(gc_mail.setup, { chat_city_key = 1 })
+  eq(bad, false, 'setup refuses chat_city_key = 1')
+  eq(tostring(bad_err):find('chat_city_key must be false or a non-empty string', 1, true) ~= nil, true, 'the refusal names it')
+  local bad_empty, bad_empty_err = pcall(gc_mail.setup, { chat_city_key = '' })
+  eq(bad_empty, false, 'setup refuses chat_city_key = ""')
+  eq(tostring(bad_empty_err):find('chat_city_key must be false or a non-empty string', 1, true) ~= nil, true,
+    'the empty refusal names it')
+end)
+
+
 -- ---- the chat's statuslines -----------------------------------------------------
 
 test('chat status: correspondent, city, liveness and unread count; a narrow window cuts from the end; the keys stay below', function()
@@ -7708,12 +7849,12 @@ test('chat status: correspondent, city, liveness and unread count; a narrow wind
   local status = function()
     return vim.wo[chat.timeline_win].statusline
   end
-  eq(status(), ' mayor in demo-city · live · 1 unread ', 'idle, one unread')
-  eq(vim.wo[chat.compose_win].statusline, ' <Space>ms send · q close · <C-j>/<C-k> focus · above: <CR…',
-    'the keys, cut at the chat width')
+  eq(status(), ' mayor in demo-city (C city) · live · 1 unread ', 'idle, one unread')
+  eq(vim.wo[chat.compose_win].statusline, ' <Space>ms send · q close · <C-j>/<C-k> focus · C city ',
+    'the keys with the city picker')
   append(chat.log, event_line('mail.replied', 'tc-wisp-live1', { id = 'tc-wisp-live1', subject = 'later', body = 'later' }))
   wait('the arrival counts', function()
-    return status() == ' mayor in demo-city · live · 2 unread '
+    return status() == ' mayor in demo-city (C city) · live · 2 unread '
   end, 1000)
 
   -- A new width cuts again; neither the timeline nor a cursor moves
@@ -7723,7 +7864,7 @@ test('chat status: correspondent, city, liveness and unread count; a narrow wind
   vim.api.nvim_win_set_width(chat.timeline_win, 24)
   vim.api.nvim_exec_autocmds('WinResized', {})
   wait('cut to 24 columns', function()
-    return status() == ' mayor in demo-city · l…'
+    return status() == ' mayor in demo-city (C …'
   end, 1000)
   eq(vim.api.nvim_buf_get_changedtick(vim.api.nvim_win_get_buf(chat.timeline_win)), tick, 'the timeline was not rendered')
   eq({ vim.api.nvim_win_get_cursor(chat.timeline_win), vim.api.nvim_win_get_cursor(chat.compose_win) }, cursors,
@@ -7736,7 +7877,7 @@ test('chat status: correspondent, city, liveness and unread count; a narrow wind
 
   -- A % in the correspondent shows as itself
   local other = require('gc_mail.chat').open('demo-city', '50%off')
-  eq(vim.wo[other.timeline_win].statusline, ' 50%%off in demo-city · live ', 'escaped for the statusline')
+  eq(vim.wo[other.timeline_win].statusline, ' 50%%off in demo-city (C city) · live ', 'escaped for the statusline')
 end)
 
 test('chat status: a send shows sending…, then queued while it retries, then failed', function()
@@ -7751,10 +7892,10 @@ test('chat status: a send shows sending…, then queued while it retries, then f
   vim.api.nvim_set_current_win(chat.compose_win)
   vim.api.nvim_feedkeys(vim.keycode('<Space>ms'), 'x', false)
   wait('sending', function()
-    return status() == ' mayor in demo-city · sending… · live · 1 unread '
+    return status() == ' mayor in demo-city (C city) · sending… · live · 1 unread '
   end)
   wait('queued for a retry', function()
-    return status() == ' mayor in demo-city · queued · live · 1 unread '
+    return status() == ' mayor in demo-city (C city) · queued · live · 1 unread '
   end)
 
   vim.env.FAKE_GC_FAIL_TIMES = '99'
@@ -7764,9 +7905,9 @@ test('chat status: a send shows sending…, then queued while it retries, then f
   vim.api.nvim_feedkeys(vim.keycode('<Space>ms'), 'x', false)
   -- The send's state outranks liveness and the counts: a long error cuts them
   wait('failed', function()
-    return status():find('^ mayor in demo%-city · failed: ') ~= nil
+    return status():find('^ mayor in demo%-city %(C city%) · failed: ') ~= nil
   end)
-  eq(status(), ' mayor in demo-city · failed: exit 1: gc mail send: store …', 'the first error line')
+  eq(status(), ' mayor in demo-city (C city) · failed: exit 1: gc mail sen…', 'the first error line')
 end)
 
 test('chat status: a failed load shows stale until a load succeeds', function()
@@ -7775,16 +7916,16 @@ test('chat status: a failed load shows stale until a load succeeds', function()
   local status = function()
     return vim.wo[chat.timeline_win].statusline
   end
-  eq(status(), ' mayor in demo-city · live · 1 unread ', 'live')
+  eq(status(), ' mayor in demo-city (C city) · live · 1 unread ', 'live')
   write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.exit', '1\n')
   write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.stderr', 'store unavailable\n')
   wait('stale', function()
-    return status() == ' mayor in demo-city · stale · 1 unread '
+    return status() == ' mayor in demo-city (C city) · stale · 1 unread '
   end, 2000)
   os.remove(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.exit')
   os.remove(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.stderr')
   wait('live again', function()
-    return status() == ' mayor in demo-city · live · 1 unread '
+    return status() == ' mayor in demo-city (C city) · live · 1 unread '
   end, 2000)
 end)
 
@@ -7797,16 +7938,16 @@ test('chat status: a city with no event log is polling, live once its log is wat
   local status = function()
     return vim.wo[chat.timeline_win].statusline
   end
-  eq(status(), ' mayor in demo-city · polling · 1 unread ', 'no event log to watch')
+  eq(status(), ' mayor in demo-city (C city) · polling · 1 unread ', 'no event log to watch')
   local calls = #mail_calls()
   write(chat.log, '')
   require('gc_mail.events').rearm()
   wait('live once the log is armed', function()
-    return status() == ' mayor in demo-city · live · 1 unread '
+    return status() == ' mayor in demo-city (C city) · live · 1 unread '
   end, 1000)
   os.remove(chat.log)
   wait('polling once the log is gone', function()
-    return status() == ' mayor in demo-city · polling · 1 unread '
+    return status() == ' mayor in demo-city (C city) · polling · 1 unread '
   end, 1000)
   vim.wait(100)
   eq(#calls_where({ verb = 'list', path = path }), 1, 'no history load moved it')
@@ -7825,7 +7966,7 @@ test('chat status: an unreadable queue file shows in the timeline but is no send
   wait('the unreadable file shows', function()
     return shown(chat):find('## you · failed: not a gc-mail message: not JSON', 1, true) ~= nil
   end)
-  eq(status(), ' mayor in demo-city · live · 1 unread ', 'no send state')
+  eq(status(), ' mayor in demo-city (C city) · live · 1 unread ', 'no send state')
 
   -- A failed send of the chat is its last send, though the unreadable file sorts after it
   vim.env.FAKE_GC_FAIL_TIMES = '99'
@@ -7835,7 +7976,7 @@ test('chat status: an unreadable queue file shows in the timeline but is no send
   vim.api.nvim_set_current_win(chat.compose_win)
   vim.api.nvim_feedkeys(vim.keycode('<Space>ms'), 'x', false)
   wait('failed', function()
-    return status() == ' mayor in demo-city · failed: exit 1: gc mail send: store …'
+    return status() == ' mayor in demo-city (C city) · failed: exit 1: gc mail sen…'
   end)
 end)
 
