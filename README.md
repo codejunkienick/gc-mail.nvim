@@ -878,6 +878,10 @@ PATH="$PWD/tests/bin:$PATH" nvim --headless --clean -n -l tests/run.lua
 Keep tracked files free of internal ids and absolute home paths, and keep
 commit subjects short, imperative and without a final period.
 
+## Version
+
+Current release: 0.1.0. See CHANGELOG.md for the release notes.
+
 ## License
 
 MIT License, Copyright (c) 2026 Nikita Poteryaev. See LICENSE for the full
