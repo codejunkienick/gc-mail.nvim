@@ -210,6 +210,33 @@ function M.cached_cities()
   return cache.cities
 end
 
+-- The city-list notice texts, each defined once: every view that says the
+-- case uses these, so the picker and the search say the same words.
+M.NO_CITIES = 'no cities are registered with gc'
+M.STALE_CITIES_PREFIX = 'gc cities failed, showing the last list:\n'
+
+--- Every view gets the city list through this and keeps only its own
+--- add-city step: `on_cities(cached)` runs at once when a cached list is
+--- shown, then one background refresh runs `on_cities(fresh)` on success or
+--- `on_error(err, had_cached)` on failure (`had_cached` whether a list was
+--- shown). A view that says nothing in a case keeps saying nothing: it says
+--- nothing in its `on_error`, and how often it says a notice stays its own
+--- (the picker says its stale notice once, the search every time).
+function M.with_cities(on_cities, on_error)
+  local cached = cache.cities
+  local had_cached = cached ~= nil and #cached > 0
+  if had_cached then
+    on_cities(cached)
+  end
+  M.refresh(function(cities, err)
+    if cities then
+      on_cities(cities)
+    elseif on_error then
+      on_error(err, had_cached)
+    end
+  end)
+end
+
 --- gc's argv for one send, or for a reply when `message.reply_to` is set;
 --- never a shell string.
 function M.argv(city, message)
@@ -391,9 +418,9 @@ function M.open(opts)
     M.send(target, reply.city, reply)
     return nil
   end
-  local shown = cache.cities and #cache.cities > 0 and cache.cities or nil
+  local shown = nil
   local title = to and (' mail buffer to %s in '):format(to) or ' mail buffer to '
-  local picker = float(title, shown and city_items(shown, to) or { LOADING }, {
+  local picker = float(title, { LOADING }, {
     ['<CR>'] = function(p, row)
       if shown then
         local city = shown[row]
@@ -402,24 +429,23 @@ function M.open(opts)
       end
     end,
   })
-  M.refresh(function(cities, err)
-    if not cities then
-      if shown then
-        if not cache.warned then
-          cache.warned = true
-          notify('gc cities failed, showing the last list:\n' .. err, vim.log.levels.WARN)
-        end
-        return
-      end
-      picker.close()
-      return notify(err, vim.log.levels.ERROR)
-    end
+  M.with_cities(function(cities)
     if #cities == 0 then
       picker.close()
-      return notify('no cities are registered with gc', vim.log.levels.WARN)
+      return notify(M.NO_CITIES, vim.log.levels.WARN)
     end
     shown = cities
     picker.set(city_items(cities, to))
+  end, function(err, had_cached)
+    if had_cached then
+      if not cache.warned then
+        cache.warned = true
+        notify(M.STALE_CITIES_PREFIX .. err, vim.log.levels.WARN)
+      end
+      return
+    end
+    picker.close()
+    notify(err, vim.log.levels.ERROR)
   end)
   return picker.win
 end

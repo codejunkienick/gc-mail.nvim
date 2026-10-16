@@ -449,7 +449,7 @@ end
 local function resolve_city_and_with(city_arg, with_arg)
   local cities = gc_mail.cached_cities()
   if not cities or #cities == 0 then
-    error('gc-mail: no cities are registered with gc', 2)
+    error('gc-mail: ' .. gc_mail.NO_CITIES, 2)
   end
 
   local city
@@ -1626,14 +1626,14 @@ end
 function M.open(city_arg, with_arg)
   local cached = gc_mail.cached_cities()
   if not cached or #cached == 0 then
-    gc_mail.refresh(function(refreshed, err)
-      if refreshed and #refreshed > 0 then
+    gc_mail.with_cities(function(refreshed)
+      if #refreshed > 0 then
         M.open(city_arg, with_arg)
-      elseif refreshed then
-        queue.notify('no cities are registered with gc', vim.log.levels.WARN)
       else
-        queue.notify(tostring(err), vim.log.levels.ERROR)
+        queue.notify(gc_mail.NO_CITIES, vim.log.levels.WARN)
       end
+    end, function(err)
+      queue.notify(tostring(err), vim.log.levels.ERROR)
     end)
     return nil
   end
@@ -2146,19 +2146,23 @@ function M.open_list()
     start(cached)
   else
     view.pending = 1
-    gc_mail.refresh(function(cities, err)
+    gc_mail.with_cities(function(cities)
       view.pending = view.pending - 1
       if picker.closed() then
         return
       end
-      if not cities then
+      if #cities == 0 then
         picker.close()
-        return queue.notify(tostring(err), vim.log.levels.ERROR)
-      elseif #cities == 0 then
-        picker.close()
-        return queue.notify('no cities are registered with gc', vim.log.levels.WARN)
+        return queue.notify(gc_mail.NO_CITIES, vim.log.levels.WARN)
       end
       start(cities)
+    end, function(err)
+      view.pending = view.pending - 1
+      if picker.closed() then
+        return
+      end
+      picker.close()
+      queue.notify(tostring(err), vim.log.levels.ERROR)
     end)
   end
   return picker.win

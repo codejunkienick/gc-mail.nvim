@@ -1000,6 +1000,64 @@ test('a gc cities that does not answer in time is reported, not raised', functio
   eq(gc_mail.cached_cities(), nil, 'cache filled by a timeout')
 end)
 
+test('with_cities calls the cached list at once, then the fresh list after the refresh', function()
+  reset()
+  preload()
+  eq(gc_mail.cached_cities(), TWO, 'cached')
+  local THREE = { TWO[1], TWO[2], { name = 'late-city', path = '/srv/late-city' } }
+  write(vim.env.FAKE_GC_CITIES, cities_record(THREE))
+  local seen, errors = {}, {}
+  gc_mail.with_cities(function(cities)
+    seen[#seen + 1] = vim.deepcopy(cities)
+  end, function(err, had_cached)
+    errors[#errors + 1] = { err, had_cached }
+  end)
+  eq(seen, { TWO }, 'cached at once')
+  wait('fresh list arrives', function()
+    return #seen == 2
+  end)
+  eq(seen[2], THREE, 'fresh after the refresh')
+  eq(errors, {}, 'no error')
+  eq(gc_mail.cached_cities(), THREE, 'the refresh replaced the cache')
+end)
+
+test('with_cities reports an error with and without a cached list', function()
+  reset({ FAKE_GC_CITIES_EXIT = '1' })
+  local seen, errors, done = {}, {}, false
+  gc_mail.with_cities(function(cities)
+    seen[#seen + 1] = cities
+  end, function(err, had_cached)
+    errors[#errors + 1] = { err, had_cached }
+    done = true
+  end)
+  wait('error without a cached list', function()
+    return done
+  end)
+  eq(seen, {}, 'no cities without a cache')
+  eq(#errors, 1, 'one error')
+  eq(errors[1][2], false, 'had_cached is false')
+  assert(errors[1][1]:find('gc cities failed', 1, true) ~= nil, 'error text: ' .. tostring(errors[1][1]))
+
+  reset()
+  preload()
+  vim.env.FAKE_GC_CITIES_EXIT = '1'
+  seen, errors, done = {}, {}, false
+  gc_mail.with_cities(function(cities)
+    seen[#seen + 1] = vim.deepcopy(cities)
+  end, function(err, had_cached)
+    errors[#errors + 1] = { err, had_cached }
+    done = true
+  end)
+  eq(seen, { TWO }, 'cached at once')
+  wait('error with a cached list', function()
+    return done
+  end)
+  eq(#seen, 1, 'no fresh list on failure')
+  eq(#errors, 1, 'one error')
+  eq(errors[1][2], true, 'had_cached is true')
+  eq(gc_mail.cached_cities(), TWO, 'the cache is kept')
+end)
+
 test('gc.run reports exit 0, a timeout, an exit with stderr and a spawn failure', function()
   local gc = require('gc_mail.gc')
   local function run_once(argv, timeout_ms, what)
@@ -8408,8 +8466,41 @@ test('a city registered after the list was cached is searched too, and a failed 
     return note.level == vim.log.levels.WARN
   end, notes)
   eq(#warns, 1, 'the failed refresh is said once')
-  eq(warns[1].message:find('not refreshed', 1, true) ~= nil, true, warns[1].message)
+  eq(warns[1].message:find('showing the last list', 1, true) ~= nil, true, warns[1].message)
+  eq(warns[1].message, 'gc-mail: gc cities failed, showing the last list:\ngc cities failed (exit 1)', 'init text')
   eq(#lines_of(win), 6, 'the cached cities are still searched')
+  vim.api.nvim_feedkeys('q', 'x', false)
+  vim.env.FAKE_GC_CITIES_EXIT = nil
+end)
+
+test(':GcMail and :GcMailSearch say the same text when gc cities fails with a cached list', function()
+  search_fixture()
+  vim.env.FAKE_GC_CITIES_EXIT = '1'
+  notes = {}
+  buffer({ 'hello' })
+  gc_mail.open()
+  vim.wait(400)
+  eq(#floats(), 1, 'the picker keeps the last good list')
+  local picker_warns = vim.tbl_filter(function(note)
+    return note.level == vim.log.levels.WARN and note.message:find('showing the last list', 1, true) ~= nil
+  end, notes)
+  eq(#picker_warns, 1, 'the picker says the stale list once')
+  vim.api.nvim_feedkeys(vim.keycode('<Esc>'), 'x', false)
+  eq(#floats(), 0, 'the picker closes')
+
+  notes = {}
+  vim.cmd('GcMailSearch markdown')
+  local win = vim.api.nvim_get_current_win()
+  wait('the cached cities are searched', function()
+    return #lines_of(win) == 5
+  end)
+  vim.wait(300)
+  local search_warns = vim.tbl_filter(function(note)
+    return note.level == vim.log.levels.WARN
+  end, notes)
+  eq(#search_warns, 1, 'the search says the failed refresh once')
+  eq(search_warns[1].message, picker_warns[1].message, 'the same init text in both views')
+  eq(search_warns[1].message, 'gc-mail: gc cities failed, showing the last list:\ngc cities failed (exit 1)', 'init text')
   vim.api.nvim_feedkeys('q', 'x', false)
   vim.env.FAKE_GC_CITIES_EXIT = nil
 end)

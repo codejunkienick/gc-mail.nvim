@@ -158,25 +158,34 @@ function M.run(text)
   -- alone; the cached list is searched meanwhile.
   local cached = gc_mail().cached_cities() or {}
   view.pending = 1
-  start(cached)
-  gc_mail().refresh(function(cities, err)
+  local sync = true
+  gc_mail().with_cities(function(cities)
+    if sync then
+      start(cities)
+      return
+    end
     view.pending = view.pending - 1
     if picker.closed() then
       return
     end
-    if not cities then
-      if #cached == 0 then
-        picker.close()
-        return notify(tostring(err), vim.log.levels.ERROR)
-      end
-      notify('the city list was not refreshed: ' .. tostring(err), vim.log.levels.WARN)
-      return render()
-    elseif #cities == 0 and #cached == 0 then
+    if #cities == 0 and #cached == 0 then
       picker.close()
-      return notify('no cities are registered with gc', vim.log.levels.WARN)
+      return notify(gc_mail().NO_CITIES, vim.log.levels.WARN)
     end
     start(cities)
+  end, function(err)
+    view.pending = view.pending - 1
+    if picker.closed() then
+      return
+    end
+    if #cached == 0 then
+      picker.close()
+      return notify(tostring(err), vim.log.levels.ERROR)
+    end
+    notify(gc_mail().STALE_CITIES_PREFIX .. tostring(err), vim.log.levels.WARN)
+    render()
   end)
+  sync = false
   return picker.win
 end
 

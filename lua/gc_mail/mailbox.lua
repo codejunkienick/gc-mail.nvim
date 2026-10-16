@@ -1332,23 +1332,32 @@ function M.open()
       end
     end
   end
-  list_new(gc_mail.cached_cities())
   -- Without a cached city list the mailbox waits for gc cities as well.
   local waiting = gc_mail.cached_cities() == nil
   if waiting then
     this.pending = this.pending + 1
   end
-  gc_mail.refresh(function(cities, err)
+  local sync = true
+  gc_mail.with_cities(function(cities)
+    list_new(cities)
+    if not sync then
+      if waiting then
+        this.pending = this.pending - 1
+        waiting = false
+      end
+      render()
+    end
+  end, function(err)
     if waiting then
       this.pending = this.pending - 1
+      waiting = false
     end
-    if cities then
-      list_new(cities)
-    elseif not gc_mail.cached_cities() then
+    if not gc_mail.cached_cities() then
       say_once('cities', err)
     end
     render()
   end)
+  sync = false
   render()
   return picker.win
 end

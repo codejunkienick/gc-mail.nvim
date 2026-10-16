@@ -143,21 +143,34 @@ local function start()
     render()
   end)
   mailbox.reload_kept()
-  add_cities(this, gc_mail().cached_cities())
   -- Without a cached city list the panel waits for gc cities as well.
   local waiting = gc_mail().cached_cities() == nil
   if waiting then
     this.owner.pending = this.owner.pending + 1
   end
-  gc_mail().refresh(function(cities)
+  local sync = true
+  gc_mail().with_cities(function(cities)
+    if live ~= this then
+      return
+    end
+    add_cities(this, cities)
+    if not sync then
+      if waiting then
+        this.owner.pending = this.owner.pending - 1
+        waiting = false
+      end
+      render()
+    end
+  end, function()
     if waiting then
       this.owner.pending = this.owner.pending - 1
+      waiting = false
     end
     if live == this then
-      add_cities(this, cities)
       render()
     end
   end)
+  sync = false
   local poll = config.poll_ms or gc_mail().config.panel_poll_ms
   this.timer = uv.new_timer()
   this.timer:start(poll, poll, function()
@@ -166,7 +179,7 @@ local function start()
         return
       end
       refresh_all(this)
-      gc_mail().refresh(function(cities)
+      gc_mail().with_cities(function(cities)
         if live == this then
           add_cities(this, cities)
         end

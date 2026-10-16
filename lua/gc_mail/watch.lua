@@ -217,8 +217,7 @@ function M.start()
   events.subscribe('watch', function(city, event)
     on_event(this, city, event)
   end)
-  add_cities(this, gc_mail().cached_cities())
-  gc_mail().refresh(function(cities)
+  gc_mail().with_cities(function(cities)
     if live == this then
       add_cities(this, cities)
     end
