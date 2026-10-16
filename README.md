@@ -71,8 +71,9 @@ whole number of at least 1, a `history_days` that is not a whole number
 of at least 1, a `markdown` that is not `true` or `false`, a `chat_width`
 under 20, a `chat_compose_height` under 1, a `chat_send_keys` that is neither
 `false` nor a list of key mapping strings, a `chat_mark_read` that is not
-`true` or `false`, a `chat_keymap` or `chats_keymap` that is neither `false` nor a
-non-empty string, and a `chat_poll_ms` under 15 seconds.
+`true` or `false`, a `keymap`, `mailbox_keymap`, `panel_keymap`, `chat_keymap` or
+`chats_keymap` that is neither `false` nor a non-empty string, and a
+`chat_poll_ms` under 15 seconds.
 
 ## Use
 
@@ -648,7 +649,7 @@ source states them too, and the tests check each one:
    an empty queue: adding refuses, the worker sends nothing and says why once
    (and again when it can read the queue), and `:GcMailQueue` shows the error.
 
-`:GcMailQueue` lists the queued messages (city, subject, age, `pending`,
+`:GcMailQueue` lists the queued messages (city, recipient, subject, age, `pending`,
 `sending`, `failed` or `sent, file not removed`, and the last error), one
 line each with line breaks and other control characters flattened, in the
 same kind of float: `r`

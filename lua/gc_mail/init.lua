@@ -483,7 +483,7 @@ function M.queue_lines(entries, now, err)
     else
       local state = record.delivered and 'sent, file not removed' or entry.claimed and 'sending'
         or record.failed and 'failed' or 'pending'
-      local line = (' %s  %s  %s  %s'):format(one_line(record.to and queue.who(record) or record.city.name),
+      local line = (' %s  %s  %s  %s'):format(one_line(queue.who(record)),
         one_line(record.subject), age(math.max(0, now - record.created)), state)
       if record.last_error then
         line = line .. '  ' .. one_line(record.last_error)
@@ -536,9 +536,8 @@ end
 
 -- One rule per checked option, in the order refusals are reported:
 -- { key, 'bool' }, { key, 'ms', min },
--- { key, 'whole', min [, unit] } and { key, 'keymap' }. The three keymap
--- options keymap, mailbox_keymap and panel_keymap are not listed, so they
--- stay unchecked. chat_send_keys and the subject label have their own rules.
+-- { key, 'whole', min [, unit] } and { key, 'keymap' }.
+-- chat_send_keys and the subject label have their own rules.
 local option_rules = {
   { 'watch', 'bool' },
   { 'watch_resync_ms', 'ms', 60000 },
@@ -553,6 +552,9 @@ local option_rules = {
   { 'chat_send_keys', 'send_keys' },
   { 'chat_mark_read', 'bool' },
   { 'chat_poll_ms', 'ms', 15000 },
+  { 'keymap', 'keymap' },
+  { 'mailbox_keymap', 'keymap' },
+  { 'panel_keymap', 'keymap' },
   { 'chat_keymap', 'keymap' },
   { 'chats_keymap', 'keymap' },
 }
@@ -622,7 +624,7 @@ function M.setup(opts)
     { 'mailbox_keymap', function() require('gc_mail.mailbox').open() end, 'Open the gc mailbox' },
     { 'panel_keymap', function() require('gc_mail.panel').toggle() end, 'Toggle the gc mail panel' },
     { 'chat_keymap', function() require('gc_mail.chat').open_last() end, 'Open the gc chat' },
-    { 'chats_keymap', function() require('gc_mail.chat').open_list() end, 'gc-mail: open the conversations list' },
+    { 'chats_keymap', function() require('gc_mail.chat').open_list() end, 'Open the gc conversations list' },
   }
   for _, mapping in ipairs(keymaps) do
     local lhs = M.config[mapping[1]]

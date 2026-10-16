@@ -1171,8 +1171,8 @@ test(':GcMailQueue lists pending and failed messages, and retries, opens and del
   local win = floats()[1]
   local lines = lines_of(win)
   eq(#lines, 2, 'one line per message')
-  assert(lines[1]:find('^ demo%-city  still pending  %d+s  pending $'), lines[1])
-  eq(lines[2], ' other-city  gave up  2m  failed  exit 3: mayor not found ', 'failed line')
+  assert(lines[1]:find('^ demo%-city mayor  still pending  %d+s  pending $'), lines[1])
+  eq(lines[2], ' other-city mayor  gave up  2m  failed  exit 3: mayor not found ', 'failed line')
   eq(gc_mail.queue_lines({}, os.time()), { ' the queue is empty ' }, 'empty queue')
 
   -- o opens the text in a new buffer and leaves the queue as it is.
@@ -1185,7 +1185,7 @@ test(':GcMailQueue lists pending and failed messages, and retries, opens and del
   vim.cmd('GcMailQueue')
   vim.api.nvim_feedkeys('d', 'x', false)
   eq(vim.uv.fs_stat(queue_dir .. '/' .. a .. '.json'), nil, 'deleted')
-  eq(lines_of(floats()[1]), { ' other-city  gave up  2m  failed  exit 3: mayor not found ' }, 'list after delete')
+  eq(lines_of(floats()[1]), { ' other-city mayor  gave up  2m  failed  exit 3: mayor not found ' }, 'list after delete')
 
   -- r sends a failed message again.
   gc_mail.queue.configure({ dir = queue_dir, retry_ms = RETRY })
@@ -1774,7 +1774,7 @@ test(':GcMailQueue renders every queue file as one sanitized line and can still 
   for _, line in ipairs(lines) do
     eq(line:find('%c'), nil, 'control character in ' .. vim.inspect(line))
   end
-  eq(lines[1], ' tab city  cr here  0s  failed  exit 1: one / two [31m ', 'valid record')
+  eq(lines[1], ' tab city mayor  cr here  0s  failed  exit 1: one / two [31m ', 'valid record')
   eq(lines[2], ' ? 0000000000000002-00001-00000002.json  unreadable: not a gc-mail message: unknown field evil / key ',
     'unreadable record')
   vim.api.nvim_feedkeys('jd', 'x', false)
@@ -8109,7 +8109,7 @@ test('c in the message view opens the chat and keeps the view', function()
   eq(vim.api.nvim_win_is_valid(view_win) and vim.api.nvim_win_get_buf(view_win) == view_buf, true, 'the view stays')
 end)
 
-test('every mapping the conversations list and the c key add carries a gc-mail: desc', function()
+test('every mapping the conversations list and the c key add carries a gc-mail: desc, except <Space>ml', function()
   chats_fixture()
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, watch = false })
   local function desc_of(maps, lhs)
@@ -8126,7 +8126,7 @@ test('every mapping the conversations list and the c key add carries a gc-mail: 
       eq(type(desc) == 'string' and desc:sub(1, 9) == 'gc-mail: ', true, ('mapping %s has a gc-mail: desc, got %s'):format(lhs, tostring(desc)))
     end
   end
-  eq((vim.fn.maparg('<Space>ml', 'n', false, true).desc or ''):sub(1, 9), 'gc-mail: ', 'the <Space>ml mapping')
+  eq(vim.fn.maparg('<Space>ml', 'n', false, true).desc, 'Open the gc conversations list', 'the <Space>ml mapping')
   vim.cmd('GcMailChats')
   every_desc(vim.api.nvim_get_current_buf(), { '<CR>', 'q', '<Esc>' })
   vim.api.nvim_feedkeys('q', 'x', false)
@@ -8145,6 +8145,7 @@ test('setup({ chats_keymap = false }) maps nothing, a bad value is refused, and 
   eq(vim.fn.exists(':GcMailChats'), 2, ':GcMailChats exists before setup')
   gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, watch = false })
   eq(vim.fn.maparg('<Space>ml', 'n') ~= '', true, 'the default mapping')
+  eq(vim.fn.maparg('<Space>ml', 'n', false, true).desc, 'Open the gc conversations list', 'the chats mapping desc')
   vim.keymap.del('n', '<Space>ml')
   gc_mail.setup({ chats_keymap = false, state_dir = vim.fs.dirname(queue_dir), watch = false })
   eq(vim.fn.maparg('<Space>ml', 'n'), '', 'chats_keymap = false maps nothing')
@@ -8152,6 +8153,33 @@ test('setup({ chats_keymap = false }) maps nothing, a bad value is refused, and 
   local ok, err = pcall(gc_mail.setup, { chats_keymap = '' })
   eq(ok, false, 'an empty chats_keymap is refused')
   eq(tostring(err):find('chats_keymap', 1, true) ~= nil, true, 'the refusal names it')
+end)
+
+test('setup refuses a bad keymap, mailbox_keymap or panel_keymap, and false maps nothing', function()
+  local keys = {
+    { 'keymap', '<Space>mm' },
+    { 'mailbox_keymap', '<Space>mi' },
+    { 'panel_keymap', '<Space>mp' },
+  }
+  for _, key in ipairs(keys) do
+    local bad_num, bad_num_err = pcall(gc_mail.setup, { [key[1]] = 1 })
+    eq(bad_num, false, 'setup refuses ' .. key[1] .. ' = 1')
+    assert(tostring(bad_num_err):find(key[1] .. ' must be false or a non-empty string', 1, true),
+      'the refusal names ' .. key[1])
+    local bad_empty, bad_empty_err = pcall(gc_mail.setup, { [key[1]] = '' })
+    eq(bad_empty, false, 'setup refuses ' .. key[1] .. ' = ""')
+    assert(tostring(bad_empty_err):find(key[1] .. ' must be false or a non-empty string', 1, true),
+      'the refusal names ' .. key[1])
+    pcall(vim.keymap.del, 'n', key[2])
+  end
+  gc_mail.setup({ keymap = false, mailbox_keymap = false, panel_keymap = false,
+    state_dir = vim.fs.dirname(queue_dir), watch = false })
+  eq(vim.fn.maparg('<Space>mm', 'n'), '', 'keymap = false still mapped')
+  eq(vim.fn.maparg('<Space>mi', 'n'), '', 'mailbox_keymap = false still mapped')
+  eq(vim.fn.maparg('<Space>mp', 'n'), '', 'panel_keymap = false still mapped')
+  for _, lhs in ipairs({ '<Space>mc', '<Space>ml' }) do
+    vim.keymap.del('n', lhs)
+  end
 end)
 
 -- ---- the mail search ----------------------------------------------------------
