@@ -1,39 +1,94 @@
 # gc-mail.nvim
 
 Mail the current Neovim buffer to a Gas City mayor, and read the mail sent to
-you. `<Space>mm` (or `:GcMail`) opens a small picker with one line per city
-registered with the gc supervisor, at once; `<CR>` puts the buffer in an
-on-disk send queue, clears it, and gc sends it in the background. `<Space>mi`
-(or `:GcMailbox`) opens the mailbox: the mail addressed to you (`human`) in
-every city, to open, reply to, mark, archive or delete; `<Space>mp` (or
-`:GcMailPanel`) docks the same mailbox in a split below the current window
-and keeps it current while you edit. Requires Neovim 0.10 or newer and `gc`
-on `PATH`; no other plugins.
+you, without leaving the editor.
+
+Gas City is a small world of named cities run by the `gc` command-line tool:
+each city has a mayor, and everything addressed to you is addressed to
+`human`. If you live in Neovim and already use `gc` to talk to those cities,
+this plugin is for you: `<Space>mm` (or `:GcMail`) sends the buffer to a
+mayor through the send queue, `<Space>mi` (or `:GcMailbox`) reads the mail
+addressed to you in every city, and `<Space>mp` (or `:GcMailPanel`) keeps
+that mailbox docked below your work while you edit. Nothing runs at load,
+every `gc` call is asynchronous and passes an argument list, and there are
+no plugin dependencies.
+
+[![gc-mail demo](gc-mail-demo.gif)](https://github.com/codejunkienick/gc-mail.nvim/releases/latest/download/gc-mail-demo.mp4)
+
+## Requirements
+
+- Neovim 0.10 or newer.
+- The `gc` CLI on `PATH`, with at least one registered Gas City. The picker,
+  chat, conversations list and search read that city list
+  (`gc cities --json`); when the list is empty they report it
+  (`no cities are registered with gc`) instead of listing mail. The mailbox
+  and the panel show ` no mail ` in that case, with no notice. When `gc`
+  itself cannot run, the failing command is reported instead (the panel stays
+  empty silently). There is no offline mode.
+- No other plugins.
 
 ## Install
 
-lazy.nvim, from a local checkout of this repository:
+With lazy.nvim:
 
 ```lua
 {
-  dir = '/path/to/checkout/tools/gc-mail.nvim',
+  'codejunkienick/gc-mail.nvim',
   opts = {},  -- calls require('gc_mail').setup({})
 }
 ```
 
-Without a plugin manager, add the directory to the runtimepath and call setup:
+With vim-plug:
+
+```vim
+call plug#begin()
+Plug 'codejunkienick/gc-mail.nvim'
+call plug#end()
+lua require('gc_mail').setup()
+```
+
+Without a plugin manager, clone the repository and add it to the
+runtimepath:
+
+```sh
+git clone https://github.com/codejunkienick/gc-mail.nvim.git ~/.local/share/nvim/site/pack/plugins/start/gc-mail.nvim
+```
 
 ```lua
-vim.opt.runtimepath:append('/path/to/checkout/tools/gc-mail.nvim')
+vim.opt.runtimepath:append('~/.local/share/nvim/site/pack/plugins/start/gc-mail.nvim')
 require('gc_mail').setup()
 ```
 
-`:GcMail`, `:GcMailQueue`, `:GcMailbox` and `:GcMailPanel` exist as soon as the directory is
-on the runtimepath; `setup()` adds the mappings, and once Neovim has finished
-starting it resumes the send queue and preloads the city list with one
-background `gc cities --json`. Unless `watch = false`, it also starts the
-background watch below. Nothing runs while the plugin loads, so startup time is
+All seven commands exist as soon as the directory is on the runtimepath;
+`setup()` adds the mappings, and once Neovim has finished starting it resumes
+the send queue and preloads the city list with one background
+`gc cities --json`. Unless `watch = false`, it also starts the background
+watch below. Nothing runs while the plugin loads, so startup time is
 unchanged; the mailbox lists mail only when you open it.
+
+## Quick start
+
+1. Write the message in any buffer: the first non-empty line is the subject,
+   the whole buffer is the body.
+2. Press `<Space>mm` (or run `:GcMail`), pick a city, press `<CR>` to send.
+3. Press `<Space>mi` (or run `:GcMailbox`) to read the mail addressed to you.
+
+## Commands
+
+| command | what it does |
+| --- | --- |
+| `:GcMail [to]` | mail the current buffer to a city's mayor (or to `to`) |
+| `:GcMailQueue` | list the on-disk send queue: pending, sending, failed |
+| `:GcMailbox` | open the mailbox float: unread mail in every city |
+| `:GcMailPanel` | dock the same mailbox as a split below the current window |
+| `:GcMailChat [city] [with]` | open a two-window conversation with `with` (default the mayor) |
+| `:GcMailChats` | list one line per conversation across every city |
+| `:GcMailSearch <text>` | search the mail history of every city for `text` |
+
+Per-view keys are listed with each view below: the picker in
+[Use](#use), the mailbox table in [The mailbox](#the-mailbox), the chat keys
+in [The chat](#the-chat), the search keys in [Search](#search), and the queue
+keys in [The send queue](#the-send-queue).
 
 ## Options
 
@@ -43,7 +98,7 @@ unchanged; the mailbox lists mail only when you open it.
 | `state_dir` | `stdpath('state') .. '/gc-mail'` | the queue lives in `<state_dir>/queue/` |
 | `retry_ms` | `{ 10000, 60000, 300000 }` | delays before each retry of a failed send |
 | `mailbox_keymap` | `'<Space>mi'` | normal-mode mapping that opens the mailbox; `false` sets none |
-| `subject_prefix` | `''` | text put before the subject of every message the plugin sends, e.g. `'[Nick] '` |
+| `subject_prefix` | `''` | text put before the subject of every message the plugin sends, e.g. `'[work] '` |
 | `subject_suffix` | `''` | text put after it, e.g. `' (nvim)'` |
 | `watch` | `true` | the background watch below, on without any configuration; `false` turns it off |
 | `watch_resync_ms` | `300000` | while the watch runs, every city's unread mail is counted again this often (ms, at least `60000`) |
@@ -130,8 +185,8 @@ line per message, newest first, across every city of the cached
 `gc cities --json` list:
 
 ```text
-  ● imd-city  mayor  Re: mailbox for gc-mail  5m
-x   imd-city  mayor  Deploy plan accepted  2h
+  ● demo-city  mayor  Re: mailbox for gc-mail  5m
+x   demo-city  mayor  Deploy plan accepted  2h
 ```
 
 The first column is `x` on a marked message (see below); `●` marks unread
@@ -231,7 +286,7 @@ renderer. A message reads
 ```markdown
 # Re: mailbox for gc-mail
 
-**From** mayor · **To** human · **City** imd-city · 2026-10-07T12:00:00Z
+**From** mayor · **To** human · **City** demo-city · 2026-10-07T12:00:00Z
 
 `ic-wisp-a1` · thread `thread-0a1b2c3d4e5f` · r reply  t thread  u unread  a archive  d delete  q close · Read mail stays in this mailbox …
 
@@ -280,8 +335,8 @@ filetype `gcmail-panel` and the key hint in its status line.
 the buffer you are editing
 ~
 notes.md
-  ● imd-city  mayor  Re: mail panel  2m
-    imd-city  mayor  Deploy plan accepted  1h
+  ● demo-city  mayor  Re: mail panel  2m
+    demo-city  mayor  Deploy plan accepted  1h
 
  gc mail: <CR> open  r reply  t thread  c chat  s search  x mark  m read  u unread  a archive  d delete  H all  p preview  R refresh  q close
 ```
@@ -572,8 +627,10 @@ window holding the empty buffer, keeping any compose draft.
 
 ## Search
 
-`:GcMailSearch <text>` (the whole argument, trimmed; no text is refused with a
-notice), or `s` in the mailbox float and the panel (which ask for the text with
+`:GcMailSearch <text>` (the whole argument, trimmed; the query is required:
+Neovim itself refuses the command without one with `E471: Argument required`,
+because it is declared with `nargs = '+'` in `plugin/gc_mail.lua`), or `s`
+in the mailbox float and the panel (which ask for the text with
 `vim.ui.input`; an empty answer cancels), searches the mail history of every
 city: the text is found case-insensitively, as plain text (no regular
 expressions), in the subject, body, sender and recipient of every message in the
@@ -597,8 +654,10 @@ history`; the other cities' hits still show.
 
 ## The send queue
 
-Each message is one JSON file (city name and path, subject, body, created
-time, tries, last error, and optional recipient `to`) in `<state_dir>/queue/`,
+Unsent mail waits on disk so it survives a restart: the queue hands each
+message to `gc` in the background, oldest first. Each message is one JSON file
+(city name and path, subject, body, created time, tries, last error, and
+optional recipient `to`) in `<state_dir>/queue/`,
 by default `~/.local/state/nvim/gc-mail/queue/`. Every field of a file is
 checked when it is read; a file that does not pass is listed as unreadable and
 never sent, and `o` shows its raw text.
@@ -667,7 +726,8 @@ sends one again now (also a failed one), `o` opens its text in a new buffer,
 
 ## History
 
-The plugin queries mail history and thread records directly from the bead store
+Old mail lives in each city, where `gc` keeps it as bead records. The plugin
+queries that mail history and thread records directly from the bead store
 in the background:
 
 ```sh
@@ -695,13 +755,31 @@ RFC 3339 UTC format). For a thread load (`opts.thread`), it queries with
   `history.conversation(city, with)` filters for bidirectional messages
   between `human` and the specified party.
 
+## Troubleshooting
+
+- `gc` is not on `PATH`: every view but the panel reports the failing command
+  once and keeps what it showed; the panel stays empty silently. Put the `gc`
+  binary on `PATH` and press `R` in the mailbox or panel, or reopen the chat,
+  to list again.
+- No city list is available (`no cities are registered with gc`): the picker,
+  chat, conversations list and search report it; the mailbox and the panel show
+  ` no mail ` with no notice. Register at least one Gas City with `gc`, then
+  list again. There is no offline mode.
+- A send fails: the message stays in the queue and is retried after 10 s,
+  1 min and 5 min. Open `:GcMailQueue` to see the error, send it again now
+  with `r`, or delete it with `d`.
+- The queue seems stuck: `:GcMailQueue` shows the error when the queue
+  directory cannot be listed or a send outcome cannot be written. The queue
+  lives in `<state_dir>/queue/` (default `~/.local/state/nvim/gc-mail/queue/`);
+  check that directory is writable.
+
 ## Tests
 
 From the repository root, with a fake `gc` (`tests/bin/gc`) first on `PATH`;
 the real gc never runs:
 
 ```sh
-nvim --headless --clean -n -l tools/gc-mail.nvim/tests/run.lua
+PATH="$PWD/tests/bin:$PATH" nvim --headless --clean -n -l tests/run.lua
 ```
 
 The fake answers `gc cities` after a delay or not at all, fails a send a
@@ -726,13 +804,17 @@ error output, `.hang` for hanging sleep duration, or `.delay` to sleep before
 printing), supporting test fixtures for multi-line JSON lists, errors, timeouts,
 and malformed answers.
 
-## Demo recording
+## Demo
 
-`demo/record.sh` records a presentation video of the plugin's windows, headless:
-nothing appears on your screen and no real gc or city is touched.
+<img src="gc-mail-demo.gif" width="960" alt="gc-mail.nvim demo: mailbox, chat and search">
+
+Watch the full video: [gc-mail-demo.mp4](https://github.com/codejunkienick/gc-mail.nvim/releases/latest/download/gc-mail-demo.mp4).
+
+`demo/record.sh` records that presentation video of the plugin's windows,
+headless: nothing appears on your screen and no real gc or city is touched.
 
 ```sh
-tools/gc-mail.nvim/demo/record.sh [--out FILE.mp4] [--tour FILE] [--size WxH]
+demo/record.sh [--out FILE.mp4] [--tour FILE] [--size WxH]
 ```
 
 It starts its own Xvfb display, runs alacritty (wezterm as the fallback) with
@@ -769,3 +851,19 @@ an MP4 (default `./gc-mail-demo.mp4`, 1920x1080). Requires `sh`, `nvim`, `Xvfb`,
 
 The tests for the overlay's key labels and for the demo gc are in
 `tests/run.lua`; the recording itself is not part of the suite.
+
+## Contributing
+
+Run the headless suite from the repository root before sending a change:
+
+```sh
+PATH="$PWD/tests/bin:$PATH" nvim --headless --clean -n -l tests/run.lua
+```
+
+Keep tracked files free of internal ids and absolute home paths, and keep
+commit subjects short, imperative and without a final period.
+
+## License
+
+MIT License, Copyright (c) 2026 Nikita Poteryaev. See LICENSE for the full
+text.
