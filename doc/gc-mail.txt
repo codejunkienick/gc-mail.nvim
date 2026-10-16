@@ -1,0 +1,229 @@
+*gc-mail.txt*  Mail Gas City mayors and read their mail, without leaving Neovim
+*gc-mail*
+
+Mail the current buffer to a Gas City mayor and read the mail sent to
+you, without leaving the editor. Gas City is a small world of named
+cities run by the `gc` command-line tool; everything addressed to you
+is addressed to `human`. Nothing runs when the plugin loads; every
+`gc` call runs in the background with an argument list, and the plugin
+needs no other plugins. Requires Neovim 0.10 or newer and the `gc`
+CLI on `PATH`.
+
+CONTENTS                                        *gc-mail-contents*
+
+        1. Commands .............. |gc-mail-commands|
+        2. Setup and options ..... |gc-mail-options|
+        3. Sending mail .......... |gc-mail-sending|
+        4. Mailbox ............... |gc-mail-mailbox|
+        5. Mail panel ............ |gc-mail-panel|
+        6. Chat .................. |gc-mail-chat|
+        7. Search ................ |gc-mail-search|
+        8. Send queue ............ |gc-mail-queue|
+
+==============================================================================
+1. COMMANDS                                     *gc-mail-commands*
+
+All seven commands work as soon as the directory is on the
+runtimepath; |gc-mail-options| only adds mappings and background work.
+
+:GcMail [to]                                    *:GcMail*
+                Mail the current buffer. The first non-empty line is the
+                subject, the whole buffer is the body. Without `to` the
+                recipient is the mayor; with it, that address. Opens the
+                city picker; choosing a city queues the message and then
+                clears the buffer in one undo step.
+
+:GcMailQueue                                    *:GcMailQueue*
+                List the on-disk send queue: pending, sending and failed
+                messages with their last error.
+
+:GcMailbox                                      *:GcMailbox*
+                Open the mailbox float: unread mail in every city, newest
+                first, one line per message.
+
+:GcMailPanel                                    *:GcMailPanel*
+                Dock the same mailbox as a split below the current
+                window. Toggles; the same key closes it.
+
+:GcMailChat [city] [with]                       *:GcMailChat*
+                Open a two-window conversation with `with` (default the
+                mayor) in `city` (default the first city of the city
+                list): the timeline beside the work and a compose box
+                below it.
+
+:GcMailChats                                    *:GcMailChats*
+                List one line per conversation across every city, newest
+                last message first.
+
+:GcMailSearch {text}                            *:GcMailSearch*
+                Search the mail history of every city for `text` as plain
+                text, case-insensitively, in subject, body, sender and
+                recipient.
+
+==============================================================================
+2. SETUP AND OPTIONS                            *gc-mail-options*
+
+>lua
+    require('gc_mail').setup({})
+<
+`setup()` with no arguments takes every default. It adds the normal-mode
+mappings below, resumes the send queue after startup and preloads the
+city list once with `gc cities --json`. Unless `watch` is false it also
+starts the background watch. A mapping set to `false` maps nothing; the
+matching command still works.
+
+        keymap ............ '<Space>mm'  open the picker ~
+        mailbox_keymap .... '<Space>mi'  open the mailbox ~
+        panel_keymap ...... '<Space>mp'  toggle the mail panel ~
+        chat_keymap ....... '<Space>mc'  open the last chat ~
+        chats_keymap ...... '<Space>ml'  open the conversations list ~
+        chat_city_key ..... 'C'           city picker in the timeline ~
+        chat_send_keys .... {'<Space>ms'} send from the compose box ~
+
+        state_dir ......... stdpath('state') .. '/gc-mail'
+                            the queue lives in <state_dir>/queue/ ~
+        retry_ms .......... {10000, 60000, 300000}
+                            waits before each retry of a failed send ~
+        subject_prefix .... ''  text put before every sent subject ~
+        subject_suffix .... ''  text put after it ~
+        watch ............. true  follow each city's event log ~
+        watch_resync_ms ... 300000  recount unread mail this often (ms) ~
+        panel_height ...... 10  rows of the mail panel ~
+        panel_poll_ms ..... 60000  relist every city this often (ms) ~
+        preview ........... true  show the preview pane beside lists ~
+        events_rearm_ms ... 60000  retry a missing event log this often ~
+        markdown .......... true  opened mail and threads are markdown ~
+        history_days ...... 14  days of mail history kept per city ~
+        chat_width ........ 60  columns of the chat window ~
+        chat_compose_height  3  rows of the chat compose box ~
+        chat_mark_read .... true  viewing marks conversation mail read ~
+        chat_poll_ms ...... 60000  reload an open chat this often (ms) ~
+
+`setup()` refuses a prefix or suffix with a control character, the two
+together over 40 characters, a non-boolean `watch`, `preview`,
+`markdown` or `chat_mark_read`, a `watch_resync_ms` under a minute, a
+`panel_poll_ms`, `events_rearm_ms` or `chat_poll_ms` under 15 seconds, a
+`panel_height`, `history_days`, `chat_width` or `chat_compose_height`
+below its minimum, or a key option that is neither `false` nor a usable
+mapping.
+
+==============================================================================
+3. SENDING MAIL                                 *gc-mail-sending*
+
+Write the message in any buffer, then `<Space>mm` or `:GcMail [to]`.
+The picker lists one city per line at once and refreshes in the
+background; before the first answer it shows a loading line. The queue
+takes the message first and only then is the buffer emptied, so a write
+failure keeps the text. An empty buffer, one over 120 KiB, or one that
+is not modifiable is refused. Sends run `gc --city <path> mail send`
+with an argument list, oldest first, with retries.
+
+Picker keys ~
+        j/k or arrows ... move ~
+        <CR> ............. send to the city under the cursor ~
+        <Esc> or q ....... cancel ~
+
+==============================================================================
+4. MAILBOX                                      *gc-mail-mailbox*
+
+`<Space>mi` or `:GcMailbox` opens a float at once, one line per
+message: a mark column, a read column, city, sender, subject and age.
+The title lists the keys. Each city is listed with
+`gc --city <path> mail inbox human --json` in the background; a city
+that arrives later is added when it answers. An answer the strict
+decoder refuses changes nothing on screen. Read mail the mailbox kept
+stays as a per-message file under <state_dir>/mailbox/ until archived
+or deleted. `H` shows all mail including history; a second `H` shows
+the usual unread set again.
+
+Mailbox keys ~
+        <CR> ............. open the message; marks it read ~
+        r ................ reply in a new buffer ~
+        t ................ open the thread, oldest first ~
+        c ................ open the chat with the correspondent ~
+        s ................ ask for text and search history ~
+        x ................ mark or unmark the message ~
+        X ................ clear every mark ~
+        m ................ mark read ~
+        u ................ mark unread ~
+        a ................ archive (one call per city) ~
+        d ................ delete, after a Yes/No question ~
+        H ................ all mail on or off ~
+        p ................ show or hide the preview pane ~
+        R ................ list every city again ~
+        q or <Esc> ....... close ~
+
+`m`, `u`, `a` and `d` also run on a visual selection, else on every
+marked message, else on the message under the cursor. An opened message keeps
+`r`, `t`, `c`, `u`, `a`, `d` and `q` to close it.
+
+==============================================================================
+5. MAIL PANEL                                   *gc-mail-panel*
+
+`<Space>mp` or `:GcMailPanel` docks the mailbox below the current
+window as a fixed-height split, with the key hint in its statusline.
+It is a second view of the same mailbox: lines, marks, all-mail mode
+and kept copies match the float. Opening, refreshing or a mail arrival
+never moves the cursor. `<CR>`, `r` and `t` open above the panel, `c`
+opens the chat beside the docked window, and `q` closes the panel. `p`
+shows or hides its preview pane. Closing the last panel stops its
+watchers and timers.
+
+==============================================================================
+6. CHAT                                         *gc-mail-chat*
+
+`<Space>mc` or `:GcMailChat [city] [with]` shows the conversation
+oldest first with a compose box below it, following the end until you
+scroll up. Your own pending sends render as queued, sending or failed
+lines until the delivered message arrives. Unread mail to you is marked
+read while viewed unless `chat_mark_read` is false; `u` keeps a message
+unread until you leave the chat. The timeline statusline names the
+correspondent, the send state, liveness, and unread and newer counts.
+
+Chat keys ~
+        <Space>ms ......... send the compose box (normal mode) ~
+        <CR> .............. open the message under the cursor ~
+        t ................. open its thread ~
+        u ................. keep the message unread ~
+        R ................. reload the history and re-render ~
+        G ................. jump to the latest message ~
+        q ................. close both chat windows ~
+        <C-j> / <C-k> ..... move focus between timeline and compose ~
+        ]m / [m ........... next / previous message ~
+        C ................. pick a city and open its mayor chat ~
+
+`<Space>ml` or `:GcMailChats` lists every conversation, newest last
+message first, from the history cache, loading each city once. `<CR>`
+opens the chat under the cursor; `q` and `<Esc>` close the list.
+
+==============================================================================
+7. SEARCH                                       *gc-mail-search*
+
+`:GcMailSearch {text}`, or `s` in the mailbox and the panel (which
+prompts for the text), looks through the cached history of every city;
+a city not cached yet loads once first. Results open at once with a
+searching line and fill in, one line per hit, newest first, or a
+no-matches line.
+
+Search keys ~
+        <CR> .............. show the hit as a message view (marks nothing) ~
+        c ................. open the chat with the hit's correspondent ~
+        q or <Esc> ....... close ~
+
+==============================================================================
+8. SEND QUEUE                                   *gc-mail-queue*
+
+Unsent mail waits as one JSON file per message in
+<state_dir>/queue/, so it survives a restart. One worker sends oldest
+first, one `gc` process at a time; a failed send retries, then is marked
+failed and waits for `r`. `setup()` resumes the queue; several Neovims
+may share it under a file lock. Past 100 files a new message is
+refused.
+
+Queue keys ~
+        r ................. send the message under the cursor again now ~
+        o ................. open its stored text in a new buffer ~
+        d ................. delete it (never while it is sending) ~
+        <Esc> or q ....... close ~
+
+vim:tw=78:ts=8:ft=help:norl:
