@@ -13,7 +13,7 @@ that mailbox docked below your work while you edit. Nothing runs at load,
 every `gc` call is asynchronous and passes an argument list, and there are
 no plugin dependencies.
 
-[![gc-mail demo](gc-mail-demo.gif)](https://github.com/codejunkienick/gc-mail.nvim/releases/latest/download/gc-mail-demo.mp4)
+<a href="https://github.com/codejunkienick/gc-mail.nvim/releases/latest/download/gc-mail-demo.mp4"><picture><source srcset="gc-mail-demo.webp" type="image/webp"><img src="gc-mail-demo.gif" alt="gc-mail demo"></picture></a>
 
 ## Requirements
 
@@ -806,7 +806,7 @@ and malformed answers.
 
 ## Demo
 
-<img src="gc-mail-demo.gif" width="960" alt="gc-mail.nvim demo: chat with the mayor, then the mailbox">
+<picture><source srcset="gc-mail-demo.webp" type="image/webp"><img src="gc-mail-demo.gif" width="1280" alt="gc-mail.nvim demo: chat with the mayor, then the mailbox"></picture>
 
 Watch the full video: [gc-mail-demo.mp4](https://github.com/codejunkienick/gc-mail.nvim/releases/latest/download/gc-mail-demo.mp4).
 
@@ -821,8 +821,8 @@ It starts its own Xvfb display, runs alacritty (wezterm as the fallback) with
 `nvim --clean -u demo/init.lua` and the plugin against a fake demo city, types
 the tour at human speed, and grabs the display with ffmpeg (30 fps, H.264) into
 an MP4 (default `./gc-mail-demo.mp4`, 1920x1080). A second ffmpeg pass writes
-a 960 px wide 12 fps palette GIF (`--gif FILE`) or animated WebP (`--webp FILE`)
-from that MP4 for small sharing files. The terminal runs at font size 22 at
+a 960 px wide 12 fps palette GIF (`--gif FILE`) or a 1280 px wide 15 fps
+animated WebP (`--webp FILE`) from that MP4 for small sharing files. The terminal runs at font size 22 at
 1920x1080 so the overlay keystrokes stay large. Requires `sh`, `nvim`, `Xvfb`,
 `xdotool`, `ffmpeg` and `alacritty` or `wezterm`; nothing is downloaded.
 
@@ -859,7 +859,7 @@ from that MP4 for small sharing files. The terminal runs at font size 22 at
   then the mailbox as the agents' mail client: walk, open, reply, a new mail,
   the unread count going down as messages are read):
   `demo/record.sh --tour demo/tour-showcase.txt --out ./gc-mail-demo.mp4
-  --gif ./gc-mail-demo.gif` reproduces it.
+  --gif ./gc-mail-demo.gif --webp ./gc-mail-demo.webp` reproduces it.
 - Everything lives in one temporary directory, removed on exit; Ctrl-C or a
   failure stops ffmpeg, the terminal, Neovim and Xvfb first. Exit status is 0
   only when a non-empty MP4 was written.

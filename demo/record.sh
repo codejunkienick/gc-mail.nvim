@@ -7,8 +7,9 @@
 # and the plugin against a fake demo city (demo/bin/gc); the tour is typed at
 # human speed while demo/keys.lua shows each key and the captions, an agent
 # reply arrives live, and ffmpeg grabs the display into an MP4. A second
-# ffmpeg pass writes a 960 px wide 12 fps palette GIF (--gif) or animated
-# WebP (--webp) from that MP4. Nothing touches the real screen, the real gc
+# ffmpeg pass writes a 960 px wide 12 fps palette GIF (--gif) or a 1280 px
+# wide 15 fps animated WebP (--webp) from that MP4. Nothing touches the real
+# screen, the real gc
 # or any real city: everything lives in one temporary directory that is
 # removed on exit.
 #
@@ -406,8 +407,8 @@ mv -f "$tmp/out.mp4" "$out"
 printf 'recorded %s\n' "$out"
 
 # ---- a second ffmpeg pass writes the small sharing files ----------------------
-# Both are 960 px wide at 12 fps from the recorded MP4; the GIF goes through
-# a palette for readable text.
+# The GIF is 960 px wide at 12 fps from the recorded MP4 and goes through
+# a palette for readable text; the WebP is 1280 px wide at 15 fps.
 if [ -n "$gif" ]; then
   ffmpeg -y -loglevel error -i "$out" -vf "fps=12,scale=960:-1:flags=lanczos,palettegen" "$tmp/palette.png" \
     >"$tmp/gif-palette.log" 2>&1 || fail "ffmpeg palette failed: $(tail -n 3 "$tmp/gif-palette.log")"
@@ -418,8 +419,8 @@ if [ -n "$gif" ]; then
   printf 'recorded %s\n' "$gif"
 fi
 if [ -n "$webp" ]; then
-  ffmpeg -y -loglevel error -i "$out" -vf "fps=12,scale=960:-1:flags=lanczos" \
-    -c:v libwebp -lossless 0 -quality 70 -cr_threshold 50 -cr_size 16 -loop 0 "$webp" \
+  ffmpeg -y -loglevel error -i "$out" -vf "fps=15,scale=1280:-1:flags=lanczos" \
+    -c:v libwebp -lossless 0 -quality 85 -cr_threshold 50 -cr_size 16 -loop 0 "$webp" \
     >"$tmp/webp.log" 2>&1 || fail "ffmpeg WebP failed: $(tail -n 3 "$tmp/webp.log")"
   [ -s "$webp" ] || fail 'ffmpeg wrote an empty WebP'
   printf 'recorded %s\n' "$webp"
