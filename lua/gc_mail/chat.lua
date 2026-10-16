@@ -188,18 +188,29 @@ local function win_height(win)
   return ok and height or nil
 end
 
-local function apply_width(chat, width)
+-- Applies `value` to the chat size `field` ('width' on the timeline
+-- window, 'compose_height' on the compose window) and notes the size
+-- last applied, so a resize this chat caused itself is not observed.
+local function apply_size(chat, field, value)
   chat.applying_size = true
-  pcall(vim.api.nvim_win_set_width, chat.timeline_win, width)
-  chat.applying_size = false
-  chat.applied_width = win_width(chat.timeline_win) or width
+  if field == 'width' then
+    pcall(vim.api.nvim_win_set_width, chat.timeline_win, value)
+    chat.applying_size = false
+    chat.applied_width = win_width(chat.timeline_win) or value
+  else
+    pcall(vim.api.nvim_win_set_height, chat.compose_win, value)
+    chat.applying_size = false
+    chat.applied_compose_height = win_height(chat.compose_win) or value
+  end
 end
 
-local function apply_compose_height(chat, height)
-  chat.applying_size = true
-  pcall(vim.api.nvim_win_set_height, chat.compose_win, height)
-  chat.applying_size = false
-  chat.applied_compose_height = win_height(chat.compose_win) or height
+-- The one saved_size write: `field` ('width' or 'compose_height') of
+-- this chat's conversation takes `value`, and no other chat's does.
+local function save_size(chat, field, value)
+  local key = key_of(chat.city, chat.with)
+  local entry = saved_size[key] or {}
+  entry[field] = value
+  saved_size[key] = entry
 end
 
 -- A user resize of the compose box: its clamped height is this chat's
@@ -219,16 +230,13 @@ local function remember_compose_height(chat)
   if timeline then
     local clamped = clamp_compose_height(height, timeline + height)
     if clamped ~= height then
-      apply_compose_height(chat, clamped)
+      apply_size(chat, 'compose_height', clamped)
       height = clamped
     end
   end
   chat.want_compose_height = height
   chat.applied_compose_height = height
-  local key = key_of(chat.city, chat.with)
-  local entry = saved_size[key] or {}
-  entry.compose_height = height
-  saved_size[key] = entry
+  save_size(chat, 'compose_height', height)
 end
 
 local function layout_contains(node, win)
@@ -326,34 +334,39 @@ local function remember_width(chat)
   end
   local clamped = width_at_floor(chat, clamp_width(width, vim.o.columns))
   if clamped ~= width then
-    apply_width(chat, clamped)
+    apply_size(chat, 'width', clamped)
     width = clamped
   end
   chat.want_width = width
   chat.applied_width = width
-  local key = key_of(chat.city, chat.with)
-  local entry = saved_size[key] or {}
-  entry.width = width
-  saved_size[key] = entry
+  save_size(chat, 'width', width)
 end
 
--- Records a resize no WinResized callback observed (a window set and the
--- chat closed at once): a size still differing from the one last applied
--- or observed counts as the user's.
-local function capture_size(chat)
-  if not chat.want_compose_height then
-    return
-  end
-  local height = chat.compose_win and win_height(chat.compose_win)
+-- Notes what the user resized: a compose height or timeline width
+-- still differing from the one last applied or observed counts as the
+-- user's and is remembered. Returns whether the width was remembered.
+local function note_user_size(chat)
+  local height = win_height(chat.compose_win)
   if height and height ~= chat.applied_compose_height then
     remember_compose_height(chat)
   end
   if not chat.fullsize then
-    local width = chat.timeline_win and win_width(chat.timeline_win)
+    local width = win_width(chat.timeline_win)
     if width and width ~= chat.applied_width then
       remember_width(chat)
+      return true
     end
   end
+  return false
+end
+
+-- Records a resize no WinResized callback observed (a window set and the
+-- chat closed at once).
+local function capture_size(chat)
+  if not chat.want_compose_height then
+    return
+  end
+  note_user_size(chat)
 end
 
 -- Restores the wanted sizes under the current editor size, clamped, with
@@ -370,7 +383,7 @@ local function enforce_size(chat)
   if height and timeline_height and chat.want_compose_height then
     local clamped = clamp_compose_height(chat.want_compose_height, timeline_height + height)
     if clamped ~= height then
-      apply_compose_height(chat, clamped)
+      apply_size(chat, 'compose_height', clamped)
     else
       chat.applied_compose_height = height
     end
@@ -383,7 +396,7 @@ local function enforce_size(chat)
   if width then
     local clamped = width_at_floor(chat, clamp_width(chat.want_width, vim.o.columns))
     if clamped ~= width then
-      apply_width(chat, clamped)
+      apply_size(chat, 'width', clamped)
     else
       chat.applied_width = width
     end
@@ -399,19 +412,10 @@ local function observe_size(chat)
   if vim.o.columns ~= chat.seen_columns or vim.o.lines ~= chat.seen_lines then
     return enforce_size(chat)
   end
-  local height = win_height(chat.compose_win)
-  if height and height ~= chat.applied_compose_height then
-    remember_compose_height(chat)
-  end
-  if not chat.fullsize then
-    local width = win_width(chat.timeline_win)
-    if width and width ~= chat.applied_width then
-      remember_width(chat)
-    else
-      -- A resize that left the timeline alone can still have narrowed
-      -- the origin (a separator on its other side)
-      restore_origin_floor(chat)
-    end
+  if not note_user_size(chat) and not chat.fullsize then
+    -- A resize that left the timeline alone can still have narrowed
+    -- the origin (a separator on its other side)
+    restore_origin_floor(chat)
   end
 end
 
