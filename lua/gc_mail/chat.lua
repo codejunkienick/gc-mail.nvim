@@ -129,6 +129,32 @@ local function valid_chat(chat)
     and vim.api.nvim_buf_is_valid(chat.compose_buf)
 end
 
+-- Drops `chat`'s pending reopen anchor
+local function drop_anchor(chat)
+  chat.pending_place, chat.place_wait, chat.place_view = nil, nil, nil
+end
+
+-- Calls `fn` on every open chat, or only those `filter` accepts
+local function each_chat(fn, filter)
+  for _, tab_chats in pairs(chats) do
+    for _, chat in pairs(tab_chats) do
+      if filter == nil or filter(chat) then
+        fn(chat)
+      end
+    end
+  end
+end
+
+-- The message block of `chat` holding `row`, or nil
+local function block_at(chat, row)
+  for _, block in ipairs(chat.message_blocks) do
+    if block.message and row >= block.start_line and row <= block.end_line then
+      return block
+    end
+  end
+  return nil
+end
+
 -- The width `wanted` clamped to `combined` columns (the editor width
 -- where a caller has no better measure): the origin keeps
 -- ORIGIN_MIN_WIDTH text columns, or all but one column of a still
@@ -251,7 +277,7 @@ end
 -- shrinking the timeline could hand the freed columns to a window right
 -- of the chat and leave the origin short. A no-op once the origin is at
 -- the floor.
-local function restore_origin(chat)
+local function restore_origin_floor(chat)
   if chat.fullsize or not chat.origin or not vim.api.nvim_win_is_valid(chat.origin) then
     return
   end
@@ -270,7 +296,7 @@ end
 -- may hold at most its current width plus the row's unused columns and
 -- the origin's columns above the floor (and must give the shortfall
 -- back when the origin is still below it, as only a row too narrow for
--- restore_origin leaves it); any smaller width stands (the caller
+-- restore_origin_floor leaves it); any smaller width stands (the caller
 -- already clamped it to the editor width).
 local function width_at_floor(chat, width)
   local origin = chat.origin and win_width(chat.origin)
@@ -293,7 +319,7 @@ local function remember_width(chat)
   if not chat.origin or not vim.api.nvim_win_is_valid(chat.origin) then
     return
   end
-  restore_origin(chat)
+  restore_origin_floor(chat)
   local width = win_width(chat.timeline_win)
   if not width then
     return
@@ -352,7 +378,7 @@ local function enforce_size(chat)
   if chat.fullsize or not chat.want_width then
     return
   end
-  restore_origin(chat)
+  restore_origin_floor(chat)
   local width = win_width(chat.timeline_win)
   if width then
     local clamped = width_at_floor(chat, clamp_width(chat.want_width, vim.o.columns))
@@ -384,7 +410,7 @@ local function observe_size(chat)
     else
       -- A resize that left the timeline alone can still have narrowed
       -- the origin (a separator on its other side)
-      restore_origin(chat)
+      restore_origin_floor(chat)
     end
   end
 end
@@ -460,10 +486,8 @@ local function split_target(chat)
     end)
     if left ~= 0 and left ~= chat.timeline_win and left ~= chat.compose_win and vim.api.nvim_win_is_valid(left) then
       vim.api.nvim_set_current_win(left)
-      vim.cmd('new')
-    else
-      vim.cmd('new')
     end
+    vim.cmd('new')
   end
 end
 
@@ -559,13 +583,9 @@ local function load_city(city)
       load_failed[city.path] = err
       -- The open's history wait answered with nothing: drop pending reopen
       -- anchors, so a later load does not yank the view back to them.
-      for _, tab_chats in pairs(chats) do
-        for _, c in pairs(tab_chats) do
-          if c.city.path == city.path and c.pending_place ~= nil then
-            c.pending_place, c.place_wait, c.place_view = nil, nil, nil
-          end
-        end
-      end
+      each_chat(drop_anchor, function(c)
+        return c.city.path == city.path and c.pending_place ~= nil
+      end)
     else
       load_failed[city.path] = nil
     end
@@ -800,6 +820,20 @@ local function send_state(q, escape)
   return 'queued'
 end
 
+-- Appends one timeline block (`heading`, a blank line, `body`, a blank line
+-- and the rule) to `lines`; returns its first and last line
+local function append_block(lines, heading, body)
+  local start_line = #lines + 1
+  lines[#lines + 1] = heading
+  lines[#lines + 1] = ''
+  for _, bline in ipairs(body) do
+    lines[#lines + 1] = bline
+  end
+  lines[#lines + 1] = ''
+  lines[#lines + 1] = '---'
+  return start_line, #lines
+end
+
 function M.render(chat)
   if not valid_chat(chat) then
     return
@@ -867,13 +901,11 @@ function M.render(chat)
     end
   else
     for _, m in ipairs(history_messages) do
-      local start_line = #lines + 1
       local who = (m.from == 'human') and 'you' or m.from
       local when = format_when(m.created)
       local closed_mark = m.closed and ' (closed)' or ''
       local unread_bullet = (m.to == 'human' and not m.read) and ' ●' or ''
-      lines[#lines + 1] = ('## %s · %s%s%s'):format(md_escape(who), md_escape(when), closed_mark, unread_bullet)
-      lines[#lines + 1] = ''
+      local heading = ('## %s · %s%s%s'):format(md_escape(who), md_escape(when), closed_mark, unread_bullet)
 
       local omit_subject = false
       local first_line = first_non_empty_line(m.body)
@@ -881,31 +913,21 @@ function M.render(chat)
         omit_subject = true
       end
 
+      local body = {}
       if not omit_subject then
-        lines[#lines + 1] = md_escape(m.subject)
-        lines[#lines + 1] = ''
+        body[#body + 1] = md_escape(m.subject)
+        body[#body + 1] = ''
       end
-
       for _, bline in ipairs(body_lines(m.body)) do
-        lines[#lines + 1] = bline
+        body[#body + 1] = bline
       end
-      lines[#lines + 1] = ''
-      lines[#lines + 1] = '---'
-      local end_line = #lines
+      local start_line, end_line = append_block(lines, heading, body)
       blocks[#blocks + 1] = { message = m, start_line = start_line, end_line = end_line }
     end
 
     for _, q in ipairs(relevant_queue) do
       local rec = q.record
-      local start_line = #lines + 1
-      lines[#lines + 1] = '## you · ' .. send_state(q, md_escape)
-      lines[#lines + 1] = ''
-      for _, bline in ipairs(body_lines(rec.body)) do
-        lines[#lines + 1] = bline
-      end
-      lines[#lines + 1] = ''
-      lines[#lines + 1] = '---'
-      local end_line = #lines
+      local start_line, end_line = append_block(lines, '## you · ' .. send_state(q, md_escape), body_lines(rec.body))
       blocks[#blocks + 1] = { record = rec, start_line = start_line, end_line = end_line }
     end
   end
@@ -939,7 +961,7 @@ function M.render(chat)
     if pending.id == nil then
       -- Nothing to restore: closed with no message in view.
       follow = true
-      chat.pending_place, chat.place_wait, chat.place_view = nil, nil, nil
+      drop_anchor(chat)
     elseif stamp == chat.place_wait then
       -- The open's history load has not answered yet: the cache is still the
       -- one from before the close. Show the end meanwhile and keep the anchor.
@@ -953,7 +975,7 @@ function M.render(chat)
       if moved then
         -- The user moved before the open's load answered: stay where they
         -- are instead of yanking the view back to the anchor.
-        chat.pending_place, chat.place_wait, chat.place_view = nil, nil, nil
+        drop_anchor(chat)
       else
         for _, block in ipairs(blocks) do
           if block.message and block.message.id == pending.id then
@@ -972,7 +994,7 @@ function M.render(chat)
           -- The anchor message is gone: open at the end, as on first open.
           follow = true
         end
-        chat.pending_place, chat.place_wait, chat.place_view = nil, nil, nil
+        drop_anchor(chat)
       end
     end
   end
@@ -1082,23 +1104,17 @@ end
 -- Renders every open chat of `city`; with `m`, only those whose conversation
 -- holds it
 render_city = function(city, m)
-  for _, tab_chats in pairs(chats) do
-    for _, chat in pairs(tab_chats) do
-      if valid_chat(chat) and chat.city.path == city.path and (m == nil or belongs(m, chat.with)) then
-        M.render(chat)
-      end
-    end
-  end
+  each_chat(function(chat)
+    M.render(chat)
+  end, function(chat)
+    return valid_chat(chat) and chat.city.path == city.path and (m == nil or belongs(m, chat.with))
+  end)
 end
 
 local function render_all()
-  for _, tab_chats in pairs(chats) do
-    for _, chat in pairs(tab_chats) do
-      if valid_chat(chat) then
-        M.render(chat)
-      end
-    end
-  end
+  each_chat(function(chat)
+    M.render(chat)
+  end, valid_chat)
 end
 
 -- ---- live updates -------------------------------------------------------------
@@ -1146,13 +1162,9 @@ local function on_event(this, city, event)
     load_city(city)
   elseif kind == 'watching' then
     -- The city's log armed or disarmed: its chats say live or polling now
-    for _, tab_chats in pairs(chats) do
-      for _, chat in pairs(tab_chats) do
-        if valid_chat(chat) and chat.city.path == city.path then
-          update_status(chat)
-        end
-      end
-    end
+    each_chat(update_status, function(chat)
+      return valid_chat(chat) and chat.city.path == city.path
+    end)
   elseif READ_EVENTS[kind] ~= nil or CLOSED_EVENTS[kind] then
     local m = event.id and cached and cached.by_id and cached.by_id[event.id]
     if not m then
@@ -1218,11 +1230,9 @@ end
 -- nothing at all once none is open.
 local function sync_live()
   local open = {}
-  for _, tab_chats in pairs(chats) do
-    for _, chat in pairs(tab_chats) do
-      open[chat.city.path] = chat.city
-    end
-  end
+  each_chat(function(chat)
+    open[chat.city.path] = chat.city
+  end)
   if next(open) == nil then
     return stop_live()
   end
@@ -1329,25 +1339,29 @@ local function fullsize_buf(origin)
 end
 
 -- Gives a taken-over origin window back its buffer and window options: the
--- close and reset paths never close the user's own window. The options are
--- captured and restored in local scope only: reading the effective value and
--- writing it back would pin a copy of the global default onto the window.
-local function restore_origin(chat)
+-- close and reset paths never close the user's own window. `win` is the
+-- window to give back to, the origin by default, or the compose window when
+-- the origin window is gone and the compose window is what remains. The
+-- options are captured and restored in local scope only: reading the
+-- effective value and writing it back would pin a copy of the global
+-- default onto the window.
+local function give_back_origin(chat, win)
+  win = win or chat.origin
   if vim.api.nvim_buf_is_valid(chat.origin_buf) then
-    pcall(vim.api.nvim_win_set_buf, chat.origin, chat.origin_buf)
+    pcall(vim.api.nvim_win_set_buf, win, chat.origin_buf)
   else
     -- The taken buffer is gone (wiped at open through bufhidden, or wiped
     -- while the chat was open): fall back to a fresh empty buffer so the
     -- window never keeps showing the closed timeline.
     local fresh = vim.api.nvim_create_buf(true, false)
     if fresh and fresh ~= 0 then
-      pcall(vim.api.nvim_win_set_buf, chat.origin, fresh)
+      pcall(vim.api.nvim_win_set_buf, win, fresh)
     end
   end
   if chat.origin_opts then
     pcall(function()
-      vim.api.nvim_set_option_value('statusline', chat.origin_opts.statusline, { win = chat.origin, scope = 'local' })
-      vim.api.nvim_set_option_value('winfixwidth', chat.origin_opts.winfixwidth, { win = chat.origin, scope = 'local' })
+      vim.api.nvim_set_option_value('statusline', chat.origin_opts.statusline, { win = win, scope = 'local' })
+      vim.api.nvim_set_option_value('winfixwidth', chat.origin_opts.winfixwidth, { win = win, scope = 'local' })
     end)
   end
 end
@@ -1367,22 +1381,13 @@ local function capture_place(chat)
     return false
   end
   local topline = at.view.topline
-  local id = nil
-  for _, block in ipairs(chat.message_blocks) do
-    if block.message and topline >= block.start_line and topline <= block.end_line then
-      id = block.message.id
-      break
-    end
-  end
+  local top_block = block_at(chat, topline)
+  local id = top_block and top_block.message.id or nil
   if not id then
     local ok_row, row = pcall(vim.api.nvim_win_get_cursor, chat.timeline_win)
     if ok_row and row then
-      for _, block in ipairs(chat.message_blocks) do
-        if block.message and row[1] >= block.start_line and row[1] <= block.end_line then
-          id = block.message.id
-          break
-        end
-      end
+      local cursor_block = block_at(chat, row[1])
+      id = cursor_block and cursor_block.message.id or nil
     end
   end
   local known = {}
@@ -1442,7 +1447,7 @@ function M.close(chat)
   release_unreading(chat)
 
   if chat.fullsize and vim.api.nvim_win_is_valid(chat.origin) then
-    restore_origin(chat)
+    give_back_origin(chat)
   elseif vim.api.nvim_win_is_valid(chat.timeline_win) then
     pcall(vim.api.nvim_win_close, chat.timeline_win, true)
   end
@@ -1457,19 +1462,7 @@ function M.close(chat)
     -- <C-w>c) leaves the compose window as the editor's only window and the
     -- close above cannot drop the last window: give it an empty buffer back
     -- instead of stranding the user in the compose scratch buffer.
-    local target = chat.origin_buf
-    if not vim.api.nvim_buf_is_valid(target) then
-      target = vim.api.nvim_create_buf(true, false)
-    end
-    if target and target ~= 0 then
-      pcall(vim.api.nvim_win_set_buf, chat.compose_win, target)
-    end
-    if chat.origin_opts then
-      pcall(function()
-        vim.api.nvim_set_option_value('statusline', chat.origin_opts.statusline, { win = chat.compose_win, scope = 'local' })
-        vim.api.nvim_set_option_value('winfixwidth', chat.origin_opts.winfixwidth, { win = chat.compose_win, scope = 'local' })
-      end)
-    end
+    give_back_origin(chat, chat.compose_win)
     pcall(vim.api.nvim_set_option_value, 'winfixheight', false, { win = chat.compose_win, scope = 'local' })
     pcall(vim.api.nvim_set_current_win, chat.compose_win)
   end
@@ -1488,12 +1481,10 @@ local function on_open_message(chat)
     return
   end
   local row = vim.api.nvim_win_get_cursor(chat.timeline_win)[1]
-  for _, block in ipairs(chat.message_blocks) do
-    if row >= block.start_line and row <= block.end_line and block.message then
-      local entry = { city = chat.city, message = block.message, read = block.message.read }
-      mailbox.actions.open(entry, split_target(chat))
-      return
-    end
+  local block = block_at(chat, row)
+  if block then
+    local entry = { city = chat.city, message = block.message, read = block.message.read }
+    mailbox.actions.open(entry, split_target(chat))
   end
 end
 
@@ -1502,12 +1493,10 @@ local function on_thread_message(chat)
     return
   end
   local row = vim.api.nvim_win_get_cursor(chat.timeline_win)[1]
-  for _, block in ipairs(chat.message_blocks) do
-    if row >= block.start_line and row <= block.end_line and block.message then
-      local entry = { city = chat.city, message = block.message, read = block.message.read }
-      mailbox.actions.thread(entry, split_target(chat))
-      return
-    end
+  local block = block_at(chat, row)
+  if block then
+    local entry = { city = chat.city, message = block.message, read = block.message.read }
+    mailbox.actions.thread(entry, split_target(chat))
   end
 end
 
@@ -1516,53 +1505,51 @@ local function on_unread_message(chat)
     return
   end
   local row = vim.api.nvim_win_get_cursor(chat.timeline_win)[1]
-  for _, block in ipairs(chat.message_blocks) do
-    if row >= block.start_line and row <= block.end_line and block.message then
-      local m = block.message
-      local id, seq = m.id, next_seq()
-      local was_read = m.read
-      -- Held out of the automatic pass (RS3) until the chat is left (RS4)
-      reads[id] = { phase = 'unreading', seq = seq, owner = chat }
-      set_read(chat, m, false)
-      local entry = { city = chat.city, message = m, read = false }
-      mailbox.actions.unread(entry, function(ok, _, applied)
-        local rec = current(id, seq)
-        if not rec then
-          return
-        end
-        rec.answered = vim.uv.hrtime()
-        if not ok then
-          if rec.release then
-            -- Refused after the chat was left: no record outlives it
-            reads[id] = nil
-            set_read(chat, m, was_read)
-          elseif not was_read then
-            -- Refused on a message that was unread: it stays unread, and the
-            -- record stays 'unreading' so the automatic pass (RS3) does not
-            -- mark it read while this chat is open; leaving the chat (RS4)
-            -- drops it
-            set_read(chat, m, false)
-          else
-            rec.phase = 'read'
-            rec.owner = nil
-            set_read(chat, m, true)
-          end
-        elseif rec.release then
-          -- RS4: the chat was left while this was pending
+  local block = block_at(chat, row)
+  if block then
+    local m = block.message
+    local id, seq = m.id, next_seq()
+    local was_read = m.read
+    -- Held out of the automatic pass (RS3) until the chat is left (RS4)
+    reads[id] = { phase = 'unreading', seq = seq, owner = chat }
+    set_read(chat, m, false)
+    local entry = { city = chat.city, message = m, read = false }
+    mailbox.actions.unread(entry, function(ok, _, applied)
+      local rec = current(id, seq)
+      if not rec then
+        return
+      end
+      rec.answered = vim.uv.hrtime()
+      if not ok then
+        if rec.release then
+          -- Refused after the chat was left: no record outlives it
           reads[id] = nil
+          set_read(chat, m, was_read)
+        elseif not was_read then
+          -- Refused on a message that was unread: it stays unread, and the
+          -- record stays 'unreading' so the automatic pass (RS3) does not
+          -- mark it read while this chat is open; leaving the chat (RS4)
+          -- drops it
+          set_read(chat, m, false)
+        else
+          rec.phase = 'read'
+          rec.owner = nil
+          set_read(chat, m, true)
         end
-        if ok and applied == false then
-          -- RS2: a later action owns the message; gc's answer comes from a load
-          reload(chat)
-          return
-        end
-        if valid_chat(chat) then
-          M.render(chat)
-        end
-      end)
-      M.render(chat)
-      return
-    end
+      elseif rec.release then
+        -- RS4: the chat was left while this was pending
+        reads[id] = nil
+      end
+      if ok and applied == false then
+        -- RS2: a later action owns the message; gc's answer comes from a load
+        reload(chat)
+        return
+      end
+      if valid_chat(chat) then
+        M.render(chat)
+      end
+    end)
+    M.render(chat)
   end
 end
 
@@ -1809,29 +1796,32 @@ function M.open(city_arg, with_arg)
     end
   end
 
-  local tl_map = {
+  -- One key list for both buffers: the fourth field marks the keys shared
+  -- with the compose box (the close and focus keys); the rest live only on
+  -- the timeline.
+  local key_map = {
     { '<CR>', function() on_open_message(chat) end, 'gc-mail: open message' },
     { 't', function() on_thread_message(chat) end, 'gc-mail: open thread' },
     { 'u', function() on_unread_message(chat) end, 'gc-mail: mark unread' },
     { 'R', function()
       -- A reload answers the open's history wait itself: the anchor is off.
-      chat.pending_place, chat.place_wait, chat.place_view = nil, nil, nil
+      drop_anchor(chat)
       reload(chat)
     end, 'gc-mail: reload history' },
     { 'G', function()
       -- Jumping to the end means the end, not the waiting anchor.
-      chat.pending_place, chat.place_wait, chat.place_view = nil, nil, nil
+      drop_anchor(chat)
       -- A count keeps G's own meaning: that line
       vim.cmd('normal! ' .. (vim.v.count > 0 and vim.v.count or '') .. 'G')
       update_below(chat)
     end, 'gc-mail: jump to the latest message' },
-    { 'q', function() M.close(chat) end, 'gc-mail: close chat' },
-    { '<C-j>', function() focus_compose(chat) end, 'gc-mail: focus compose' },
-    { '<C-k>', function() focus_timeline(chat) end, 'gc-mail: focus timeline' },
+    { 'q', function() M.close(chat) end, 'gc-mail: close chat', true },
+    { '<C-j>', function() focus_compose(chat) end, 'gc-mail: focus compose', true },
+    { '<C-k>', function() focus_timeline(chat) end, 'gc-mail: focus timeline', true },
     { ']m', function() goto_message(chat, 1) end, 'gc-mail: next message' },
     { '[m', function() goto_message(chat, -1) end, 'gc-mail: previous message' },
   }
-  for _, item in ipairs(tl_map) do
+  for _, item in ipairs(key_map) do
     vim.keymap.set('n', item[1], item[2], {
       buffer = timeline_buf,
       nowait = true,
@@ -1848,13 +1838,8 @@ function M.open(city_arg, with_arg)
   -- mapping is skipped and the send key keeps working. (G stays Vim's own
   -- motion in the editable draft; jump-to-latest lives on the timeline.)
   local codes = send_keycodes()
-  local cp_map = {
-    { 'q', function() M.close(chat) end, 'gc-mail: close chat' },
-    { '<C-j>', function() focus_compose(chat) end, 'gc-mail: focus compose' },
-    { '<C-k>', function() focus_timeline(chat) end, 'gc-mail: focus timeline' },
-  }
-  for _, item in ipairs(cp_map) do
-    if not shadows_send(item[1], codes) then
+  for _, item in ipairs(key_map) do
+    if item[4] and not shadows_send(item[1], codes) then
       vim.keymap.set('n', item[1], item[2], {
         buffer = compose_buf,
         nowait = true,
@@ -2184,18 +2169,14 @@ function M.command(fargs)
 end
 
 function M.reset()
-  for _, tab_chats in pairs(chats) do
-    for _, chat in pairs(tab_chats) do
-      if valid_chat(chat) then
-        if chat.fullsize and vim.api.nvim_win_is_valid(chat.origin) then
-          restore_origin(chat)
-        else
-          pcall(vim.api.nvim_win_close, chat.timeline_win, true)
-        end
-        pcall(vim.api.nvim_win_close, chat.compose_win, true)
-      end
+  each_chat(function(chat)
+    if chat.fullsize and vim.api.nvim_win_is_valid(chat.origin) then
+      give_back_origin(chat)
+    else
+      pcall(vim.api.nvim_win_close, chat.timeline_win, true)
     end
-  end
+    pcall(vim.api.nvim_win_close, chat.compose_win, true)
+  end, valid_chat)
   chats = {}
   last_chat = nil
   stop_live()
