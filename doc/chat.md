@@ -72,6 +72,16 @@ failed, followed by the body verbatim. The delivered message replaces it once
 it appears in the history. An empty conversation shows
 `no messages with <with> in <city> yet`.
 
+### Rendering
+
+The timeline is filled by API writes, which fire no change event, so after
+each render gc-mail reports the finished write as a `TextChanged` for the
+timeline buffer while it is current: once at once, and once about 200 ms
+later, past renderer debounce windows. Reports made while typing in the
+compose box wait until insert mode is left, so renderers never read them as
+insert-mode changes. A renderer with a longer debounce can still miss a burst
+and leave the timeline raw until the next render.
+
 ### Scrolling
 
 The timeline follows the end while its view shows the last line with the

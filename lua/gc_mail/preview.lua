@@ -154,6 +154,22 @@ function M.attach(opts)
     vim.bo[pane_buf].modifiable = true
     vim.api.nvim_buf_set_lines(pane_buf, 0, -1, false, lines)
     vim.bo[pane_buf].modifiable = false
+    -- API writes fire no change event, so a renderer hooking TextChanged
+    -- would only ever see the empty pane from its open: report the finished
+    -- write, now and once the burst settles, while the pane itself is
+    -- current (Neovim fires TextChanged only for the current buffer, and
+    -- handlers act on it).
+    local buf = pane_buf
+    local function report_lines()
+      if vim.api.nvim_buf_is_valid(buf)
+        and vim.api.nvim_buf_get_name(buf):find('gc-mail://', 1, true) then
+        vim.api.nvim_buf_call(buf, function()
+          vim.api.nvim_exec_autocmds('TextChanged', { buffer = buf })
+        end)
+      end
+    end
+    report_lines()
+    vim.defer_fn(report_lines, 200)
     vim.bo[pane_buf].modified = false
     vim.api.nvim_buf_clear_namespace(pane_buf, ns, 0, -1)
     if dim then

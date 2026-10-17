@@ -1029,6 +1029,63 @@ function M.render(chat)
   vim.bo[chat.timeline_buf].modifiable = true
   vim.api.nvim_buf_set_lines(chat.timeline_buf, 0, -1, false, lines)
   vim.bo[chat.timeline_buf].modifiable = false
+  -- API writes fire no change event, so renderer hooks would only ever
+  -- see the empty buffer from the open: report the finished write, now
+  -- and once the burst settles, past renderer debounce windows.
+  local timeline_buf = chat.timeline_buf
+  local function report_lines()
+    if vim.api.nvim_buf_is_valid(timeline_buf)
+      and vim.api.nvim_buf_get_name(timeline_buf):find('gc-mail://', 1, true) then
+      -- Neovim fires TextChanged only for the current buffer, and handlers
+      -- act on it: reporting while another buffer is current would make an
+      -- `autocmd TextChanged * silent! update` write the user's file beside
+      -- the chat, so report while the timeline itself is current.
+      vim.api.nvim_buf_call(timeline_buf, function()
+        vim.api.nvim_exec_autocmds('TextChanged', { buffer = timeline_buf })
+      end)
+    end
+  end
+  -- A report fired while typing in the compose box reaches renderers as an
+  -- insert-mode change: markview clears the timeline and leaves it raw after
+  -- Esc until the next render. Hold insert-mode reports and flush them when
+  -- insert mode is left instead, settled re-fire included. ModeChanged (not
+  -- InsertLeave) also fires on leaving insert with <C-c>.
+  local function report_or_hold()
+    local ok, m = pcall(vim.fn.mode)
+    if ok and type(m) == 'string' and m:sub(1, 1) == 'i' then
+      if chat.held_report then
+        return
+      end
+      chat.held_report = true
+      local flushed = false
+      local function flush()
+        if flushed then
+          return
+        end
+        flushed = true
+        chat.held_report = false
+        report_lines()
+        vim.defer_fn(report_or_hold, 200)
+      end
+      local made = pcall(vim.api.nvim_create_autocmd, 'ModeChanged', {
+        group = chat.group,
+        pattern = 'i*:[^i]*',
+        once = true,
+        callback = flush,
+      })
+      if not made then
+        pcall(vim.api.nvim_create_autocmd, 'ModeChanged', {
+          pattern = 'i*:[^i]*',
+          once = true,
+          callback = flush,
+        })
+      end
+      return
+    end
+    report_lines()
+  end
+  report_or_hold()
+  vim.defer_fn(report_or_hold, 200)
 
   chat.lines = lines
   chat.message_blocks = blocks

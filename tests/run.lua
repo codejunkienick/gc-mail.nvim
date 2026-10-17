@@ -2661,6 +2661,56 @@ test('preview: the float shows the body under the cursor, follows it, and never 
   eq(preview_win(), nil, 'and its window is gone')
 end)
 
+test('preview: the pane reports shows as TextChanged, at once and once the burst settles', function()
+  two_messages()
+
+  -- The pane is filled by API writes, which fire no change event: a renderer
+  -- hooking TextChanged would only ever see the empty pane from its open.
+  -- Record every TextChanged with the current buffer when it fires.
+  local seen = {}
+  local group = vim.api.nvim_create_augroup('GcMailTestPreviewChanged', { clear = true })
+  vim.api.nvim_create_autocmd('TextChanged', {
+    group = group,
+    callback = function(args)
+      seen[#seen + 1] = {
+        buf = args.buf,
+        name = vim.api.nvim_buf_get_name(args.buf),
+        lines = #vim.api.nvim_buf_get_lines(args.buf, 0, -1, false),
+        current = vim.api.nvim_get_current_buf(),
+      }
+    end,
+  })
+
+  local win = mailbox().open()
+  settled(win, 2)
+  local pane_buf = nil
+  -- The at-once report: a firing that saw the body content.
+  wait('preview TextChanged with content', function()
+    for _, firing in ipairs(seen) do
+      if firing.lines > 1 and firing.name:find('gc-mail://preview', 1, true) then
+        pane_buf = firing.buf
+        return true
+      end
+    end
+    return false
+  end)
+  assert(pane_buf, 'no preview buffer reported content')
+  -- The settled report: one more firing lands past renderer debounce
+  -- windows, so a burst swallowed in flight still gets reported.
+  local settled_count = #seen
+  wait('settled preview TextChanged', function()
+    return #seen > settled_count
+  end, 2000)
+  vim.api.nvim_clear_autocmds({ group = group })
+  -- Neovim fires TextChanged only for the current buffer, and handlers act
+  -- on it: every pane firing must have found the pane current.
+  for _, firing in ipairs(seen) do
+    if firing.name:find('gc-mail://preview', 1, true) then
+      eq(firing.current, firing.buf, 'the pane is current during its TextChanged')
+    end
+  end
+end)
+
 test('preview: the buffer name, and no filetype with markdown = false', function()
   two_messages()
   gc_mail.config.markdown = false
@@ -4420,6 +4470,137 @@ test(':GcMailChat demo-city opens two windows to the right with expected geometr
     '---',
   }
   eq(vim.api.nvim_buf_get_lines(tl_buf, 0, -1, false), expected_lines, 'exact timeline markdown lines')
+end)
+
+test('chat timeline reports renders as TextChanged, at once and once the burst settles', function()
+  local fix = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
+  preload()
+
+  -- The timeline is filled by API writes, which fire no change event:
+  -- a renderer hooking TextChanged would only ever see the empty
+  -- buffer from the open. Record every TextChanged with the lines the
+  -- buffer holds when it fires.
+  local seen = {}
+  local group = vim.api.nvim_create_augroup('GcMailTestChangedOrder', { clear = true })
+  vim.api.nvim_create_autocmd('TextChanged', {
+    group = group,
+    callback = function(args)
+      seen[#seen + 1] = {
+        buf = args.buf,
+        name = vim.api.nvim_buf_get_name(args.buf),
+        lines = #vim.api.nvim_buf_get_lines(args.buf, 0, -1, false),
+        current = vim.api.nvim_get_current_buf(),
+      }
+    end,
+  })
+
+  vim.cmd('GcMailChat demo-city')
+  local tl_buf = nil
+  -- The at-once report: a firing that saw the rendered content.
+  wait('timeline TextChanged with content', function()
+    for _, firing in ipairs(seen) do
+      if firing.lines > 1 and firing.name:find('gc-mail://demo-city/chat/', 1, true) then
+        tl_buf = firing.buf
+        return true
+      end
+    end
+    return false
+  end)
+  assert(tl_buf, 'no timeline buffer reported content')
+  -- The settled report: one more firing lands past renderer debounce
+  -- windows, so a burst swallowed in flight still gets reported.
+  local settled = #seen
+  wait('settled timeline TextChanged', function()
+    return #seen > settled
+  end, 2000)
+  vim.api.nvim_clear_autocmds({ group = group })
+  -- Neovim fires TextChanged only for the current buffer, and handlers act
+  -- on it: every timeline firing must have found the timeline current, or an
+  -- `autocmd TextChanged * silent! update` would write the user's buffer.
+  for _, firing in ipairs(seen) do
+    if firing.name:find('gc-mail://demo-city/chat/', 1, true) then
+      eq(firing.current, firing.buf, 'the timeline is current during its TextChanged')
+    end
+  end
+end)
+
+test('chat timeline holds TextChanged in insert mode until insert is left', function()
+  local fix = conversation_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', fix)
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY, chat_mark_read = false })
+  preload()
+
+  -- Record every TextChanged with the current buffer when it fires.
+  local seen = {}
+  local group = vim.api.nvim_create_augroup('GcMailTestChangedInsert', { clear = true })
+  vim.api.nvim_create_autocmd('TextChanged', {
+    group = group,
+    callback = function(args)
+      seen[#seen + 1] = {
+        buf = args.buf,
+        name = vim.api.nvim_buf_get_name(args.buf),
+        lines = #vim.api.nvim_buf_get_lines(args.buf, 0, -1, false),
+        current = vim.api.nvim_get_current_buf(),
+      }
+    end,
+  })
+
+  local function timeline_firings()
+    local result = {}
+    for _, firing in ipairs(seen) do
+      if firing.name:find('gc-mail://demo-city/chat/', 1, true) then
+        result[#result + 1] = firing
+      end
+    end
+    return result
+  end
+
+  -- Render while typing in the compose box: stub mode() the way a renderer
+  -- checking the mode would read it.
+  local orig_mode = vim.fn.mode
+  vim.fn.mode = function()
+    return 'i'
+  end
+  local held = nil
+  local ok, err = pcall(function()
+    vim.cmd('GcMailChat demo-city')
+    -- Let the at-once and the 200 ms settled reports pass while still held.
+    vim.wait(600, function()
+      return false
+    end, 10)
+    held = timeline_firings()
+  end)
+  vim.fn.mode = orig_mode
+  if not ok then
+    error(err)
+  end
+  eq(#held, 0, 'no timeline TextChanged while in insert mode')
+
+  -- Leaving insert flushes the held report, settled re-fire included. Drive
+  -- the ModeChanged path: leaving insert with <C-c> fires ModeChanged but
+  -- not InsertLeave, and Esc fires both.
+  vim.api.nvim_exec_autocmds('ModeChanged', { pattern = 'i:n' })
+  local tl_buf = nil
+  wait('held timeline TextChanged after ModeChanged', function()
+    for _, firing in ipairs(timeline_firings()) do
+      if firing.lines > 1 then
+        tl_buf = firing.buf
+        return true
+      end
+    end
+    return false
+  end)
+  assert(tl_buf, 'no timeline buffer reported content after ModeChanged')
+  local settled_count = #timeline_firings()
+  wait('settled timeline TextChanged after ModeChanged', function()
+    return #timeline_firings() > settled_count
+  end, 2000)
+  vim.api.nvim_clear_autocmds({ group = group })
+  for _, firing in ipairs(timeline_firings()) do
+    eq(firing.current, firing.buf, 'the timeline is current during its TextChanged')
+  end
 end)
 
 -- A single window holding the session's only listed buffer: empty, unnamed
