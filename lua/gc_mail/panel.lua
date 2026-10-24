@@ -123,7 +123,7 @@ end
 local render
 
 local function start()
-  local this = { owner = { pending = 0 }, cities = {} }
+  local this = { owner = { pending = 0 }, cities = {}, cities_error = nil }
   live = this
   local events = require('gc_mail.events')
   events.subscribe('panel', function(city, ev)
@@ -154,6 +154,9 @@ local function start()
       return
     end
     add_cities(this, cities)
+    if this.cities_error ~= nil then
+      this.cities_error = nil
+    end
     if not sync then
       if waiting then
         this.owner.pending = this.owner.pending - 1
@@ -161,12 +164,17 @@ local function start()
       end
       render()
     end
-  end, function()
+  end, function(err)
     if waiting then
       this.owner.pending = this.owner.pending - 1
       waiting = false
     end
     if live == this then
+      -- A failed list changes no mailbox state and says nothing: the panel
+      -- keeps the reason and draws it while it has no cities.
+      if next(this.cities) == nil then
+        this.cities_error = err
+      end
       render()
     end
   end)
@@ -182,6 +190,15 @@ local function start()
       gc_mail().with_cities(function(cities)
         if live == this then
           add_cities(this, cities)
+          if this.cities_error ~= nil then
+            this.cities_error = nil
+            render()
+          end
+        end
+      end, function(err)
+        if live == this and next(this.cities) == nil then
+          this.cities_error = err
+          render()
         end
       end)
     end)
@@ -231,7 +248,13 @@ end
 
 local function draw(panel)
   local entries = mailbox.entries()
-  local lines = mailbox.lines(entries, os.time(), live ~= nil and live.owner.pending > 0)
+  local watch = live
+  local pending = watch ~= nil and watch.owner.pending > 0
+  local lines = mailbox.lines(entries, os.time(), pending)
+  if #entries == 0 and not pending and watch ~= nil and next(watch.cities) == nil
+      and watch.cities_error ~= nil then
+    lines = { ' ' .. gc_mail().one_line(watch.cities_error) .. ' ' }
+  end
   local row = vim.api.nvim_win_get_cursor(panel.win)[1]
   local was = panel.entries[row]
   vim.bo[panel.buf].modifiable = true
@@ -342,6 +365,27 @@ local function keys(panel)
       if live then
         refresh_all(live)
         mailbox.reload_history()
+        local this = live
+        -- The failure case only: while the failure reason is shown, R
+        -- retries the city list as well; otherwise R lists the inbox
+        -- again only, so a panel without a recorded failure spawns no
+        -- extra `gc cities` (a successful empty list is nothing to retry).
+        if next(this.cities) == nil and this.cities_error ~= nil then
+          gc_mail().with_cities(function(cities)
+            if live == this then
+              add_cities(this, cities)
+              if this.cities_error ~= nil then
+                this.cities_error = nil
+              end
+              render()
+            end
+          end, function(err)
+            if live == this and next(this.cities) == nil then
+              this.cities_error = err
+              render()
+            end
+          end)
+        end
         render()
       end
     end,

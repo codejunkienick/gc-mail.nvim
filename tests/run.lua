@@ -3098,6 +3098,131 @@ test('the panel lines equal the float\'s, and its keys act on the message under 
   eq(panel().running(), false, 'and stops the watch')
 end)
 
+test('the panel shows the city-list failure and clears it on the next list', function()
+  local function bare_dirs()
+    local base = ('%s/cities-%d'):format(scratch, run_id)
+    local cities = {}
+    for _, dir in ipairs({ 'demo-city', 'other city' }) do
+      vim.fn.mkdir(base .. '/' .. dir .. '/.gc', 'p')
+      cities[#cities + 1] = { name = dir == 'other city' and 'other-city' or dir, path = base .. '/' .. dir }
+    end
+    write(vim.env.FAKE_GC_CITIES, cities_record(cities))
+    write(cities[1].path .. '/.gc/events.jsonl', '')
+    write(cities[2].path .. '/.gc/events.jsonl', '')
+    return cities
+  end
+  -- R retries the city list: no cached list, the list fails, R lists the mail.
+  local cities = bare_dirs()
+  vim.env.FAKE_GC_CITIES_EXIT = '1'
+  inbox('demo-city', {})
+  inbox('other city', {})
+  buffer({ 'line one', 'line two' })
+  vim.api.nvim_win_set_cursor(0, { 2, 0 })
+  local origin = vim.api.nvim_get_current_win()
+  local win = panel().open()
+  wait('the failure reason is shown', function()
+    local ok, lines = pcall(rows, win)
+    return ok and #lines == 1 and lines[1]:find('gc cities failed', 1, true) ~= nil
+  end)
+  eq(rows(win), { ' gc cities failed (exit 1) ' }, 'the failure reason as its line')
+  eq(notes, {}, 'no notice for the panel case')
+  eq(mail_calls(), {}, 'no inbox while there are no cities')
+  eq(vim.api.nvim_get_current_win(), origin, 'current window unchanged')
+  eq(vim.api.nvim_win_get_cursor(origin), { 2, 0 }, 'cursor unchanged')
+  eq(vim.api.nvim_win_get_cursor(win), { 1, 0 }, 'panel cursor stays')
+  vim.env.FAKE_GC_CITIES_EXIT = nil
+  inbox('demo-city', { msg('ic-wisp-a1', { subject = 'first' }) })
+  inbox('other city', {})
+  panel_key(win, 'R')()
+  wait('R lists the city mail', function()
+    local ok, lines = pcall(rows, win)
+    return ok and #lines == 1 and lines[1]:find('first', 1, true) ~= nil
+  end)
+  eq(rows(win), { '  ● demo-city  mayor  first' }, 'the usual lines return, the reason is gone')
+  eq(notes, {}, 'still no notice')
+  eq(vim.api.nvim_get_current_win(), origin, 'window still unchanged')
+  eq(vim.api.nvim_win_get_cursor(origin), { 2, 0 }, 'cursor still unchanged')
+  -- R in a listed panel lists the inbox again but runs no city list.
+  do
+    local cities_calls = 0
+    local real_with = gc_mail.with_cities
+    gc_mail.with_cities = function(...)
+      cities_calls = cities_calls + 1
+      return real_with(...)
+    end
+    local before = #mail_calls()
+    panel_key(win, 'R')()
+    panel_key(win, 'R')()
+    panel_key(win, 'R')()
+    wait('R lists the inbox again', function()
+      return #mail_calls() > before
+    end)
+    vim.wait(300)
+    gc_mail.with_cities = real_with
+    eq(cities_calls, 0, 'R in a listed panel runs no gc cities')
+    eq(rows(win), { '  ● demo-city  mayor  first' }, 'the lines stay')
+    eq(notes, {}, 'still no notice after R')
+  end
+  -- R after a successful empty list runs no city list either: the list
+  -- loaded fine, so there is no failure to retry.
+  do
+    reset()
+    write(vim.env.FAKE_GC_CITIES, cities_record({}))
+    buffer({ 'line one', 'line two' })
+    vim.api.nvim_win_set_cursor(0, { 1, 0 })
+    local empty_origin = vim.api.nvim_get_current_win()
+    local empty_win = panel().open()
+    wait('the panel shows no mail', function()
+      local ok, lines = pcall(rows, empty_win)
+      return ok and #lines == 1 and lines[1] == ' no mail '
+    end)
+    eq(mail_calls(), {}, 'no inbox while there are no cities')
+    local cities_calls = 0
+    local real_with = gc_mail.with_cities
+    gc_mail.with_cities = function(...)
+      cities_calls = cities_calls + 1
+      return real_with(...)
+    end
+    panel_key(empty_win, 'R')()
+    panel_key(empty_win, 'R')()
+    panel_key(empty_win, 'R')()
+    vim.wait(300)
+    gc_mail.with_cities = real_with
+    eq(cities_calls, 0, 'R after a successful empty list runs no gc cities')
+    eq(rows(empty_win), { ' no mail ' }, 'the lines stay')
+    eq(notes, {}, 'still no notice after R')
+    eq(vim.api.nvim_get_current_win(), empty_origin, 'window still unchanged')
+  end
+  -- The fallback poll retries the city list on its own.
+  reset()
+  cities = bare_dirs()
+  vim.env.FAKE_GC_CITIES_EXIT = '1'
+  inbox('demo-city', {})
+  inbox('other city', {})
+  buffer({ 'line one', 'line two' })
+  vim.api.nvim_win_set_cursor(0, { 1, 0 })
+  origin = vim.api.nvim_get_current_win()
+  panel().configure({ poll_ms = 300 })
+  win = panel().open()
+  wait('the failure reason is shown again', function()
+    local ok, lines = pcall(rows, win)
+    return ok and #lines == 1 and lines[1]:find('gc cities failed', 1, true) ~= nil
+  end)
+  eq(rows(win), { ' gc cities failed (exit 1) ' }, 'the failure reason as its line')
+  eq(notes, {}, 'no notice for the panel case')
+  vim.env.FAKE_GC_CITIES_EXIT = nil
+  inbox('demo-city', { msg('ic-wisp-a1', { subject = 'first' }) })
+  inbox('other city', {})
+  wait('the poll lists the city mail', function()
+    local ok, lines = pcall(rows, win)
+    return ok and #lines == 1 and lines[1]:find('first', 1, true) ~= nil
+  end)
+  eq(rows(win), { '  ● demo-city  mayor  first' }, 'the usual lines return, the reason is gone')
+  eq(notes, {}, 'still no notice')
+  eq(vim.api.nvim_get_current_win(), origin, 'window still unchanged')
+  eq(vim.api.nvim_win_get_cursor(origin), { 1, 0 }, 'cursor still unchanged')
+end)
+
 test('a mail line in a city event log lists that city once after the debounce; other lines list nothing', function()
   local cities, log = city_dirs()
   write(log, event_line('order.completed', 'ic-wisp-a1'))

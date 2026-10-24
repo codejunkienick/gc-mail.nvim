@@ -6,7 +6,8 @@ queue fails, and how to fix it. The [README](../README.md) has the overview.
 ## `gc` is not on `PATH`
 
 When `gc` cannot run, every view but the panel reports the failing command
-once and keeps what it showed. The panel stays empty and says nothing. Put the
+once and keeps what it showed. The panel shows why the city list failed as
+its line while it has no cities, and says nothing elsewhere. Put the
 `gc` binary on `PATH`, then press `R` in the mailbox or the panel, or reopen
 the chat, to list again.
 
@@ -14,9 +15,12 @@ the chat, to list again.
 
 The picker, the chat, the conversations list and the search read the city
 list from `gc cities --json`. When the list is empty, they report
-`no cities are registered with gc`. The mailbox and the panel show
-` no mail ` and no notice. Register at least one Gas City with `gc`, then list
-again. There is no offline mode.
+`no cities are registered with gc`. The mailbox shows ` no mail ` and no
+notice; the panel shows ` no mail ` too once the list loads empty. When the
+list itself fails, the panel shows why as its line while it has no cities,
+with no notice, until a city list or an inbox answer gives it entries.
+Register at least one Gas City with `gc`, then list again. There is no
+offline mode.
 
 ## A send fails
 
