@@ -47,6 +47,9 @@ require('gc_mail').setup({
 
 - a `subject_prefix` or `subject_suffix` with a control character, or the two
   together over 40 characters;
+- a `state_dir` that is not a non-empty string;
+- a `retry_ms` that is not a list of numbers of at least 0 (an empty list is
+  accepted: the first failed send is then marked failed);
 - a `watch`, `preview`, `markdown` or `chat_mark_read` that is not `true` or
   `false`;
 - a `watch_resync_ms` under a minute;

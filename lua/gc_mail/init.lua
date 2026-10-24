@@ -538,10 +538,12 @@ function M.open_queue()
 end
 
 -- One rule per checked option, in the order refusals are reported:
--- { key, 'bool' }, { key, 'ms', min },
--- { key, 'whole', min [, unit] } and { key, 'keymap' }.
+-- { key, 'bool' }, { key, 'ms', min }, { key, 'nonempty_string' },
+-- { key, 'ms_list' }, { key, 'whole', min [, unit] } and { key, 'keymap' }.
 -- chat_send_keys and the subject label have their own rules.
 local option_rules = {
+  { 'state_dir', 'nonempty_string' },
+  { 'retry_ms', 'ms_list' },
   { 'watch', 'bool' },
   { 'watch_resync_ms', 'ms', 60000 },
   { 'markdown', 'bool' },
@@ -580,6 +582,21 @@ local function invalid_options(opts)
     if kind == 'bool' then
       if type(value) ~= 'boolean' then
         return key .. ' must be true or false'
+      end
+    elseif kind == 'nonempty_string' then
+      if type(value) ~= 'string' or value == '' then
+        return key .. ' must be a non-empty string'
+      end
+    elseif kind == 'ms_list' then
+      if type(value) ~= 'table' or not vim.islist(value) then
+        return key .. ' must be a list of numbers of at least 0'
+      end
+      for _, delay in ipairs(value) do
+        -- `not (delay >= 0)` also refuses NaN, for which every
+        -- comparison (including `delay < 0`) is false.
+        if type(delay) ~= 'number' or not (delay >= 0) then
+          return key .. ' must be a list of numbers of at least 0'
+        end
       end
     elseif kind == 'ms' then
       if type(value) ~= 'number' or value < min then
