@@ -19,17 +19,22 @@ city whose history is not cached once first, with one `gc bd list` (see
 load time, and the search code loads only when the command or the key runs.
 
 The results float opens at once with ` searching… ` and fills in. Its title
-is ` gc mail search "<text>": <CR> open  c chat  q close `. It shows one line
-per hit, newest first, as ` <city>  <from>→<to>  <subject>  <age> `, or
-` no mail matches ` when nothing matches. `you` stands for `human`, every part
-is one sanitized line, and the subject is cut at 60 characters. A city that
-fails to load is reported once as an error and listed as
-`cannot load the history`, and the other cities' hits still show.
+is ` gc mail search "<text>": <CR> open  c chat  R refresh  q close `. It
+shows one line per hit, newest first, as
+` <city>  <from>→<to>  <subject>  <age> `, or ` no mail matches ` when nothing
+matches. `you` stands for `human`, every part is one sanitized line, and the
+subject is cut at 60 characters. A city that fails to load is reported once
+as an error and listed as `cannot load the history`, and the other cities'
+hits still show. `R` loads every shown city's history once more (a load
+already in flight is joined, not run twice) and searches the same text again,
+so mail that arrived after the search appears without retyping it. The cursor
+stays on its row.
 
 | key | action |
 | --- | --- |
 | `<CR>` | close the results and show the hit in the message view, with the same layout and keys as an opened message; nothing is marked read, because the message may be closed |
 | `c` | open the chat with the hit's correspondent, its sender or, for a message from you, its recipient; says so when the chat is not installed |
+| `R` | reload every shown city's history and search the same text again |
 | `q`, `<Esc>` | close |
 
 The search runs no gc command beyond the history loads.

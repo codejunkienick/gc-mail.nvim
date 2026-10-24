@@ -203,11 +203,13 @@ opens the chat under the cursor; `q` and `<Esc>` close the list.
 prompts for the text), looks through the cached history of every city;
 a city not cached yet loads once first. Results open at once with a
 searching line and fill in, one line per hit, newest first, or a
-no-matches line.
+no-matches line. `R` loads every shown city's history again and searches
+the same text again.
 
 Search keys ~
         <CR> .............. show the hit as a message view (marks nothing) ~
         c ................. open the chat with the hit's correspondent ~
+        R ................. reload the history and search again ~
         q or <Esc> ....... close ~
 
 ==============================================================================

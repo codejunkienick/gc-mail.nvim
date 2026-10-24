@@ -8386,7 +8386,8 @@ test(':GcMailSearch lists the hits across cities newest first, one bd list per c
   vim.cmd('GcMailSearch markdown')
   local win = vim.api.nvim_get_current_win()
   eq(#floats(), 1, 'the float is open')
-  eq(vim.api.nvim_win_get_config(win).title[1][1], ' gc mail search "markdown": <CR> open  c chat  q close ', 'its title')
+  eq(vim.api.nvim_win_get_config(win).title[1][1], ' gc mail search "markdown": <CR> open  c chat  R refresh  q close ',
+    'its title')
   eq(lines_of(win), { ' searching… ' }, 'searching… at once')
   wait('the hits arrive', function()
     return #lines_of(win) == 5
@@ -8552,6 +8553,164 @@ test('a failed load for one city is said once and the other city\'s hits still l
   vim.api.nvim_feedkeys('q', 'x', false)
 end)
 
+test('R in the search results lists every city again and the new hit appears newest first', function()
+  local cities = search_fixture()
+  local win = search_open('markdown')
+  eq(lines_of(win), SEARCH_LINES, 'the first results')
+  local rdesc
+  for _, map in ipairs(vim.api.nvim_buf_get_keymap(vim.api.nvim_win_get_buf(win), 'n')) do
+    if map.lhs == 'R' then
+      rdesc = map.desc
+    end
+  end
+  eq(rdesc, 'gc-mail: refresh', 'R carries the refresh desc')
+  -- Mail arrives after the search: R finds it without retyping the text
+  local demo = vim.json.decode(read_file(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json'))
+  demo[#demo + 1] = found_mail('ic-wisp-s8', 'mayor', 'human', 'Markdown followup', 'fresh', 60)
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.json', vim.json.encode(demo))
+  vim.api.nvim_win_set_cursor(win, { 3, 0 })
+  vim.api.nvim_feedkeys('R', 'x', false)
+  wait('the reload answers', function()
+    return #calls_where({ verb = 'list', path = cities[1].path }) == 2
+      and #calls_where({ verb = 'list', path = cities[2].path }) == 2
+      and #lines_of(win) == 6
+  end)
+  vim.wait(200)
+  local lines = lines_of(win)
+  eq(lines[1], ' demo-city  mayor→you  Markdown followup  1m ', 'the new hit is newest first')
+  eq({ lines[2], lines[3], lines[4], lines[5], lines[6] }, SEARCH_LINES, 'the old hits follow in order')
+  eq(vim.api.nvim_win_get_cursor(win)[1], 3, 'the cursor stays on its row')
+  eq({ #calls_where({ verb = 'list', path = cities[1].path }), #calls_where({ verb = 'list', path = cities[2].path }) }, { 2, 2 },
+    'one fresh bd list call per city')
+  preload()
+  vim.api.nvim_feedkeys('q', 'x', false)
+  eq(#floats(), 0, 'q closes')
+end)
+
+test('R while a load is in flight joins it instead of starting a second call', function()
+  local cities = search_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.delay', '0.5\n')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.other city.delay', '0.5\n')
+  vim.cmd('GcMailSearch markdown')
+  local win = vim.api.nvim_get_current_win()
+  vim.api.nvim_feedkeys('R', 'x', false)
+  wait('the joined answers arrive', function()
+    return #lines_of(win) == 5
+  end)
+  eq(lines_of(win), SEARCH_LINES, 'both joined answers are searched')
+  vim.wait(200)
+  eq({ #calls_where({ verb = 'list', path = cities[1].path }), #calls_where({ verb = 'list', path = cities[2].path }) }, { 1, 1 },
+    'still one bd list call per city')
+  preload()
+  vim.api.nvim_feedkeys('q', 'x', false)
+  eq(#floats(), 0, 'q closes')
+end)
+
+test('R while a failing load is in flight says the failed city once', function()
+  local cities = search_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.delay', '0.5\n')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.other city.delay', '0.5\n')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.other city.exit', '1\n')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.other city.stderr', 'store unavailable\n')
+  vim.cmd('GcMailSearch markdown')
+  local win = vim.api.nvim_get_current_win()
+  -- The first loads are still answering when R runs: the reload must not add
+  -- a second waiter, or the failed city would be said twice.
+  wait('the first loads are in flight', function()
+    return #calls_where({ verb = 'list', path = cities[1].path }) == 1
+      and #calls_where({ verb = 'list', path = cities[2].path }) == 1
+  end)
+  vim.api.nvim_feedkeys('R', 'x', false)
+  wait('the joined answers arrive', function()
+    return #lines_of(win) == 4
+  end)
+  vim.wait(200)
+  eq(lines_of(win), { SEARCH_LINES[2], SEARCH_LINES[3], SEARCH_LINES[4], ' other-city  cannot load the history ' },
+    'the joined failure lists once')
+  eq({ #calls_where({ verb = 'list', path = cities[1].path }), #calls_where({ verb = 'list', path = cities[2].path }) }, { 1, 1 },
+    'still one bd list call per city')
+  local errors = vim.tbl_filter(function(note)
+    return note.level == vim.log.levels.ERROR
+  end, notes)
+  eq(#errors, 1, 'the failed city is said once')
+  eq(errors[1].message:find('store unavailable', 1, true) ~= nil, true, errors[1].message)
+  preload()
+  vim.api.nvim_feedkeys('q', 'x', false)
+  eq(#floats(), 0, 'q closes')
+end)
+
+test('closing the search results while an R reload is pending changes nothing on screen', function()
+  local cities = search_fixture()
+  local win = search_open('markdown')
+  eq(lines_of(win), SEARCH_LINES, 'the first results')
+  notes = {}
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.demo-city.delay', '0.3\n')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.other city.delay', '0.3\n')
+  -- One city fails: without the closed guard in load_city the late failure
+  -- would still say as an error after q closes the float.
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.other city.exit', '1\n')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.other city.stderr', 'store unavailable\n')
+  vim.api.nvim_feedkeys('R', 'x', false)
+  wait('the reload is in flight', function()
+    return #calls_where({ verb = 'list', path = cities[1].path }) == 2
+      and #calls_where({ verb = 'list', path = cities[2].path }) == 2
+  end)
+  vim.api.nvim_feedkeys('q', 'x', false)
+  eq(#floats(), 0, 'q closes')
+  vim.wait(1000)
+  eq(#floats(), 0, 'no late answer reopens the float')
+  eq(notes, {}, 'the late answers say nothing')
+end)
+
+test('R clears the cannot-load line once the city answers again', function()
+  local cities = search_fixture()
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.other city.exit', '1\n')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.other city.stderr', 'store unavailable\n')
+  local win = search_open('markdown', 4)
+  eq(lines_of(win)[4], ' other-city  cannot load the history ', 'the failed city says so')
+  vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/bd-list.other city.exit')
+  vim.fn.delete(vim.env.FAKE_GC_MAIL .. '/bd-list.other city.stderr')
+  notes = {}
+  vim.api.nvim_feedkeys('R', 'x', false)
+  wait('the reload answers', function()
+    return #calls_where({ verb = 'list', path = cities[1].path }) == 2
+      and #calls_where({ verb = 'list', path = cities[2].path }) == 2
+      and #lines_of(win) == 5
+  end)
+  vim.wait(200)
+  eq(lines_of(win), SEARCH_LINES, 'the recovered hits list and the cannot-load line is gone')
+  eq(notes, {}, 'the recovered reload says nothing')
+  preload()
+  vim.api.nvim_feedkeys('q', 'x', false)
+  eq(#floats(), 0, 'q closes')
+end)
+
+test('a failed reload keeps the old hits and says once', function()
+  local cities = search_fixture()
+  local win = search_open('markdown')
+  eq(lines_of(win), SEARCH_LINES, 'the first results')
+  notes = {}
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.other city.exit', '1\n')
+  write(vim.env.FAKE_GC_MAIL .. '/bd-list.other city.stderr', 'store unavailable\n')
+  vim.api.nvim_feedkeys('R', 'x', false)
+  wait('both reloads answer', function()
+    return #calls_where({ verb = 'list', path = cities[1].path }) == 2
+      and #calls_where({ verb = 'list', path = cities[2].path }) == 2
+  end)
+  vim.wait(300)
+  local lines = lines_of(win)
+  eq({ lines[1], lines[2], lines[3], lines[4], lines[5] }, SEARCH_LINES, 'the old hits stay')
+  eq(lines[6], ' other-city  cannot load the history ', 'the failed city says so')
+  local errors = vim.tbl_filter(function(note)
+    return note.level == vim.log.levels.ERROR
+  end, notes)
+  eq(#errors, 1, 'the failed reload is said once')
+  eq(errors[1].message:find('store unavailable', 1, true) ~= nil, true, errors[1].message)
+  preload()
+  vim.api.nvim_feedkeys('q', 'x', false)
+  eq(#floats(), 0, 'q closes')
+end)
+
 test('a city registered after the list was cached is searched too, and a failed refresh keeps the cached cities', function()
   local cities = search_fixture()
   local gc_mail = require('gc_mail')
@@ -8614,6 +8773,34 @@ test(':GcMail and :GcMailSearch say the same text when gc cities fails with a ca
   eq(search_warns[1].message, 'gc-mail: gc cities failed, showing the last list:\ngc cities failed (exit 1)', 'init text')
   vim.api.nvim_feedkeys('q', 'x', false)
   vim.env.FAKE_GC_CITIES_EXIT = nil
+end)
+
+test('R during the first cities refresh joins it and says the stale list once', function()
+  search_fixture()
+  vim.env.FAKE_GC_CITIES_EXIT = '1'
+  vim.env.FAKE_GC_CITIES_DELAY = '0.5'
+  notes = {}
+  vim.cmd('GcMailSearch markdown')
+  local win = vim.api.nvim_get_current_win()
+  -- The first gc cities refresh is still in flight: the reload must not join
+  -- it with a second waiter, or the stale list would be said twice.
+  vim.api.nvim_feedkeys('R', 'x', false)
+  wait('the stale refresh answers', function()
+    local warns = vim.tbl_filter(function(note)
+      return note.level == vim.log.levels.WARN and note.message:find('showing the last list', 1, true) ~= nil
+    end, notes)
+    return #warns >= 1 and #lines_of(win) == 5
+  end)
+  vim.wait(800)
+  local warns = vim.tbl_filter(function(note)
+    return note.level == vim.log.levels.WARN and note.message:find('showing the last list', 1, true) ~= nil
+  end, notes)
+  eq(#warns, 1, 'the joined refresh says the stale list once')
+  eq(lines_of(win), SEARCH_LINES, 'the cached cities are still searched')
+  vim.api.nvim_feedkeys('q', 'x', false)
+  eq(#floats(), 0, 'q closes')
+  vim.env.FAKE_GC_CITIES_EXIT = nil
+  vim.env.FAKE_GC_CITIES_DELAY = nil
 end)
 
 test('every mapping of the search results and of the s key carries a gc-mail: desc', function()
