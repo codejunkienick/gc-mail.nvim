@@ -459,6 +459,35 @@ test(':GcMail planner queues a record with to = planner and sends the exact argv
   eq(notes[#notes].message, 'gc-mail: sent to other-city planner', 'success notice')
 end)
 
+test(':GcMail with a bad recipient refuses before the picker opens', function()
+  gc_mail.setup({ state_dir = vim.fs.dirname(queue_dir), retry_ms = RETRY })
+  for _, to in ipairs({ '-x', string.rep('y', 101) }) do
+    notes = {}
+    local buf = buffer({ 'keep this line', 'and this' })
+    preload()
+    -- with_cities always refreshes, and the fake gc answers its cities
+    -- branch without recording FAKE_GC_LOG, so count refresh calls: a check
+    -- placed after with_cities would run gc cities here.
+    local refreshes = 0
+    local real_refresh = gc_mail.refresh
+    gc_mail.refresh = function(...)
+      refreshes = refreshes + 1
+      return real_refresh(...)
+    end
+    vim.bo[buf].modified = true
+    vim.cmd('GcMail ' .. to)
+    gc_mail.refresh = real_refresh
+    eq(refreshes, 0, 'no gc cities call for ' .. vim.inspect(to))
+    eq(#floats(), 0, 'no picker for ' .. vim.inspect(to))
+    eq(spool(), {}, 'nothing queued for ' .. vim.inspect(to))
+    eq(recorded_argv(), nil, 'no gc call for ' .. vim.inspect(to))
+    eq(vim.api.nvim_buf_get_lines(buf, 0, -1, false), { 'keep this line', 'and this' }, 'buffer lines unchanged')
+    eq(vim.bo[buf].modified, true, 'modified flag unchanged')
+    eq(notes[#notes].message, ('gc-mail: cannot mail to "%s": bad address'):format(to), 'refusal notice')
+    eq(notes[#notes].level, vim.log.levels.WARN, 'refusal is a warning')
+  end
+end)
+
 test('a record file with invalid to is listed as unreadable and never sent; M.send refuses bad to', function()
   gc_mail.queue.stop()
   local good = { version = 1, city = TWO[1], subject = 's', body = 'b', created = 1, attempts = 0, next_at = 0, failed = false }
@@ -3799,6 +3828,23 @@ test(':GcMail <to> in a reply buffer sends to sender and warns', function()
   eq(recorded_argv()[5], 'ic-wisp-a0', 'replies to message id')
   local warns = vim.tbl_filter(function(n)
     return n.level == vim.log.levels.WARN and n.message == 'gc-mail: this buffer replies to mayor; other ignored'
+  end, notes)
+  eq(#warns, 1, 'warning shown')
+end)
+
+test(':GcMail -x in a reply buffer still sends the reply and warns -x ignored', function()
+  notes = {}
+  local buf = buffer({ 'Re: test reply', '', 'reply body' })
+  vim.api.nvim_buf_set_var(buf, 'gc_mail_reply', {
+    city = TWO[1], id = 'ic-wisp-a0', to = 'mayor',
+  })
+  preload()
+  vim.cmd('GcMail -x')
+  wait('sent', drained)
+  eq(recorded_argv()[4], 'reply', 'verb is reply')
+  eq(recorded_argv()[5], 'ic-wisp-a0', 'replies to message id')
+  local warns = vim.tbl_filter(function(n)
+    return n.level == vim.log.levels.WARN and n.message == 'gc-mail: this buffer replies to mayor; -x ignored'
   end, notes)
   eq(#warns, 1, 'warning shown')
 end)

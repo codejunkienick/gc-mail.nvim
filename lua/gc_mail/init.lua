@@ -418,6 +418,9 @@ function M.open(opts)
     M.send(target, reply.city, reply)
     return nil
   end
+  if to and not queue.address_ok(to) then
+    return notify(('cannot mail to "%s": bad address'):format(to), vim.log.levels.WARN)
+  end
   local shown = nil
   local title = to and (' mail buffer to %s in '):format(to) or ' mail buffer to '
   local picker = float(title, { LOADING }, {

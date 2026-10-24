@@ -7,7 +7,9 @@ queue on disk. The [README](../README.md) has the overview.
 
 1. Write the message in any buffer. The first non-empty line, trimmed to 72
    characters, is the subject, and the whole buffer is the body.
-2. Press `<Space>mm` or run `:GcMail [to]`. The picker opens at once.
+2. Press `<Space>mm` or run `:GcMail [to]`. The picker opens at once,
+   unless `<to>` is a bad address: starting with `-`, holding a control
+   character, or over 100 bytes. A bad address warns and opens no picker.
    `<Space>mm` and `:GcMail` list `<city>  mayor` for each city in the cached
    `gc cities --json` list. `:GcMail <to>`, for example `:GcMail planner`,
    opens with the title `mail buffer to <to> in` and lists `<city>  <to>` per
