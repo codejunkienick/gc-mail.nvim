@@ -9438,6 +9438,49 @@ test('every mailbox mapping this view adds carries a gc-mail: desc, in normal an
   press('q')
 end)
 
+test('doc/gc-mail.txt generates clean helptags and every |link| in it resolves', function()
+  local doc = assert(read_file(root .. '/doc/gc-mail.txt'), 'doc/gc-mail.txt is missing')
+  -- A tags file may already exist in doc/ (e.g. from :helptags or a plugin
+  -- manager); remember it so the test only fails when it leaks a new one.
+  local tags_before = vim.fn.filereadable(root .. '/doc/tags')
+  -- Checks one vimdoc text the way :help sees it: :helptags must take it
+  -- without an error, each tag must be defined once, and every |link| must
+  -- name a defined tag. The text is copied into the scratch dir, so the
+  -- repository never gains a generated tags file.
+  local function check(text, name)
+    local dir = scratch .. '/help-' .. name
+    vim.fn.delete(dir, 'rf')
+    vim.fn.mkdir(dir, 'p')
+    write(dir .. '/gc-mail.txt', text)
+    local ok, err = pcall(vim.cmd, 'helptags ' .. vim.fn.fnameescape(dir))
+    if not ok then
+      return { 'helptags: ' .. (tostring(err):match('E%d+:.*') or tostring(err)) }
+    end
+    local seen, found = {}, {}
+    for line in (read_file(dir .. '/tags') or ''):gmatch('[^\n]+') do
+      local tag = line:match('^([^\t]+)')
+      if seen[tag] then
+        found[#found + 1] = 'duplicate tag ' .. tag
+      else
+        seen[tag] = true
+      end
+    end
+    for link in text:gmatch('|([^|%s]+)|') do
+      if not seen[link] then
+        found[#found + 1] = 'undefined tag ' .. link
+      end
+    end
+    return found
+  end
+  eq(check(doc, 'ok'), {}, 'help problems in doc/gc-mail.txt')
+  -- The check is not vacuous: a renamed link in a scratch copy is reported.
+  local from, to = doc:find('|gc-mail-commands|', 1, true)
+  assert(from, 'the link to rename is gone')
+  local renamed = doc:sub(1, from) .. 'gc-mail-no-such-tag' .. doc:sub(to)
+  eq(check(renamed, 'broken'), { 'undefined tag gc-mail-no-such-tag' }, 'a renamed link is not reported')
+  eq(vim.fn.filereadable(root .. '/doc/tags'), tags_before, 'a tags file leaked into doc/')
+end)
+
 local failed = 0
 for _, t in ipairs(tests) do
   reset()
