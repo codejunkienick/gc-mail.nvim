@@ -3,6 +3,14 @@
 This page covers what the plugin shows when `gc`, the city list or the send
 queue fails, and how to fix it. The [README](../README.md) has the overview.
 
+## `:checkhealth gc_mail`
+
+`:checkhealth gc_mail` reports in one place whether this machine can run the
+plugin: the Neovim version, that `gc` is on `PATH`, that the state directory
+and its queue directory can be used, and that the queue can lock. It runs no
+`gc` command, sends nothing and writes nothing, and each failed check says
+what to fix. The sections below have the details.
+
 ## `gc` is not on `PATH`
 
 When `gc` cannot run, every view but the panel reports the failing command
@@ -34,4 +42,4 @@ has the details.
 `:GcMailQueue` shows the error when the queue directory cannot be listed or a
 send's outcome cannot be written. The queue lives in `<state_dir>/queue/`, by
 default `~/.local/state/nvim/gc-mail/queue/`. Check that the directory is
-writable.
+readable and writable.

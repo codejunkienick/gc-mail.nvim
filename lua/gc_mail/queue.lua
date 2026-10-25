@@ -122,6 +122,12 @@ function M.configure(opts)
   worker.stopped = false
 end
 
+--- The configured queue directory (<state_dir>/queue after setup()), or nil
+--- before configure() gives it one.
+function M.dir()
+  return config.dir
+end
+
 local function first_lines(text, count)
   local lines = {}
   for line in (text or ''):gmatch('[^\n]+') do

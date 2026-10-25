@@ -9438,6 +9438,254 @@ test('every mailbox mapping this view adds carries a gc-mail: desc, in normal an
   press('q')
 end)
 
+test(':checkhealth gc_mail reports every fact with gc on PATH and runs nothing', function()
+  local health = require('gc_mail.health')
+  local state_dir = gc_mail.config.state_dir
+  local queue_dir = require('gc_mail.queue').dir()
+  assert(type(state_dir) == 'string' and state_dir ~= '', 'no state directory configured')
+  assert(type(queue_dir) == 'string' and queue_dir ~= '', 'no queue directory configured')
+  -- A late callback of an earlier test can log after reset() deleted the logs
+  -- (fresh() pumps the loop while it waits); the health check itself must add
+  -- nothing, so snapshot first. Nothing below yields to the event loop.
+  local argv_before, calls_before = recorded_argv(), mail_calls()
+  local facts = health.facts()
+  local levels = {}
+  for _, fact in ipairs(facts) do
+    levels[#levels + 1] = fact.level
+  end
+  eq(levels, { 'ok', 'ok', 'ok', 'ok', 'ok' }, 'health facts with gc on PATH')
+  eq(facts[2].text:find('PATH', 1, true) ~= nil, true, 'the gc fact names PATH')
+  eq(facts[3].text:find(state_dir, 1, true) ~= nil, true, 'the state fact names the state directory')
+  eq(facts[4].text:find(queue_dir, 1, true) ~= nil, true, 'the queue fact names the queue directory')
+  eq(recorded_argv(), argv_before, 'the health check ran gc')
+  eq(mail_calls(), calls_before, 'the health check ran a mail command')
+  eq(vim.fn.isdirectory(state_dir), 0, 'the health check created the state directory')
+  eq(vim.fn.isdirectory(queue_dir), 0, 'the health check created the queue directory')
+end)
+
+test(':checkhealth gc_mail without gc on PATH reports the fix and still runs nothing', function()
+  local path_before = vim.env.PATH
+  local empty = scratch .. '/no-gc'
+  vim.fn.mkdir(empty, 'p')
+  local facts, argv_before, calls_before
+  local ok, err = pcall(function()
+    vim.env.PATH = empty
+    -- As above: snapshot the logs, since an earlier test can log late.
+    argv_before, calls_before = recorded_argv(), mail_calls()
+    facts = require('gc_mail.health').facts()
+  end)
+  vim.env.PATH = path_before
+  assert(ok, err)
+  local levels = {}
+  for _, fact in ipairs(facts) do
+    levels[#levels + 1] = fact.level
+  end
+  eq(levels, { 'ok', 'error', 'ok', 'ok', 'ok' }, 'health facts without gc on PATH')
+  eq(facts[2].text:find('put the `gc` binary on `PATH`', 1, true) ~= nil, true, 'the gc fact names the fix')
+  eq(recorded_argv(), argv_before, 'the health check ran gc')
+  eq(mail_calls(), calls_before, 'the health check ran a mail command')
+  eq(vim.fn.isdirectory(gc_mail.config.state_dir), 0, 'the health check created the state directory')
+  eq(vim.fn.isdirectory(require('gc_mail.queue').dir()), 0, 'the health check created the queue directory')
+end)
+
+test(':checkhealth gc_mail reports every fact through vim.health', function()
+  local health_mod = vim.health
+  local names = { 'start', 'ok', 'warn', 'error', 'info',
+    'report_start', 'report_ok', 'report_warn', 'report_error', 'report_info' }
+  local saved, calls = {}, {}
+  for _, name in ipairs(names) do
+    saved[name] = health_mod[name]
+    health_mod[name] = function(text)
+      calls[#calls + 1] = { name = name, text = text }
+    end
+  end
+  local ok, err = pcall(function()
+    require('gc_mail.health').check()
+  end)
+  for _, name in ipairs(names) do
+    health_mod[name] = saved[name]
+  end
+  assert(ok, err)
+  local facts = require('gc_mail.health').facts()
+  eq(#calls, 1 + #facts, 'the report says each fact once')
+  -- The section opener and each fact's level, by the old or the new name,
+  -- whichever this Neovim has.
+  local function routed(level)
+    return saved[level] ~= nil and level or 'report_' .. level
+  end
+  eq(calls[1].name == 'start' or calls[1].name == 'report_start', true, 'the report opens a section')
+  eq(calls[1].text, 'gc-mail', 'the report opens the gc-mail section')
+  for i, fact in ipairs(facts) do
+    eq(calls[1 + i], { name = routed(fact.level), text = fact.text }, 'fact ' .. i .. ' is misrouted')
+  end
+end)
+
+test(':checkhealth gc_mail reports an unusable state directory with the fix', function()
+  local health = require('gc_mail.health')
+  local usable_queue = queue_dir
+  local function facts_for_state(state_dir)
+    gc_mail.setup({ state_dir = state_dir, retry_ms = RETRY, watch = false })
+    gc_mail.queue.configure({ dir = usable_queue, retry_ms = RETRY })
+    -- As above: snapshot the logs first, since an earlier test can log late.
+    local argv_before, calls_before = recorded_argv(), mail_calls()
+    local facts = health.facts()
+    eq(recorded_argv(), argv_before, 'the health check ran gc')
+    eq(mail_calls(), calls_before, 'the health check ran a mail command')
+    return facts
+  end
+  local function levels(facts)
+    local found = {}
+    for _, fact in ipairs(facts) do
+      found[#found + 1] = fact.level
+    end
+    return found
+  end
+  -- An existing directory that can be used.
+  local usable_dir = scratch .. '/health-usable'
+  vim.fn.mkdir(usable_dir, 'p')
+  local facts = facts_for_state(usable_dir)
+  eq(levels(facts), { 'ok', 'ok', 'ok', 'ok', 'ok' }, 'health facts for a usable state directory')
+  eq(facts[3].text:find(usable_dir, 1, true) ~= nil, true, 'the state fact names the state directory')
+  eq(facts[3].text:find('is usable', 1, true) ~= nil, true, 'the state fact reports usable')
+  -- A directory that cannot be written.
+  local locked_dir = scratch .. '/health-locked'
+  vim.fn.mkdir(locked_dir, 'p')
+  vim.fn.setfperm(locked_dir, 'r-xr-xr-x')
+  facts = facts_for_state(locked_dir)
+  vim.fn.setfperm(locked_dir, 'rwxr-xr-x')
+  eq(levels(facts), { 'ok', 'ok', 'error', 'ok', 'ok' }, 'health facts for a non-writable state directory')
+  eq(facts[3].text:find('is not writable; check that the directory is writable', 1, true) ~= nil, true,
+    'the state fact names the fix')
+  -- A file where the directory should be.
+  local blocking = scratch .. '/health-file'
+  write(blocking, 'x')
+  facts = facts_for_state(blocking)
+  eq(levels(facts), { 'ok', 'ok', 'error', 'ok', 'ok' }, 'health facts when state_dir is a file')
+  eq(facts[3].text:find('is not a directory; move it aside so it can be created', 1, true) ~= nil, true,
+    'the state fact names the fix')
+  -- A missing directory whose parent is a file.
+  facts = facts_for_state(blocking .. '/child')
+  eq(levels(facts), { 'ok', 'ok', 'error', 'ok', 'ok' }, 'health facts when a file is in the way')
+  eq(facts[3].text:find('is in the way; move it aside', 1, true) ~= nil, true, 'the state fact names the fix')
+  eq(vim.fn.isdirectory(blocking .. '/child'), 0, 'the health check created the state directory')
+  -- A missing directory under a non-writable directory.
+  local locked_parent = scratch .. '/health-locked-parent'
+  vim.fn.mkdir(locked_parent, 'p')
+  vim.fn.setfperm(locked_parent, 'r-xr-xr-x')
+  facts = facts_for_state(locked_parent .. '/child')
+  vim.fn.setfperm(locked_parent, 'rwxr-xr-x')
+  eq(levels(facts), { 'ok', 'ok', 'error', 'ok', 'ok' }, 'health facts when the parent is not writable')
+  eq(facts[3].text:find('is not writable; make it writable', 1, true) ~= nil, true, 'the state fact names the fix')
+  eq(vim.fn.isdirectory(locked_parent .. '/child'), 0, 'the health check created the state directory')
+  -- A directory that cannot be listed, though it can be written.
+  local unreadable = scratch .. '/health-unreadable'
+  vim.fn.mkdir(unreadable, 'p')
+  vim.fn.setfperm(unreadable, '-wx-wx-wx')
+  facts = facts_for_state(unreadable)
+  vim.fn.setfperm(unreadable, 'rwxr-xr-x')
+  eq(levels(facts), { 'ok', 'ok', 'error', 'ok', 'ok' }, 'health facts for an unreadable state directory')
+  eq(facts[3].text:find('is not readable; check that the directory is readable', 1, true) ~= nil, true,
+    'the state fact names the fix')
+  -- A directory without search permission, though it is readable and writable.
+  local unsearchable = scratch .. '/health-unsearchable'
+  vim.fn.mkdir(unsearchable, 'p')
+  vim.fn.setfperm(unsearchable, 'rw-------')
+  facts = facts_for_state(unsearchable)
+  vim.fn.setfperm(unsearchable, 'rwxr-xr-x')
+  eq(levels(facts), { 'ok', 'ok', 'error', 'ok', 'ok' }, 'health facts for an unsearchable state directory')
+  eq(facts[3].text:find('is not searchable; check that the directory is searchable', 1, true) ~= nil, true,
+    'the state fact names the fix')
+  -- A missing directory under a parent without search permission.
+  local unsearchable_parent = scratch .. '/health-unsearchable-parent'
+  vim.fn.mkdir(unsearchable_parent, 'p')
+  vim.fn.setfperm(unsearchable_parent, 'rw-------')
+  facts = facts_for_state(unsearchable_parent .. '/child')
+  vim.fn.setfperm(unsearchable_parent, 'rwxr-xr-x')
+  eq(levels(facts), { 'ok', 'ok', 'error', 'ok', 'ok' }, 'health facts when the parent is not searchable')
+  eq(facts[3].text:find('is not searchable; make it searchable', 1, true) ~= nil, true,
+    'the state fact names the fix')
+  eq(vim.fn.isdirectory(unsearchable_parent .. '/child'), 0, 'the health check created the state directory')
+end)
+
+test(':checkhealth gc_mail reports an unreadable queue directory with the fix', function()
+  local health = require('gc_mail.health')
+  local bad_queue = scratch .. '/health-queue-unreadable'
+  vim.fn.mkdir(bad_queue, 'p')
+  vim.fn.setfperm(bad_queue, '-wx-wx-wx')
+  gc_mail.queue.configure({ dir = bad_queue, retry_ms = RETRY })
+  local argv_before, calls_before = recorded_argv(), mail_calls()
+  local facts = health.facts()
+  vim.fn.setfperm(bad_queue, 'rwxr-xr-x')
+  local found = {}
+  for _, fact in ipairs(facts) do
+    found[#found + 1] = fact.level
+  end
+  eq(found, { 'ok', 'ok', 'ok', 'error', 'ok' }, 'health facts for an unreadable queue directory')
+  eq(facts[4].text:find(bad_queue, 1, true) ~= nil, true, 'the queue fact names the queue directory')
+  eq(facts[4].text:find('is not readable; check that the directory is readable', 1, true) ~= nil, true,
+    'the queue fact names the fix')
+  eq(recorded_argv(), argv_before, 'the health check ran gc')
+  eq(mail_calls(), calls_before, 'the health check ran a mail command')
+  -- An existing queue directory that can be used.
+  gc_mail.queue.configure({ dir = queue_dir, retry_ms = RETRY })
+  vim.fn.mkdir(queue_dir, 'p')
+  facts = health.facts()
+  found = {}
+  for _, fact in ipairs(facts) do
+    found[#found + 1] = fact.level
+  end
+  eq(found, { 'ok', 'ok', 'ok', 'ok', 'ok' }, 'health facts for a usable queue directory')
+  eq(facts[4].text:find('is usable', 1, true) ~= nil, true, 'the queue fact reports usable')
+end)
+
+test(':checkhealth gc_mail reports when LuaJIT FFI is unavailable', function()
+  local health = require('gc_mail.health')
+  local saved_loaded = package.loaded['ffi']
+  local saved_preload = package.preload['ffi']
+  package.loaded['ffi'] = nil
+  package.preload['ffi'] = function()
+    error('ffi unavailable')
+  end
+  local ok, facts = pcall(health.facts)
+  package.preload['ffi'] = saved_preload
+  package.loaded['ffi'] = saved_loaded
+  assert(ok, facts)
+  local found = {}
+  for _, fact in ipairs(facts) do
+    found[#found + 1] = fact.level
+  end
+  eq(found, { 'ok', 'ok', 'ok', 'ok', 'error' }, 'health facts without LuaJIT FFI')
+  eq(facts[5].text:find('no LuaJIT FFI', 1, true) ~= nil, true, 'the lock fact names the cause')
+  eq(facts[5].text:find('refuses to lock', 1, true) ~= nil, true, 'the lock fact names the consequence')
+end)
+
+test(':checkhealth gc_mail still reports on an older Neovim without loading the plugin modules', function()
+  package.loaded['gc_mail.health'] = nil
+  package.loaded['gc_mail'] = nil
+  package.loaded['gc_mail.queue'] = nil
+  local real_has = vim.fn.has
+  vim.fn.has = function(feature)
+    if feature == 'nvim-0.10' then
+      return 0
+    end
+    return real_has(feature)
+  end
+  local ok, facts = pcall(function()
+    return require('gc_mail.health').facts()
+  end)
+  vim.fn.has = real_has
+  assert(ok, facts)
+  local found = {}
+  for _, fact in ipairs(facts) do
+    found[#found + 1] = fact.level
+  end
+  eq(found, { 'error', 'ok' }, 'health facts on an older Neovim')
+  eq(facts[1].text:find('older than the required 0.10; upgrade Neovim', 1, true) ~= nil, true,
+    'the version fact names the fix')
+  eq(package.loaded['gc_mail'], nil, 'the health check loaded gc_mail')
+  eq(package.loaded['gc_mail.queue'], nil, 'the health check loaded the queue')
+end)
+
 test('doc/gc-mail.txt generates clean helptags and every |link| in it resolves', function()
   local doc = assert(read_file(root .. '/doc/gc-mail.txt'), 'doc/gc-mail.txt is missing')
   -- A tags file may already exist in doc/ (e.g. from :helptags or a plugin
