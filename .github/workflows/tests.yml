@@ -1,0 +1,21 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        neovim_version: ['v0.10.4', stable]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rhysd/action-setup-vim@v1
+        with:
+          neovim: true
+          version: ${{ matrix.neovim_version }}
+      - name: Run the headless suite
+        run: PATH="$PWD/tests/bin:$PATH" nvim --headless --clean -n -l tests/run.lua

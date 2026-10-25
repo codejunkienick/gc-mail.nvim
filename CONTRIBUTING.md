@@ -70,6 +70,8 @@ PATH="$PWD/tests/bin:$PATH" nvim --headless --clean -n -l tests/run.lua
 
 It prints one line per test and exits 0 when all pass.
 
+GitHub runs the same command on every push and pull request (`.github/workflows/tests.yml`), on Neovim 0.10 and current stable.
+
 The fake answers `gc cities` after a delay or not at all, and fails a send a
 given number of times. It answers each mailbox command (`inbox`, `count`,
 `read`, `mark-read`, `mark-unread`, `thread`, `archive`, `delete`) from a
