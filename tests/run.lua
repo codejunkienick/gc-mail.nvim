@@ -9665,7 +9665,7 @@ test(':checkhealth gc_mail still reports on an older Neovim without loading the 
   package.loaded['gc_mail.queue'] = nil
   local real_has = vim.fn.has
   vim.fn.has = function(feature)
-    if feature == 'nvim-0.10' then
+    if feature == 'nvim-0.11' then
       return 0
     end
     return real_has(feature)
@@ -9680,7 +9680,7 @@ test(':checkhealth gc_mail still reports on an older Neovim without loading the 
     found[#found + 1] = fact.level
   end
   eq(found, { 'error', 'ok' }, 'health facts on an older Neovim')
-  eq(facts[1].text:find('older than the required 0.10; upgrade Neovim', 1, true) ~= nil, true,
+  eq(facts[1].text:find('older than the required 0.11; upgrade Neovim', 1, true) ~= nil, true,
     'the version fact names the fix')
   eq(package.loaded['gc_mail'], nil, 'the health check loaded gc_mail')
   eq(package.loaded['gc_mail.queue'], nil, 'the health check loaded the queue')

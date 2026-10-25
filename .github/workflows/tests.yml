@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        neovim_version: ['v0.10.4', stable]
+        neovim_version: ['v0.11.7', stable]
     steps:
       - uses: actions/checkout@v4
       - uses: rhysd/action-setup-vim@v1

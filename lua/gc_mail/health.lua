@@ -60,18 +60,18 @@ end
 --- first and the plugin's own modules are required lazily only when it
 --- passes, so the report itself loads on an older Neovim: there the state,
 --- queue and lock facts are skipped, since the modules that compute them
---- need 0.10 to load.
+--- need 0.11 to load.
 function M.facts()
   local facts = {}
-  local supported = vim.fn.has('nvim-0.10') == 1
+  local supported = vim.fn.has('nvim-0.11') == 1
   if supported then
     local version = vim.version()
     local shown = ('%d.%d.%d'):format(version.major, version.minor, version.patch)
-    facts[#facts + 1] = { level = 'ok', text = ('Neovim %s meets the 0.10 minimum'):format(shown) }
+    facts[#facts + 1] = { level = 'ok', text = ('Neovim %s meets the 0.11 minimum'):format(shown) }
   else
     local version = vim.version()
     local shown = ('%d.%d.%d'):format(version.major, version.minor, version.patch)
-    facts[#facts + 1] = { level = 'error', text = ('Neovim %s is older than the required 0.10; upgrade Neovim to use gc-mail'):format(shown) }
+    facts[#facts + 1] = { level = 'error', text = ('Neovim %s is older than the required 0.11; upgrade Neovim to use gc-mail'):format(shown) }
   end
   if vim.fn.executable('gc') == 1 then
     facts[#facts + 1] = { level = 'ok', text = '`gc` is on PATH' }
@@ -109,7 +109,7 @@ end
 function M.check()
   local health = vim.health
   -- The ok/info/warn/error names are newer than report_ok() and friends:
-  -- take what this Neovim has, so the report works from 0.10 on.
+  -- take what this Neovim has, so the report works from 0.11 on.
   local start = health.start or health.report_start
   local say = {
     ok = health.ok or health.report_ok,

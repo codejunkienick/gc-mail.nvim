@@ -6,7 +6,7 @@ you, without leaving the editor. Gas City is a small world of named
 cities run by the `gc` command-line tool; everything addressed to you
 is addressed to `human`. Nothing runs when the plugin loads; every
 `gc` call runs in the background with an argument list, and the plugin
-needs no other plugins. Requires Neovim 0.10 or newer and the `gc`
+needs no other plugins. Requires Neovim 0.11 or newer and the `gc`
 CLI on `PATH`.
 
 CONTENTS                                        *gc-mail-contents*

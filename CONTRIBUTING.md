@@ -28,7 +28,7 @@ Every change follows these rules.
   current (I2).
 - The plugin's own views are scratch buffers named `gc-mail://...`.
 - The plugin has no plugin dependencies.
-- The plugin runs on Neovim 0.10 or newer.
+- The plugin runs on Neovim 0.11 or newer.
 - No tracked file contains an internal id or an absolute home path.
 
 ### The I1 and I2 invariants
@@ -70,7 +70,7 @@ PATH="$PWD/tests/bin:$PATH" nvim --headless --clean -n -l tests/run.lua
 
 It prints one line per test and exits 0 when all pass.
 
-GitHub runs the same command on every push and pull request (`.github/workflows/tests.yml`), on Neovim 0.10 and current stable.
+GitHub runs the same command on every push and pull request (`.github/workflows/tests.yml`), on Neovim 0.11 and current stable.
 
 The fake answers `gc cities` after a delay or not at all, and fails a send a
 given number of times. It answers each mailbox command (`inbox`, `count`,

@@ -26,7 +26,7 @@ is on the latest release.
 
 ## Requirements
 
-- Neovim 0.10 or newer.
+- Neovim 0.11 or newer.
 - The `gc` CLI on `PATH`, with at least one registered Gas City. There is no
   offline mode. [Troubleshooting](doc/troubleshooting.md) says what each view
   shows when `gc` or the city list is missing.
